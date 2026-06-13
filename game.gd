@@ -126,9 +126,42 @@ var trail_idx := 0
 var _shot_t := 0.0
 var _shot_done := false
 
+# ---- banner capture (recreate for_readme.png in-engine) ----
+var _banner := false
+var _banner_t := 0.0
+var _banner_done := false
+var _banner_list: Array = []
+# camera + per-character placement (tweak + re-render to match the reference)
+const BANNER_CAM_POS := Vector3(25.0, 4.0, -13.0)
+const BANNER_CAM_LOOK := Vector3(13.0, 2.4, -64.0)
+const BANNER_FOV := 45.0
+const BANNER_CHARS := [
+	{ "el": "fire", "pos": Vector3(20.5, 0, -42.0), "pose": 110.0 },   # furthest — LEFT/back
+	{ "el": "water", "pos": Vector3(24.0, 0, -33.0), "pose": 75.0 },   # middle
+	{ "el": "grass", "pos": Vector3(27.5, 0, -25.0), "pose": 40.0 },   # nearest — RIGHT/front
+]
+
+func _setup_banner() -> void:
+	_banner = true
+	ui.visible = false
+	for spec in BANNER_CHARS:
+		var ch := make_character("element", spec["el"])
+		ch.pos = spec["pos"]
+		ch.group.position = ch.pos
+		# face roughly toward the camera so the eyes/face read like the reference
+		ch.group.rotation.y = atan2(BANNER_CAM_POS.x - ch.pos.x, BANNER_CAM_POS.z - ch.pos.z)
+		ch.group.animate(spec["pose"], 11.0)
+		_banner_list.append({ "ch": ch, "pose": spec["pose"] })
+	camera.fov = BANNER_FOV
+	camera.position = BANNER_CAM_POS
+	camera.look_at(BANNER_CAM_LOOK, Vector3.UP)
+
 # ------------------------------------------------------------------- setup
 func _ready() -> void:
-	randomize()
+	if OS.get_cmdline_user_args().has("banner"):
+		seed(7)            # deterministic world layout while composing the banner
+	else:
+		randomize()
 	_build_environment()
 	world_root = Node3D.new()
 	add_child(world_root)
@@ -143,6 +176,9 @@ func _ready() -> void:
 	for c in caves:
 		radar_caves.append({ "x": c["x"], "z": c["z"], "r": c["r"], "fill": c["radarFill"] })
 	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
+	if OS.get_cmdline_user_args().has("banner"):
+		_setup_banner()
+		return
 	# debug: `-- autostart` skips the menu/countdown (handy for smoke-testing)
 	if OS.get_cmdline_user_args().has("autostart"):
 		var _el := "fire"
@@ -211,6 +247,16 @@ func _process(delta: float) -> void:
 	for fn in deco_anims:
 		fn.call(time_ms)
 	_update_wind_leaves(dt, time_ms)
+
+	if _banner:
+		_banner_t += delta
+		for e in _banner_list:
+			e["ch"].group.animate(e["pose"], 11.0)
+		if _banner_t > 1.6 and not _banner_done:
+			_banner_done = true
+			get_viewport().get_texture().get_image().save_png("res://_banner.png")
+			get_tree().quit()
+		return
 
 	if running:
 		_tick_timers(dt)

@@ -5,7 +5,9 @@ set in a twilight town of rock‑paper‑scissors elementals. Your twin is locke
 a zoo cage: find your key, free them, and walk them home to your cave — while your
 rival element and roaming CO₂ try to send you back to the start.
 
-![Fire, Water and Leaf — the three elemental characters](docs/characters.png)
+![Fire, Water and Leaf walking through the twilight riverside town](docs/banner.png)
+
+*An actual in‑engine frame — Fire, Water and Leaf strolling the riverbank at dusk.*
 
 ## Meet the characters
 
