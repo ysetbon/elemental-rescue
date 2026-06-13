@@ -26,6 +26,7 @@ static func build(game) -> void:
 	add_cave(-20, -100, "fire")
 	add_cave(30, 32, "water")
 	add_cave(-95, 100, "grass")
+	_build_clan_camps()
 	_build_neighborhoods()
 	_scatter()
 	_build_wind_leaves()
@@ -166,7 +167,9 @@ static func add_cave(cx: float, cz: float, owner: String) -> void:
 		rock.rotation = Vector3((randf() - 0.5) * 0.3, randf() * PI, (randf() - 0.5) * 0.3)
 		_add(rock)
 		_obstacle(x, z, 1.25)
-	var roof := MeshLib.cyl(r + 1.4, r + 0.5, 1.2, rock_mat, 14)
+	# semi-glass / semi-stone roof so a character sheltering inside stays visible from above
+	var roof_col: Color = MeshLib.rgb(CAVE_TINTS[owner]) if owner != "" else MeshLib.rgb(0xbcc0cc)
+	var roof := MeshLib.cyl(r + 1.4, r + 0.5, 1.2, MeshLib.glass_stone_mat(roof_col, 0.42), 14)
 	roof.position = Vector3(cx, 3.6, cz)
 	_add(roof)
 	var glow_color: Color = MeshLib.rgb(_game.ELEMENTS[owner]["color"]) if owner != "" else MeshLib.rgb(0xf0c060)
@@ -330,9 +333,10 @@ static func _build_zoo() -> void:
 	_add(path)
 	var bar_mat := MeshLib.lit_mat(MeshLib.rgb(0xa09eb0))
 	var builders: Array[Callable] = [MeshLib.build_flame, MeshLib.build_droplet, MeshLib.build_leaf, MeshLib.build_o2, MeshLib.build_co2]
+	var idents := ["fire", "water", "grass", "o2", "co2"]
 	for i in 5:
 		var a := float(i) / 5.0 * TAU + 0.5
-		_add_cage(zx + cos(a) * 9.0, zz + sin(a) * 9.0, builders[i], bar_mat)
+		_add_cage(zx + cos(a) * 9.0, zz + sin(a) * 9.0, builders[i], bar_mat, idents[i])
 	var bench_mat := MeshLib.lit_mat(MeshLib.rgb(0xc0a78f))
 	for a in [0.2, 2.3, 4.4]:
 		var bench := MeshLib.box(2.4, 0.5, 0.8, bench_mat)
@@ -340,29 +344,103 @@ static func _build_zoo() -> void:
 		bench.rotation.y = -a
 		_add(bench)
 
-static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Material) -> void:
+static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Material, ident: String = "") -> void:
 	var r := 2.3
+	# bars + ring + captive live in one group so releasing the twin can hide them.
+	# semi-glass / semi-stone bars + a translucent domed lid so the captive stays
+	# visible even when the camera looks straight down from the ceiling.
+	var gs := MeshLib.glass_stone_mat(MeshLib.rgb(0xa6b0c4), 0.5)
+	var content := Node3D.new()
+	_root.add_child(content)
 	for i in 10:
 		var a := float(i) / 10.0 * TAU
-		var bar := MeshLib.cyl(0.07, 0.07, 3.2, bar_mat, 5)
+		var bar := MeshLib.cyl(0.07, 0.07, 3.2, gs, 5)
 		bar.position = Vector3(cx + cos(a) * r, 1.6, cz + sin(a) * r)
-		_add(bar)
+		content.add_child(bar)
 	var ring := TorusMesh.new()
 	ring.inner_radius = r - 0.09; ring.outer_radius = r + 0.09
-	var top_ring := MeshLib.mi(ring, bar_mat)
+	var top_ring := MeshLib.mi(ring, gs)
 	top_ring.position = Vector3(cx, 3.2, cz)
-	_add(top_ring)
+	content.add_child(top_ring)
+	var lid := MeshLib.sphere(r + 0.1, gs, 14, 7)
+	lid.scale = Vector3(1, 0.45, 1)
+	lid.position = Vector3(cx, 3.2, cz)
+	content.add_child(lid)
 	var base := MeshLib.cyl(r + 0.3, r + 0.3, 0.18, MeshLib.lit_mat(MeshLib.rgb(0xccc9d6)), 18)
 	base.position = Vector3(cx, 0.09, cz)
 	_add(base)
 	var mini: CharVisual = build_fn.call()
 	mini.scale = Vector3.ONE * 0.55
 	mini.position = Vector3(cx, 0.15, cz)
-	_add(mini)
+	content.add_child(mini)
 	_game.deco_anims.append(func(t: float) -> void:
 		mini.animate(t, 0.0)
 		mini.rotation.y = sin(t * 0.0007 + cx) * 0.6)
 	_obstacle(cx, cz, r + 0.2)
+	var cage := { "x": cx, "z": cz, "r": r, "ident": ident, "node": content }
+	_game.cages.append(cage)
+	if ident == "fire" or ident == "water" or ident == "grass":
+		_game.cage_by_el[ident] = cage
+
+# Hide a cage's bars + captive when the twin is freed.
+static func open_cage(cage: Dictionary) -> void:
+	var node = cage.get("node")
+	if node and is_instance_valid(node):
+		node.visible = false
+
+# Re-lock every cage (and restore its collision) for a fresh round.
+static func reset_cages(game) -> void:
+	for cage in game.cages:
+		var node = cage.get("node")
+		if node and is_instance_valid(node):
+			node.visible = true
+		var present: bool = game.obstacles.any(func(o): return absf(o["x"] - cage["x"]) < 0.01 and absf(o["z"] - cage["z"]) < 0.01)
+		if not present:
+			game.obstacles.append({ "x": cage["x"], "z": cage["z"], "r": cage["r"] + 0.2 })
+
+# ----------------------------------------------------- clan camps (per element)
+static func _build_clan_camps() -> void:
+	for el in ["fire", "water", "grass"]:
+		var c: Dictionary = _game.cave_by_owner[el]
+		var cx: float = c["x"]; var cz: float = c["z"]
+		var dir := Vector2(-cx, -cz).normalized()   # point in toward the map centre
+		var perp := Vector2(-dir.y, dir.x)
+		var hx := cx + dir.x * 11.0 + perp.x * 5.0
+		var hz := cz + dir.y * 11.0 + perp.y * 5.0
+		var px := cx + dir.x * 11.0 - perp.x * 5.0
+		var pz := cz + dir.y * 11.0 - perp.y * 5.0
+		var col: Color = MeshLib.rgb(_game.ELEMENTS[el]["color"])
+		_build_clan_hall(hx, hz, col)
+		_build_training_pad(px, pz, col)
+		_game.clan_hall_by_owner[el] = { "x": hx, "z": hz, "r": 3.2 }
+		_game.train_pad_by_owner[el] = { "x": px, "z": pz, "r": 2.6 }
+
+static func _build_clan_hall(x: float, z: float, col: Color) -> void:
+	var pad := MeshLib.cyl(3.2, 3.2, 0.16, MeshLib.lit_mat(MeshLib.rgb(0xe8e2d2)), 20)
+	pad.position = Vector3(x, 0.08, z); _add(pad)
+	var glow := MeshLib.disc(3.0, MeshLib.unlit_mat(col, 0.16), 22)
+	glow.position = Vector3(x, 0.1, z); _add(glow)
+	var post_mat := MeshLib.lit_mat(MeshLib.rgb(0x97816a))
+	for i in 4:
+		var a := i * PI / 2.0 + PI / 4.0
+		var post := MeshLib.cyl(0.12, 0.12, 3.0, post_mat, 6)
+		post.position = Vector3(x + cos(a) * 2.6, 1.5, z + sin(a) * 2.6); _add(post)
+	# translucent canopy so the top-down command view can see the members beneath it
+	var roof := MeshLib.cyl(3.1, 3.4, 0.4, MeshLib.glass_stone_mat(col, 0.5), 16)
+	roof.position = Vector3(x, 3.1, z); _add(roof)
+	var pole := MeshLib.cyl(0.1, 0.1, 4.4, post_mat, 6); pole.position = Vector3(x, 2.2, z); _add(pole)
+	var flag := MeshLib.box(1.4, 0.9, 0.08, MeshLib.unlit_mat(col)); flag.position = Vector3(x + 0.8, 3.9, z); _add(flag)
+
+static func _build_training_pad(x: float, z: float, col: Color) -> void:
+	var pad := MeshLib.cyl(2.6, 2.6, 0.16, MeshLib.lit_mat(MeshLib.rgb(0xd9cfc0)), 18)
+	pad.position = Vector3(x, 0.08, z); _add(pad)
+	var glow := MeshLib.disc(2.4, MeshLib.unlit_mat(col, 0.14), 20)
+	glow.position = Vector3(x, 0.1, z); _add(glow)
+	var totem := MeshLib.cyl(0.34, 0.4, 2.4, MeshLib.lit_mat(col), 10)
+	totem.position = Vector3(x, 1.2, z); _add(totem)
+	var top := MeshLib.sphere(0.5, MeshLib.unlit_mat(col, 0.9), 12, 8)
+	top.position = Vector3(x, 2.6, z); _add(top)
+	_obstacle(x, z, 0.5)
 
 # ------------------------------------------------------------- neighborhoods
 static func _build_neighborhoods() -> void:
@@ -392,6 +470,12 @@ static func _scatter() -> void:
 		{ "x": -66.0, "z": -60.0, "r": 40.0 },
 		{ "x": 93.0, "z": 19.0, "r": 26.0 },
 	]
+	for el in _game.clan_hall_by_owner:
+		var h: Dictionary = _game.clan_hall_by_owner[el]
+		keepouts.append({ "x": h["x"], "z": h["z"], "r": 8.0 })
+	for el in _game.train_pad_by_owner:
+		var p: Dictionary = _game.train_pad_by_owner[el]
+		keepouts.append({ "x": p["x"], "z": p["z"], "r": 7.0 })
 	var spots: Array = []
 	for i in 34:
 		var x := 0.0; var z := 0.0; var ok := false; var tries := 0

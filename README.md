@@ -1,9 +1,9 @@
-# Elemental Tag
+# Elemental Rescue
 
-A playful 3D game of **rock‑paper‑scissors tag** built in [Godot 4.6](https://godotengine.org/).
-Three little elementals chase each other across a twilight town while CO₂ hunts
-everyone and O₂ molecules hand out points. Whoever has the most points when the
-clock runs out wins.
+A playful 3D **rescue adventure** built in [Godot 4.6](https://godotengine.org/),
+set in a twilight town of rock‑paper‑scissors elementals. Your twin is locked in
+a zoo cage: find your key, free them, and walk them home to your cave — while your
+rival element and roaming CO₂ try to send you back to the start.
 
 ![Fire, Water and Leaf — the three elemental characters](docs/characters.png)
 
@@ -20,17 +20,61 @@ swing when walking and stand still when idle.
 
 ## How to play
 
-- **Pick an element** from the menu, then survive a 4‑minute round (240s).
-- **Catch your prey** — touch the element you beat for **+15 points**.
-- **Flee your predator** — get tagged by the element that beats you and you're out.
-- **Collect O₂ molecules** scattered around the map for **+5 points** each.
-- **Dodge CO₂** — these dark molecules hunt every element on sight.
-- **Duck into your home cave** to be safe, but you can only hide there for 30s at
-  a time before you're booted back out.
-- Cross the **river** using the bridges — the elements move at different speeds on
-  different terrain.
+The goal is to **rescue your caged twin** — there is no clock and you can't be
+permanently knocked out, so take your time:
 
-Most points when time runs out takes the win.
+1. **Find your key.** Each element has its own **silvery, colour‑matched key**
+   (silvery‑red Fire, silvery‑blue Water, silvery‑green Leaf) — and you can only
+   pick up **your own**. Yours is marked in your element's colour on the radar;
+   walk over it and it magnets to your back and trails you.
+2. **Free your twin.** Carry the key to *your* element's cage in the zoo and your
+   twin pops out and starts following you.
+3. **Escort them home.** Lead your twin into your home cave to **win**. If you die
+   mid‑escort they'll wait where they are until you come back.
+
+Along the way:
+
+- **Hearts, not lives.** A touch from your predator (the element that beats you) or
+  from CO₂ costs **one heart**. At zero hearts you're sent back to your home cave,
+  refilled — never eliminated.
+- **CO₂ chemistry.** A CO₂ is a carbon with two oxygens. When one **tags you it spends
+  an oxygen** and drops to harmless **CO** (it visibly loses an oxygen and greys out on
+  the radar). A grey CO can't hurt you — it roams hunting an **O₂ to grab an oxygen** and
+  turn back into dangerous CO₂ (or it recharges on its own after a while). O₂ molecules
+  respawn, so there's always oxygen in play.
+- **Counter‑slow.** Whoever lands a hit on you *or* a clan member is slowed for 5s —
+  your window to get away.
+- **Self‑training.** Stand on the glowing **totem** beside your cave (with no enemy
+  near) to earn an **extra heart**, up to four. Training is kept even after you're
+  sent home.
+- **Clan hall.** Stand in your **clan hall** for ~20s to summon a **clan of 10** of
+  your own element. The moment they appear the camera lifts into a **top‑down command
+  view** (looking down through the see‑through roof) and they gather under it. **Click**
+  members to select them (multi‑select — they turn grey), then pick one of three tasks
+  from the buttons at the top of the screen (the icons are little renders of the real
+  figures). Once every member is assigned (or you walk off), the camera returns to normal:
+  - **Protect me** — hunt down your predator and any black CO₂ that threatens you.
+  - **Attack** — chase and tag the element you eat.
+  - **Fetch key** — find your key and carry it back to you.
+
+  Re‑select any time to re‑assign. (Left‑click selects; left‑*drag* still looks around.)
+- **Sip O₂ for sprint.** Elements no longer need oxygen — but each white **O₂** you
+  walk over **supercharges your sprint**: a bigger effective stamina tank (drains
+  slower, refills faster) plus an instant gulp. You're now racing the grey CO for the
+  same molecules. The bar stays the same size; it just lasts longer.
+- **River & bridges.** The river slows every element except Water; cross on the
+  three bridges.
+- **Black stones (Pac‑Man power‑up).** Scattered dark stones (shown on the radar)
+  turn you into an **energized black figure** for 15s and run a little faster. While
+  disguised the tables turn: your **predator panics and flees, and you can eat it**
+  on contact, and the CO₂ treat you as one of their own. The catch — the **O₂ see
+  through it and hunt you**, and a bite ends the disguise and costs a heart. Each
+  stone reappears elsewhere a while after it's used.
+
+The rival elements, CO₂ and O₂ all run a **context‑steering brain**: chasers aim at
+where you're *going* (not where you are) to cut you off, fleers slip toward open
+ground instead of trapping themselves in a corner, and the CO₂ pack spreads out to
+cover more of the map.
 
 ## Controls
 

@@ -63,6 +63,22 @@ static func lit_mat(c: Color) -> StandardMaterial3D:
 static func ink() -> StandardMaterial3D:
 	return unlit_mat(rgb(0x17151f))
 
+# Half stone, half glass: a tinted, lightly translucent, slightly glossy stone so
+# you can see a captive/character inside or beneath it from above.
+static func glass_stone_mat(c: Color, alpha: float = 0.5) -> StandardMaterial3D:
+	var key := "gs_%s_%.2f" % [c.to_html(), alpha]
+	if _mat_cache.has(key):
+		return _mat_cache[key]
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(c.r, c.g, c.b, alpha)
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.roughness = 0.45
+	m.metallic = 0.1
+	m.metallic_specular = 0.6
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED   # see both faces of the dome from inside or above
+	_mat_cache[key] = m
+	return m
+
 # ----------------------------------------------------------- primitive helpers
 static func mi(mesh: Mesh, mat: Material) -> MeshInstance3D:
 	var n := MeshInstance3D.new()
@@ -600,37 +616,63 @@ static func build_leaf() -> CharVisual:
 		"legs": { "hipY": 0.68, "hipZ": 0.18, "gap": 0.30, "thigh": LEG_THIGH, "shin": LEG_SHIN },
 	})
 
+# A little key (bow ring + shaft + two teeth) in silvery metal tinted by `base`.
+static func key_node(base: Color) -> Node3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = base.lerp(Color(0.9, 0.9, 0.93), 0.22)
+	mat.metallic = 0.9
+	mat.metallic_specular = 0.95
+	mat.roughness = 0.22
+	mat.emission_enabled = true
+	mat.emission = base
+	mat.emission_energy_multiplier = 0.3
+	var n := Node3D.new()
+	var ring := TorusMesh.new()
+	ring.inner_radius = 0.22; ring.outer_radius = 0.42
+	var bow := mi(ring, mat)
+	bow.rotation.x = PI / 2.0; bow.position.y = 0.5
+	n.add_child(bow)
+	var shaft := cyl(0.07, 0.07, 1.1, mat, 8)
+	shaft.position.y = -0.2
+	n.add_child(shaft)
+	for zt in [-0.62, -0.82]:
+		var tooth := box(0.34, 0.1, 0.1, mat)
+		tooth.position = Vector3(0.16, zt, 0)
+		n.add_child(tooth)
+	return n
+
 static func build_o2() -> CharVisual:
+	# a single oxygen atom (one white sphere) — grab one and a CO becomes CO₂
 	var g := CharVisual.new()
 	var body := Node3D.new()
 	g.add_child(body)
 	var mat := lit_mat(rgb(0xf7f8fc))
-	var a := sphere(0.66, mat, 22, 14); a.position = Vector3(0.5, 1.5, 0)
-	var b := sphere(0.66, mat, 22, 14); b.position = Vector3(-0.5, 1.5, 0)
-	var bond := cyl(0.2, 0.2, 1.0, lit_mat(rgb(0xe6e9f1)), 14)
-	bond.rotation.z = PI / 2.0; bond.position.y = 1.5
-	body.add_child(a); body.add_child(b); body.add_child(bond)
-	add_face(body, 1.6, 0.6, { "scale": 0.85, "gap": 0.33 })
+	var s := sphere(0.82, mat, 24, 16); s.position.y = 1.5
+	body.add_child(s)
+	add_face(body, 1.62, 0.78, { "scale": 0.92, "gap": 0.32 })
 	g.body = body
-	add_limbs(g, { "hipY": 0.85, "gap": 0.34, "armY": 1.05, "armX": 0.72, "armLen": 0.5 })
+	add_limbs(g, { "hipY": 0.9, "gap": 0.3, "armY": 1.0, "armX": 0.66, "armLen": 0.48 })
 	return g
 
 static func build_co2() -> CharVisual:
 	var g := CharVisual.new()
 	var body := Node3D.new()
 	g.add_child(body)
-	var c_mat := lit_mat(rgb(0x3f3b4b))
-	var o_mat := lit_mat(rgb(0x5d5972))
+	var c_mat := lit_mat(rgb(0x3f3b4b))            # carbon — black centre (eyes + legs live here)
+	var o_mat := lit_mat(rgb(0xf2f4fa))            # oxygen — white, to read as O=C=O
 	var c := sphere(0.78, c_mat, 22, 14); c.position.y = 1.5
 	var o1 := sphere(0.55, o_mat, 22, 14); o1.position = Vector3(1.12, 1.5, 0)
 	var o2 := sphere(0.55, o_mat, 22, 14); o2.position = Vector3(-1.12, 1.5, 0)
-	var bond_mat := lit_mat(rgb(0x6f6b84))
+	var bond_mat := lit_mat(rgb(0xb9b7c6))
 	var b1 := cyl(0.14, 0.14, 1.15, bond_mat, 14); b1.rotation.z = PI / 2.0; b1.position = Vector3(0.58, 1.5, 0)
 	var b2 := cyl(0.14, 0.14, 1.15, bond_mat, 14); b2.rotation.z = PI / 2.0; b2.position = Vector3(-0.58, 1.5, 0)
 	body.add_child(c); body.add_child(o1); body.add_child(o2); body.add_child(b1); body.add_child(b2)
 	add_face(body, 1.64, 0.72, { "scale": 0.95, "gap": 0.33, "pupil": rgb(0xff5a5a) })
 	g.body = body
 	add_limbs(g, { "hipY": 0.85, "gap": 0.34, "armY": 1.0, "armX": 0.7, "armLen": 0.5 })
+	# expose one oxygen + its bond so the game can drop it (CO₂ → CO) and re-add it
+	g.set_meta("spare_o", o2)
+	g.set_meta("spare_bond", b2)
 	return g
 
 # ------------------------------------------------------- generated textures
