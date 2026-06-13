@@ -1,3 +1,8 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# temp banner/studio captures
+studio_banner.png
+_banner.png
+_shot.png
