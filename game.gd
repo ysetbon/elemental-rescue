@@ -52,7 +52,7 @@ const CO_REVERT_TIME := 15.0  # a spent CO₂ (now CO, gray, harmless) auto-rech
 const O2_RESPAWN := 10.0      # a consumed O₂ molecule reappears elsewhere after this
 const O2_CHARGE_CAP := 8      # how many O₂ sips the player can bank for sprint stamina
 
-# --- lighting, tuned to match elements_graphics.png (warm key, cool fill, pink haze) ---
+# --- lighting, tuned to match docs/elements_graphics.png (warm key, cool fill, pink haze) ---
 const AMBIENT_COLOR := 0xc6d0ea
 const AMBIENT_ENERGY := 0.70
 const SUN_COLOR := 0xffeccb
@@ -126,7 +126,7 @@ var trail_idx := 0
 var _shot_t := 0.0
 var _shot_done := false
 
-# ---- banner capture (recreate for_readme.png in-engine) ----
+# ---- banner capture (recreate docs/for_readme.png in-engine) ----
 var _banner := false
 var _banner_t := 0.0
 var _banner_done := false
@@ -156,7 +156,7 @@ func _setup_banner() -> void:
 	camera.position = BANNER_CAM_POS
 	camera.look_at(BANNER_CAM_LOOK, Vector3.UP)
 
-# A hand-placed riverside scene that recreates for_readme.png exactly.
+# A hand-placed riverside scene that recreates docs/for_readme.png exactly.
 func _build_banner_world() -> void:
 	var gp := PlaneMesh.new(); gp.size = Vector2(600, 600)
 	world_root.add_child(MeshLib.mi(gp, MeshLib.lit_mat(MeshLib.rgb(0xdce7f4))))

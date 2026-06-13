@@ -597,13 +597,13 @@ const LEG_THIGH := 0.336    # 0.42 * 0.8
 const LEG_SHIN := 0.336     # 0.42 * 0.8
 
 static func build_droplet() -> CharVisual:
-	return build_glb_legged("res://Water3.glb", {
+	return build_glb_legged("res://models/Water3.glb", {
 		"scale": 1.43, "idle": "sway",
 		"legs": { "hipY": 0.68, "gap": 0.36, "thigh": LEG_THIGH, "shin": LEG_SHIN },
 	})
 
 static func build_flame() -> CharVisual:
-	return build_glb_legged("res://Fire3.glb", {
+	return build_glb_legged("res://models/Fire3.glb", {
 		"scale": 1.43, "idle": "flicker",
 		"legs": { "hipY": 0.68, "gap": 0.30, "thigh": LEG_THIGH, "shin": LEG_SHIN },
 	})
@@ -611,7 +611,7 @@ static func build_flame() -> CharVisual:
 static func build_leaf() -> CharVisual:
 	# legs nudged forward (toward the face) so they emerge from the higher front
 	# of the leaf and read as sitting a bit higher when seen head-on.
-	return build_glb_legged("res://Leaf3.glb", {
+	return build_glb_legged("res://models/Leaf3.glb", {
 		"scale": 1.43, "idle": "sway",
 		"legs": { "hipY": 0.68, "hipZ": 0.18, "gap": 0.30, "thigh": LEG_THIGH, "shin": LEG_SHIN },
 	})

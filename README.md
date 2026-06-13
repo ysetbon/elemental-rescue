@@ -107,7 +107,7 @@ godot --path . -- autostart grass     # play as Leaf
 Everything except the three elemental bodies is built procedurally in code
 (`mesh_lib.gd`) — houses, props, the gas molecules, caves and the storybook
 materials — so the project stays self‑contained. The fire/water/leaf bodies are
-imported GLB meshes (`Fire3.glb`, `Water3.glb`, `Leaf3.glb`); their legs are
+imported GLB meshes (`models/Fire3.glb`, `models/Water3.glb`, `models/Leaf3.glb`); their legs are
 generated at load time and auto‑seated into each body so they always connect
 cleanly regardless of body shape.
 
