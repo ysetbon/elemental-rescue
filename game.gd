@@ -136,9 +136,9 @@ const BANNER_CAM_POS := Vector3(3.5, 3.0, 15.0)
 const BANNER_CAM_LOOK := Vector3(-4.0, 2.0, -45.0)
 const BANNER_FOV := 46.0
 const BANNER_CHARS := [
-	{ "el": "fire", "pos": Vector3(-3.0, 0, -13.5), "pose": 110.0 },   # furthest — LEFT, small
-	{ "el": "water", "pos": Vector3(1.0, 0, -8.0), "pose": 75.0 },     # middle, biggest
-	{ "el": "grass", "pos": Vector3(5.5, 0, -3.5), "pose": 40.0 },     # nearest — RIGHT
+	{ "el": "fire", "pos": Vector3(-0.5, 0, -13.0), "pose": 110.0 },   # LEFT, furthest → smallest
+	{ "el": "water", "pos": Vector3(3.5, 0, -6.5), "pose": 75.0 },     # CENTRE, closest → biggest
+	{ "el": "grass", "pos": Vector3(9.0, 0, -8.5), "pose": 40.0 },     # RIGHT, medium
 ]
 
 func _setup_banner() -> void:
@@ -172,19 +172,24 @@ func _build_banner_world() -> void:
 		var curb := MeshLib.box(1.0, 0.3, 160.0, MeshLib.lit_mat(MeshLib.rgb(0xfafbfe)))
 		curb.position = Vector3(cx, 0.13, -55.0)
 		world_root.add_child(curb)
-	# a clean row of houses on the far bank, receding
+	# a clean row of houses on the far (left) bank, receding to the vanishing point
 	var hc := [0xefa07f, 0xe98a5f, 0xf3c9a4, 0xf4f1e8, 0xefa07f, 0xe98a5f, 0xf3c9a4, 0xf4f1e8]
 	var rc := [0x675f5c, 0xd2603c, 0x5e5863, 0x4e4b57, 0x675f5c, 0xd2603c, 0x5e5863, 0x4e4b57]
 	var zz := 12.0
 	var i := 0
 	while zz > -74.0:
-		_banner_house(-32.5, zz, MeshLib.rgb(hc[i % hc.size()]), MeshLib.rgb(rc[i % rc.size()]))
+		_banner_house(-32.5, zz, MeshLib.rgb(hc[i % hc.size()]), MeshLib.rgb(rc[i % rc.size()]), 1.0)
 		if i % 2 == 1:
 			_banner_tree(-36.0, zz - 2.5, 1.1)
 		zz -= 11.0; i += 1
 	_banner_tree(-30.0, 7.0, 1.35)
+	# right side — a near house cut off by the edge, small distant houses behind the trio, a tree
+	_banner_house(25.0, -9.0, MeshLib.rgb(0xefa07f), MeshLib.rgb(0xd2603c), -1.0)
+	_banner_house(13.0, -52.0, MeshLib.rgb(0xf3c9a4), MeshLib.rgb(0x5e5863), -1.0)
+	_banner_house(17.5, -58.0, MeshLib.rgb(0xe98a5f), MeshLib.rgb(0x675f5c), -1.0)
+	_banner_tree(20.0, -16.0, 1.0)
 
-func _banner_house(x: float, z: float, col: Color, roofcol: Color) -> void:
+func _banner_house(x: float, z: float, col: Color, roofcol: Color, win_dir: float) -> void:
 	var w := 7.0; var d := 6.0; var h := 3.4
 	var body := MeshLib.box(w, h, d, MeshLib.lit_mat(col))
 	body.position = Vector3(x, h * 0.5, z)
@@ -194,7 +199,7 @@ func _banner_house(x: float, z: float, col: Color, roofcol: Color) -> void:
 	roof.position = Vector3(x, h + h * 0.27, z)
 	world_root.add_child(roof)
 	var win := MeshLib.box(0.12, 1.3, 1.6, MeshLib.unlit_mat(MeshLib.rgb(0xfbfaf4)))
-	win.position = Vector3(x + w * 0.5 + 0.07, h * 0.52, z)   # window on the river-facing side
+	win.position = Vector3(x + win_dir * (w * 0.5 + 0.07), h * 0.52, z)   # window faces the river
 	world_root.add_child(win)
 
 func _banner_tree(x: float, z: float, s: float) -> void:
@@ -209,12 +214,11 @@ func _banner_tree(x: float, z: float, s: float) -> void:
 func _build_banner_leaves() -> void:
 	var mesh := WorldBuilder._make_windleaf_mesh()
 	var tones := [0x5e9450, 0x6aa55e, 0x4f8a45, 0x6fa85c]
-	# match the reference: an upper-right cluster, a couple upper-centre, a couple low in front
+	# match the reference exactly: 2 upper-centre, 3 upper-right, 3 low foreground
 	var spots := [
-		Vector3(8.0, 4.8, -7.0), Vector3(10.5, 6.0, -11.0), Vector3(12.0, 5.0, -8.0),   # upper-right
-		Vector3(9.5, 6.8, -14.0), Vector3(11.0, 4.0, -5.0),
-		Vector3(-1.0, 6.2, -16.0), Vector3(1.5, 6.9, -18.0),                            # upper-centre
-		Vector3(-1.5, 0.7, -6.0), Vector3(2.6, 0.5, -3.0),                              # low foreground
+		Vector3(1.5, 6.0, -16.0), Vector3(3.8, 6.6, -15.0),                             # upper-centre (above Fire/Water)
+		Vector3(11.0, 6.4, -12.0), Vector3(13.5, 5.7, -10.0), Vector3(15.5, 4.9, -9.0), # upper-right (above/right of Leaf)
+		Vector3(0.5, 0.7, -6.0), Vector3(4.5, 0.45, -2.6), Vector3(11.0, 1.0, -3.2),    # low foreground
 	]
 	var ti := 0
 	for p in spots:
