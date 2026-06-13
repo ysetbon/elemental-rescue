@@ -27,8 +27,10 @@ permanently knocked out, so take your time:
 
 1. **Find your key.** Each element has its own **silvery, colour‑matched key**
    (silvery‑red Fire, silvery‑blue Water, silvery‑green Leaf) — and you can only
-   pick up **your own**. Yours is marked in your element's colour on the radar;
-   walk over it and it magnets to your back and trails you.
+   pick up **your own**. It waits deep in your **predator's territory** — out among
+   their cave, clan hall and training pad — so claiming it means a raid into the turf
+   of the element that hunts you. Yours is marked in your element's colour on the
+   radar; walk over it and it magnets to your back and trails you.
 2. **Free your twin.** Carry the key to *your* element's cage in the zoo and your
    twin pops out and starts following you.
 3. **Escort them home.** Lead your twin into your home cave to **win**. If you die
@@ -49,7 +51,7 @@ Along the way:
 - **Self‑training.** Stand on the glowing **totem** beside your cave (with no enemy
   near) to earn an **extra heart**, up to four. Training is kept even after you're
   sent home.
-- **Clan hall.** Stand in your **clan hall** for ~20s to summon a **clan of 10** of
+- **Clan hall.** Stand in your **clan hall** for ~4s to summon a **clan of 10** of
   your own element. The moment they appear the camera lifts into a **top‑down command
   view** (looking down through the see‑through roof) and they gather under it. **Click**
   members to select them (multi‑select — they turn grey), then pick one of three tasks
@@ -60,10 +62,10 @@ Along the way:
   - **Fetch key** — find your key and carry it back to you.
 
   Re‑select any time to re‑assign. (Left‑click selects; left‑*drag* still looks around.)
-- **Sip O₂ for sprint.** Elements no longer need oxygen — but each white **O₂** you
-  walk over **supercharges your sprint**: a bigger effective stamina tank (drains
+- **Sip O₂ for sprint.** You don't *need* oxygen to survive — but each white **O₂**
+  you walk over **supercharges your sprint**: a bigger effective stamina tank (drains
   slower, refills faster) plus an instant gulp. You're now racing the grey CO for the
-  same molecules. The bar stays the same size; it just lasts longer.
+  same molecules — the bar stays the same size, it just lasts longer.
 - **River & bridges.** The river slows every element except Water; cross on the
   three bridges.
 - **Black stones (Pac‑Man power‑up).** Scattered dark stones (shown on the radar)
@@ -104,16 +106,21 @@ godot --path . -- autostart grass     # play as Leaf
 
 ## Under the hood
 
+The code lives in `src/`, the scenes in `scenes/` (`main.tscn` is the entry
+point), and the imported art in `models/`; `project.godot` and `icon.svg` stay at
+the project root where Godot expects them.
+
 Everything except the three elemental bodies is built procedurally in code
-(`mesh_lib.gd`) — houses, props, the gas molecules, caves and the storybook
+(`src/mesh_lib.gd`) — houses, props, the gas molecules, caves and the storybook
 materials — so the project stays self‑contained. The fire/water/leaf bodies are
 imported GLB meshes (`models/Fire3.glb`, `models/Water3.glb`, `models/Leaf3.glb`); their legs are
 generated at load time and auto‑seated into each body so they always connect
 cleanly regardless of body shape.
 
-Key scripts:
+Key scripts (under `src/`):
 
 - `game.gd` — the main game loop, AI, caves, river, scoring and camera.
+- `game_char.gd` — per-actor state (the `GameChar` class: position, hearts, role).
 - `mesh_lib.gd` — procedural mesh/material factory and the character builders.
 - `char_visual.gd` — the walking rig (body bob + leg/arm swing).
 - `world_builder.gd` — lays out the town, caves and river.

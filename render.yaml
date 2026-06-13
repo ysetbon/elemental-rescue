@@ -1,0 +1,22 @@
+# Render Blueprint for the Elemental Rescue web build.
+# Hosts the Godot HTML5 export in ./web as a free static site.
+# The cross-origin headers are REQUIRED: the Godot 4 web export is
+# multi-threaded (SharedArrayBuffer), which browsers only allow on a
+# cross-origin-isolated page.
+services:
+  - type: web
+    name: elemental-rescue
+    runtime: static
+    buildCommand: "echo 'Static build already committed in ./web'"
+    staticPublishPath: web
+    headers:
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Embedder-Policy
+        value: require-corp
+    routes:
+      - type: rewrite
+        source: /
+        destination: /index.html
