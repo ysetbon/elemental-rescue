@@ -21,8 +21,8 @@ var world: Node3D
 var entities: Array = []          # [{ "node": Node3D, "name": String, "kind": String }]
 var sel := 0
 var cam_node: Node3D              # the (hidden) white O₂ — the photographer
-var cam_yaw := PI + 0.12
-var cam_pitch := -0.12
+var cam_yaw := PI + 0.124      # same heading as the banner camera
+var cam_pitch := -0.017        # nearly level — matches banner.png
 var dragging := false
 var time_ms := 0.0
 var hud: Label
@@ -110,10 +110,11 @@ func _spawn_camera_char() -> void:
 	entities.append({ "node": cam_node, "name": "Camera (white O₂)", "kind": "camera" })
 
 func _spawn_elementals() -> void:
+	# matches the banner exactly; the pose is set ONCE so they stay frozen in place
 	var specs := [
-		["Fire", "fire", Vector3(-0.5, 0, -13.0)],
-		["Water", "water", Vector3(3.5, 0, -6.5)],
-		["Leaf", "grass", Vector3(9.0, 0, -8.5)],
+		["Fire", "fire", Vector3(-0.5, 0, -13.0), 110.0],
+		["Water", "water", Vector3(3.5, 0, -6.5), 75.0],
+		["Leaf", "grass", Vector3(9.0, 0, -8.5), 40.0],
 	]
 	for s in specs:
 		var ch: CharVisual
@@ -123,6 +124,7 @@ func _spawn_elementals() -> void:
 		var p: Vector3 = s[2]
 		ch.position = p
 		ch.rotation.y = atan2(cam_node.position.x - p.x, cam_node.position.z - p.z)
+		ch.animate(s[3], 11.0)        # frozen walking pose — does not move on its own
 		add_child(ch)
 		entities.append({ "node": ch, "name": s[0], "kind": "element" })
 
@@ -191,9 +193,6 @@ func _process(delta: float) -> void:
 		_do_autoshot()
 		return
 	_handle_movement(delta)
-	for e in entities:
-		if e["kind"] == "element":
-			(e["node"] as CharVisual).animate(time_ms, 11.0)
 	_update_camera()
 	_update_marker()
 	_update_hud()
