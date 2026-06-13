@@ -1,0 +1,184 @@
+class_name TouchControls
+extends CanvasLayer
+
+# On-screen touch controls for phones: an analog joystick (bottom-left) that
+# drives movement and a SPRINT button (bottom-right). They feed Game.touch_move
+# / Game.touch_sprint, which _update_player() folds into the normal movement.
+#
+# Shown only on touch devices (or forced with ?touch=1 on web, ?touch=0 hides).
+# On desktop the node stays hidden and does nothing, so the keyboard game is
+# completely unaffected. Look-around still works by dragging elsewhere on screen
+# (Godot emulates mouse from touch); these controls consume only their own
+# touches so they never spin the camera.
+
+var game: Game
+
+var _pad: Control
+
+var _enabled := false             # device should show controls at all
+var _forced := false              # explicitly forced via ?touch=1 (testing)
+var _use_mouse := false           # let the mouse drive the controls (desktop / forced)
+var _home := Vector2.ZERO         # resting joystick centre (bottom-left)
+var _sprint_c := Vector2.ZERO     # sprint button centre (bottom-right)
+const BASE_R := 80.0
+const KNOB_R := 38.0
+const TRAVEL := 62.0
+const SPRINT_R := 66.0
+const DEADZONE := 9.0
+var _joy_zone := Rect2()
+
+# Active interaction. Index is the touch finger id, or -1 for the mouse
+# (desktop testing). -2 means "not held".
+var _joy_idx := -2
+var _joy_origin := Vector2.ZERO
+var _knob := Vector2.ZERO
+var _sprint_idx := -2
+
+func _ready() -> void:
+	layer = 10
+	_pad = Control.new()
+	_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pad.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_pad.draw.connect(_on_draw)
+	add_child(_pad)
+	_pad.visible = false
+	_enabled = _resolve_enabled()
+	# Drive with the mouse on desktop, or whenever testing via ?touch=1 (even on
+	# a touchscreen laptop). On a real phone touch drives it and the emulated
+	# mouse is blocked so the camera never spins.
+	_use_mouse = _forced or not DisplayServer.is_touchscreen_available()
+	visible = _enabled
+	get_viewport().size_changed.connect(_recompute)
+	_recompute()
+
+func _resolve_enabled() -> bool:
+	var qp = null
+	if OS.has_feature("web"):
+		qp = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('touch')", true)
+	if qp != null:
+		_forced = str(qp) != "0"
+		return _forced
+	return DisplayServer.is_touchscreen_available()
+
+func _recompute() -> void:
+	var s := get_viewport().get_visible_rect().size
+	_home = Vector2(40.0 + BASE_R, s.y - 40.0 - BASE_R)
+	_sprint_c = Vector2(s.x - 44.0 - SPRINT_R, s.y - 52.0 - SPRINT_R)
+	_joy_zone = Rect2(0, s.y * 0.40, s.x * 0.52, s.y * 0.60)
+	if _pad:
+		_pad.queue_redraw()
+
+func _process(_dt: float) -> void:
+	if game == null:
+		return
+	var want := _enabled and game.running and game.player != null and game.player.alive
+	if want != _pad.visible:
+		_pad.visible = want
+		if not want:
+			_reset_all()
+
+# --------------------------------------------------------------------- input
+func _input(event: InputEvent) -> void:
+	if not _pad.visible:
+		return
+	if event is InputEventScreenTouch:
+		var claimed := _press(event.index, event.position) if event.pressed else _release(event.index)
+		if claimed:
+			get_viewport().set_input_as_handled()
+	elif event is InputEventScreenDrag:
+		if event.index == _joy_idx:
+			_drag_joy(event.position)
+			get_viewport().set_input_as_handled()
+		elif event.index == _sprint_idx:
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if _use_mouse:                     # drive controls with the mouse
+			var claimed := _press(-1, event.position) if event.pressed else _release(-1)
+			if claimed:
+				get_viewport().set_input_as_handled()
+		elif _block_mouse():               # mobile: block the emulated mouse twin of a control touch
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMouseMotion:
+		if _use_mouse:
+			if _joy_idx == -1:
+				_drag_joy(event.position)
+				get_viewport().set_input_as_handled()
+		elif _block_mouse():
+			get_viewport().set_input_as_handled()
+
+func _block_mouse() -> bool:
+	# Godot only emulates the mouse from finger 0; block it when finger 0 is on a control.
+	return _joy_idx == 0 or _sprint_idx == 0
+
+func _press(idx: int, pos: Vector2) -> bool:
+	if _sprint_idx == -2 and pos.distance_to(_sprint_c) <= SPRINT_R * 1.25:
+		_sprint_idx = idx
+		if game:
+			game.touch_sprint = true
+		_pad.queue_redraw()
+		return true
+	if _joy_idx == -2 and _joy_zone.has_point(pos):
+		_joy_idx = idx
+		_joy_origin = _clamp_origin(pos)
+		_drag_joy(pos)
+		return true
+	return false
+
+func _release(idx: int) -> bool:
+	var claimed := false
+	if idx == _sprint_idx:
+		_sprint_idx = -2
+		if game:
+			game.touch_sprint = false
+		claimed = true
+	if idx == _joy_idx:
+		_joy_idx = -2
+		_knob = Vector2.ZERO
+		if game:
+			game.touch_move = Vector2.ZERO
+		claimed = true
+	if claimed:
+		_pad.queue_redraw()
+	return claimed
+
+func _drag_joy(pos: Vector2) -> void:
+	var off := (pos - _joy_origin).limit_length(TRAVEL)
+	if off.length() < DEADZONE:
+		off = Vector2.ZERO
+	_knob = off
+	var v := off / TRAVEL
+	if game:
+		game.touch_move = Vector2(v.x, -v.y)   # screen-up (-y) -> forward
+	_pad.queue_redraw()
+
+func _clamp_origin(pos: Vector2) -> Vector2:
+	var s := get_viewport().get_visible_rect().size
+	return Vector2(clampf(pos.x, BASE_R + 6.0, s.x - BASE_R - 6.0), clampf(pos.y, BASE_R + 6.0, s.y - BASE_R - 6.0))
+
+func _reset_all() -> void:
+	_joy_idx = -2
+	_sprint_idx = -2
+	_knob = Vector2.ZERO
+	if game:
+		game.touch_move = Vector2.ZERO
+		game.touch_sprint = false
+	if _pad:
+		_pad.queue_redraw()
+
+# ---------------------------------------------------------------------- draw
+func _on_draw() -> void:
+	var origin := _home if _joy_idx == -2 else _joy_origin
+	var a := 0.85 if _joy_idx == -2 else 1.0
+	# dark translucent fill + white ring reads on both light and dark scenery
+	_pad.draw_circle(origin, BASE_R, Color(0.10, 0.10, 0.16, 0.24 * a))
+	_pad.draw_arc(origin, BASE_R, 0.0, TAU, 64, Color(1, 1, 1, 0.70 * a), 3.5, true)
+	_pad.draw_circle(origin + _knob, KNOB_R, Color(1, 1, 1, 0.78 * a))
+	_pad.draw_arc(origin + _knob, KNOB_R, 0.0, TAU, 48, Color(0.10, 0.10, 0.16, 0.55 * a), 2.5, true)
+
+	var on := _sprint_idx != -2
+	_pad.draw_circle(_sprint_c, SPRINT_R, Color(0.94, 0.33, 0.10, 0.88 if on else 0.52))
+	_pad.draw_arc(_sprint_c, SPRINT_R, 0.0, TAU, 64, Color(1, 1, 1, 0.85), 3.5, true)
+	var font := ThemeDB.fallback_font
+	var fs := 19
+	var tw := font.get_string_size("SPRINT", HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	_pad.draw_string(font, _sprint_c + Vector2(-tw * 0.5, fs * 0.35), "SPRINT", HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1, 1.0))

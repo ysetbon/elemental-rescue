@@ -99,6 +99,8 @@ var o2_charges := 0              # O₂ sipped this round → bigger effective s
 
 var camera: Camera3D
 var ui: GameUI
+var touch_move := Vector2.ZERO   # mobile joystick: x = strafe, y = forward (set by TouchControls)
+var touch_sprint := false        # mobile sprint button
 var cam_yaw := 0.0
 var dragging := false
 var _press_pos := Vector2.ZERO
@@ -245,6 +247,9 @@ func _ready() -> void:
 	_build_trails()
 	ui = GameUI.new()
 	add_child(ui)
+	var touch := TouchControls.new()   # on-screen joystick + sprint (mobile only)
+	touch.game = self
+	add_child(touch)
 	ui.element_selected.connect(start_game)
 	ui.play_again.connect(_on_play_again)
 	ui.task_assigned.connect(_assign_task)
@@ -1031,8 +1036,10 @@ func _update_player(dt: float) -> void:
 	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN): mz -= 1.0
 	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT): mx += 1.0
 	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT): mx -= 1.0
+	mx += touch_move.x   # mobile joystick (zero on desktop)
+	mz += touch_move.y
 	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
-	var sprint := (Input.is_key_pressed(KEY_SHIFT)) and ln > 0.05 and stamina > 1.0
+	var sprint := (Input.is_key_pressed(KEY_SHIFT) or touch_sprint) and ln > 0.05 and stamina > 1.0
 	# each O₂ sipped makes the (same-size) tank effectively bigger: slower drain, faster refill
 	var drain := 30.0 * maxf(0.35, 1.0 - 0.09 * o2_charges)
 	var recover := 13.0 * (1.0 + 0.16 * o2_charges)
