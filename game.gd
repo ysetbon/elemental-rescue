@@ -131,14 +131,14 @@ var _banner := false
 var _banner_t := 0.0
 var _banner_done := false
 var _banner_list: Array = []
-# camera + per-character placement (tweak + re-render to match the reference)
-const BANNER_CAM_POS := Vector3(25.0, 4.0, -13.0)
-const BANNER_CAM_LOOK := Vector3(13.0, 2.4, -64.0)
-const BANNER_FOV := 45.0
+# camera looks down -Z; river/houses on the left (-X), characters centre-right.
+const BANNER_CAM_POS := Vector3(3.5, 3.0, 15.0)
+const BANNER_CAM_LOOK := Vector3(-4.0, 2.0, -45.0)
+const BANNER_FOV := 46.0
 const BANNER_CHARS := [
-	{ "el": "fire", "pos": Vector3(20.5, 0, -42.0), "pose": 110.0 },   # furthest — LEFT/back
-	{ "el": "water", "pos": Vector3(24.0, 0, -33.0), "pose": 75.0 },   # middle
-	{ "el": "grass", "pos": Vector3(27.5, 0, -25.0), "pose": 40.0 },   # nearest — RIGHT/front
+	{ "el": "fire", "pos": Vector3(-3.0, 0, -13.5), "pose": 110.0 },   # furthest — LEFT, small
+	{ "el": "water", "pos": Vector3(1.0, 0, -8.0), "pose": 75.0 },     # middle, biggest
+	{ "el": "grass", "pos": Vector3(5.5, 0, -3.5), "pose": 40.0 },     # nearest — RIGHT
 ]
 
 func _setup_banner() -> void:
@@ -148,24 +148,96 @@ func _setup_banner() -> void:
 		var ch := make_character("element", spec["el"])
 		ch.pos = spec["pos"]
 		ch.group.position = ch.pos
-		# face roughly toward the camera so the eyes/face read like the reference
 		ch.group.rotation.y = atan2(BANNER_CAM_POS.x - ch.pos.x, BANNER_CAM_POS.z - ch.pos.z)
 		ch.group.animate(spec["pose"], 11.0)
 		_banner_list.append({ "ch": ch, "pose": spec["pose"] })
+	_build_banner_leaves()
 	camera.fov = BANNER_FOV
 	camera.position = BANNER_CAM_POS
 	camera.look_at(BANNER_CAM_LOOK, Vector3.UP)
 
+# A hand-placed riverside scene that recreates for_readme.png exactly.
+func _build_banner_world() -> void:
+	var gp := PlaneMesh.new(); gp.size = Vector2(600, 600)
+	world_root.add_child(MeshLib.mi(gp, MeshLib.lit_mat(MeshLib.rgb(0xdce7f4))))
+	# river on the left, running along Z, receding to the vanishing point
+	var wmat := StandardMaterial3D.new()
+	wmat.albedo_color = MeshLib.rgb(0xc4d6ef)
+	wmat.metallic = 0.25; wmat.roughness = 0.05; wmat.metallic_specular = 0.9
+	var rp := PlaneMesh.new(); rp.size = Vector2(18.0, 160.0)
+	var river := MeshLib.mi(rp, wmat)
+	river.position = Vector3(-19.0, 0.05, -55.0)
+	world_root.add_child(river)
+	for cx in [-9.8, -28.2]:   # bright curbs on both banks
+		var curb := MeshLib.box(1.0, 0.3, 160.0, MeshLib.lit_mat(MeshLib.rgb(0xfafbfe)))
+		curb.position = Vector3(cx, 0.13, -55.0)
+		world_root.add_child(curb)
+	# a clean row of houses on the far bank, receding
+	var hc := [0xefa07f, 0xe98a5f, 0xf3c9a4, 0xf4f1e8, 0xefa07f, 0xe98a5f, 0xf3c9a4, 0xf4f1e8]
+	var rc := [0x675f5c, 0xd2603c, 0x5e5863, 0x4e4b57, 0x675f5c, 0xd2603c, 0x5e5863, 0x4e4b57]
+	var zz := 12.0
+	var i := 0
+	while zz > -74.0:
+		_banner_house(-32.5, zz, MeshLib.rgb(hc[i % hc.size()]), MeshLib.rgb(rc[i % rc.size()]))
+		if i % 2 == 1:
+			_banner_tree(-36.0, zz - 2.5, 1.1)
+		zz -= 11.0; i += 1
+	_banner_tree(-30.0, 7.0, 1.35)
+
+func _banner_house(x: float, z: float, col: Color, roofcol: Color) -> void:
+	var w := 7.0; var d := 6.0; var h := 3.4
+	var body := MeshLib.box(w, h, d, MeshLib.lit_mat(col))
+	body.position = Vector3(x, h * 0.5, z)
+	world_root.add_child(body)
+	var prism := PrismMesh.new(); prism.size = Vector3(w + 1.0, h * 0.55, d + 1.0)
+	var roof := MeshLib.mi(prism, MeshLib.lit_mat(roofcol))
+	roof.position = Vector3(x, h + h * 0.27, z)
+	world_root.add_child(roof)
+	var win := MeshLib.box(0.12, 1.3, 1.6, MeshLib.unlit_mat(MeshLib.rgb(0xfbfaf4)))
+	win.position = Vector3(x + w * 0.5 + 0.07, h * 0.52, z)   # window on the river-facing side
+	world_root.add_child(win)
+
+func _banner_tree(x: float, z: float, s: float) -> void:
+	var trunk := MeshLib.cyl(0.1 * s, 0.14 * s, 0.7 * s, MeshLib.lit_mat(MeshLib.rgb(0x8a7866)))
+	trunk.position = Vector3(x, 0.35 * s, z)
+	world_root.add_child(trunk)
+	var body := MeshLib.sphere(0.75 * s, MeshLib.lit_mat(MeshLib.rgb(0x44604f)), 14, 12)
+	body.scale = Vector3(1, 2.9, 1)
+	body.position = Vector3(x, 0.6 * s + 2.0 * s, z)
+	world_root.add_child(body)
+
+func _build_banner_leaves() -> void:
+	var mesh := WorldBuilder._make_windleaf_mesh()
+	var tones := [0x5e9450, 0x6aa55e, 0x4f8a45, 0x6fa85c]
+	# match the reference: an upper-right cluster, a couple upper-centre, a couple low in front
+	var spots := [
+		Vector3(8.0, 4.8, -7.0), Vector3(10.5, 6.0, -11.0), Vector3(12.0, 5.0, -8.0),   # upper-right
+		Vector3(9.5, 6.8, -14.0), Vector3(11.0, 4.0, -5.0),
+		Vector3(-1.0, 6.2, -16.0), Vector3(1.5, 6.9, -18.0),                            # upper-centre
+		Vector3(-1.5, 0.7, -6.0), Vector3(2.6, 0.5, -3.0),                              # low foreground
+	]
+	var ti := 0
+	for p in spots:
+		var mat := MeshLib.unlit_mat(MeshLib.rgb(tones[ti % tones.size()]), 0.96)
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var m := MeshLib.mi(mesh, mat)
+		m.position = p
+		m.rotation = Vector3(0.7 + ti * 0.4, ti * 0.8, 0.5 + ti * 0.3)
+		m.scale = Vector3.ONE * (0.55 + (ti % 3) * 0.12)
+		world_root.add_child(m)
+		ti += 1
+
 # ------------------------------------------------------------------- setup
 func _ready() -> void:
-	if OS.get_cmdline_user_args().has("banner"):
-		seed(7)            # deterministic world layout while composing the banner
-	else:
-		randomize()
+	var is_banner := OS.get_cmdline_user_args().has("banner")
+	randomize()
 	_build_environment()
 	world_root = Node3D.new()
 	add_child(world_root)
-	WorldBuilder.build(self)
+	if is_banner:
+		_build_banner_world()    # a dedicated hand-placed scene, not the procedural town
+	else:
+		WorldBuilder.build(self)
 	_build_trails()
 	ui = GameUI.new()
 	add_child(ui)
