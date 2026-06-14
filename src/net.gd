@@ -125,6 +125,22 @@ func choose_element(el: String) -> void:
 func start_match() -> void:
 	_req_start.rpc_id(1)
 
+# make a lobby name unique ("Player", "Player 2", "Player 3", …) so the host can
+# tell joiners apart even when several arrive via the same invite link
+func _unique_name(base: String) -> String:
+	var n := base.strip_edges()
+	if n == "":
+		n = "Player"
+	var taken := {}
+	for pid in lobby:
+		taken[lobby[pid]["name"]] = true
+	if not taken.has(n):
+		return n
+	var i := 2
+	while taken.has("%s %d" % [n, i]):
+		i += 1
+	return "%s %d" % [n, i]
+
 static func gen_code() -> String:
 	var letters := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no easily-confused chars
 	var s := ""
@@ -145,7 +161,7 @@ func _req_create(code: String, name_: String) -> void:
 	if room_code == "":
 		room_code = gen_code()
 	admin_peer = sender
-	lobby[sender] = { "name": name_, "el": "fire" }
+	lobby[sender] = { "name": _unique_name(name_), "el": "fire" }
 	_accept.rpc_id(sender, room_code)
 	_broadcast_lobby()
 	print("[net] room %s created by %d" % [room_code, sender])
@@ -163,7 +179,7 @@ func _req_join(code: String, name_: String) -> void:
 	if lobby.size() >= MAX_PLAYERS:
 		_reject.rpc_id(sender, "Game is full (%d players)." % MAX_PLAYERS)
 		return
-	lobby[sender] = { "name": name_, "el": "fire" }
+	lobby[sender] = { "name": _unique_name(name_), "el": "fire" }
 	_accept.rpc_id(sender, room_code)
 	_broadcast_lobby()
 

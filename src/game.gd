@@ -361,6 +361,10 @@ func _ready_visual() -> void:
 	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
 	_start_net()
 	_wire_online()
+	# opened via an invite link (…?room=CODE) → jump straight to joining that room
+	var _room := _room_url_param()
+	if _room != "":
+		call_deferred("_auto_join_room", _room)
 	if OS.get_cmdline_user_args().has("banner"):
 		_setup_banner()
 		return
@@ -2179,6 +2183,7 @@ func _wire_online() -> void:
 	ui.back_pressed.connect(_on_back_pressed)
 	ui.lobby_element_picked.connect(func(el: String) -> void: net.choose_element(el))
 	ui.lobby_start_pressed.connect(func() -> void: net.start_match())
+	ui.copy_invite_pressed.connect(_on_copy_invite)
 	net.joined_room.connect(_on_joined_room)
 	net.join_failed.connect(_on_join_failed)
 	net.lobby_changed.connect(_on_lobby_changed)
@@ -2212,6 +2217,38 @@ func _on_back_pressed() -> void:
 		net.leave()
 	mode = Mode.SINGLE
 	ui.show_start()
+
+# Copy a shareable invite link (the site URL + ?room=CODE) to the clipboard so the
+# host can paste it to friends; they open it and auto-join.
+func _on_copy_invite() -> void:
+	var code: String = net.current_code if net else ""
+	if code == "":
+		return
+	var link := _invite_link(code)
+	DisplayServer.clipboard_set(link)
+	ui.toast("Invite link copied! Paste it to your friends.")
+
+func _invite_link(code: String) -> String:
+	if OS.has_feature("web"):
+		var base: Variant = JavaScriptBridge.eval("location.origin + location.pathname", true)
+		if base != null and str(base) != "":
+			return "%s?room=%s" % [str(base), code]
+	return "Join my Elemental Rescue game — room code: %s" % code
+
+# If the page was opened with ?room=CODE (an invite link), jump straight to joining.
+func _room_url_param() -> String:
+	if OS.has_feature("web"):
+		var v: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('room') || ''", true)
+		if v != null:
+			return str(v).strip_edges().to_upper()
+	return ""
+
+func _auto_join_room(code: String) -> void:
+	ui.show_online_panel()
+	ui.set_join_code(code)
+	mode = Mode.CLIENT
+	ui.set_online_status("Joining room %s…" % code)
+	net.connect_to(_server_url(), "Player", "join", code)
 
 func _on_joined_room(_code: String) -> void:
 	ui.set_online_status("")   # the lobby screen is drawn by _on_lobby_changed (arrives next)
