@@ -40,6 +40,10 @@ var _icon_viewports: Array = []   # SubViewports backing the icons (freed on re-
 
 var _toast_timer := 0.0
 
+# Set by Game before the node enters the tree: on phones the HUD + clan task
+# buttons are drawn twice as large so they're readable / tappable.
+var mobile := false
+
 func _ready() -> void:
 	layer = 10
 	_build_background()
@@ -138,8 +142,9 @@ func _build_start() -> void:
 	v.add_child(hint)
 
 func _add_card(parent: Node, el: String, name_: String, rel: String) -> void:
+	var s := 2.0 if mobile else 1.0   # phones get twice-as-big tappable element cards
 	var btn := Button.new()
-	btn.custom_minimum_size = Vector2(160, 150)
+	btn.custom_minimum_size = Vector2(160, 150) * s
 	var col := _c(UI_COLORS[el])
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(1, 1, 1, 0.93)
@@ -154,7 +159,7 @@ func _add_card(parent: Node, el: String, name_: String, rel: String) -> void:
 	btn.add_theme_color_override("font_color", TEXT)
 	btn.add_theme_color_override("font_hover_color", col)
 	btn.add_theme_color_override("font_pressed_color", col)
-	btn.add_theme_font_size_override("font_size", 16)
+	btn.add_theme_font_size_override("font_size", int(16 * s))
 	btn.text = name_ + "\n\n" + rel
 	btn.autowrap_mode = TextServer.AUTOWRAP_WORD
 	btn.pressed.connect(func() -> void: element_selected.emit(el))
@@ -230,6 +235,9 @@ func _build_hud() -> void:
 	stam_fill.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	stam_fill.size = Vector2(170, 8)
 	track.add_child(stam_fill)
+
+	if mobile:
+		hud_root.scale = Vector2(2, 2)   # grows down-right from the top-left corner
 
 func _make_label_left(text: String, size: int, col: Color = TEXT) -> Label:
 	var l := _make_label(text, size, col)
@@ -317,6 +325,7 @@ const TASK_DEFS := [
 ]
 
 func _build_task_buttons() -> void:
+	var s := 2.0 if mobile else 1.0   # phones get twice-as-big tappable buttons
 	task_root = Control.new()
 	task_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	task_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -325,20 +334,20 @@ func _build_task_buttons() -> void:
 	var cc := CenterContainer.new()
 	cc.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	cc.offset_top = 84.0
-	cc.offset_bottom = 210.0
+	cc.offset_bottom = 84.0 + 130.0 * s
 	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	task_root.add_child(cc)
 	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 14)
+	hb.add_theme_constant_override("separation", int(14 * s))
 	hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cc.add_child(hb)
 	for def in TASK_DEFS:
 		var btn := Button.new()
-		btn.custom_minimum_size = Vector2(78, 90)
+		btn.custom_minimum_size = Vector2(78, 90) * s
 		var sb := StyleBoxFlat.new()
 		sb.bg_color = Color(1, 1, 1, 0.94)
-		sb.set_corner_radius_all(14)
-		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(int(14 * s))
+		sb.set_border_width_all(int(2 * s))
 		sb.border_color = _c(0xf2a23c)
 		btn.add_theme_stylebox_override("normal", sb)
 		var sb_h := sb.duplicate(); sb_h.bg_color = Color(1, 1, 1, 1.0)
@@ -352,13 +361,13 @@ func _build_task_buttons() -> void:
 		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		icon.offset_bottom = -20.0
+		icon.offset_bottom = -20.0 * s
 		btn.add_child(icon)
 		task_icons.append(icon)
 		# tiny caption
-		var lbl := _make_label(def["label"], 11, TEXT)
+		var lbl := _make_label(def["label"], int(11 * s), TEXT)
 		lbl.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-		lbl.offset_top = -18.0
+		lbl.offset_top = -18.0 * s
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		btn.add_child(lbl)
 		hb.add_child(btn)

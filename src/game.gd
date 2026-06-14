@@ -21,7 +21,7 @@ const CAVE_MAX_STAY := 30.0
 const CAVE_LOCKOUT := 10.0
 const CAM_DIST := 13.0   # pulled back for situational awareness
 const CAM_H := 5.5       # raised a touch for a clearer overview of the surroundings
-const ASSIGN_CAM_H := 17.0   # top-down "command view" height while assigning clan tasks
+const ASSIGN_CAM_H := 20.0   # min top-down "command view" height while assigning clan tasks
 const ASSIGN_CAM_OFF := 5.0  # slight z tilt so the view isn't a degenerate straight-down
 const TRAIL_N := 60
 
@@ -246,6 +246,7 @@ func _ready() -> void:
 		WorldBuilder.build(self)
 	_build_trails()
 	ui = GameUI.new()
+	ui.mobile = TouchControls.is_touch_session()   # 2x HUD + task buttons on phones
 	add_child(ui)
 	var touch := TouchControls.new()   # on-screen joystick + sprint (mobile only)
 	touch.game = self
@@ -479,9 +480,10 @@ func _assign_task(task: String) -> void:
 func _update_camera(dt: float) -> void:
 	if player:
 		if _clan_assign_active():
-			# look straight down on the (now see-through) clan-hall roof to pick members
+			# top-down command view, raised enough that the whole clan ring stays in frame
 			var hall: Dictionary = clan_hall_by_owner[player.el]
-			camera.position = camera.position.lerp(Vector3(hall["x"], ASSIGN_CAM_H, hall["z"] + ASSIGN_CAM_OFF), 1.0 - pow(0.0006, dt))
+			var cam_h := _assign_cam_height()
+			camera.position = camera.position.lerp(Vector3(hall["x"], cam_h, hall["z"] + ASSIGN_CAM_OFF), 1.0 - pow(0.0006, dt))
 			camera.look_at(Vector3(hall["x"], 3.1, hall["z"]), Vector3.UP)
 		else:
 			# inside your home cave (e.g. just respawned after dying) drop to a low, close
@@ -517,6 +519,18 @@ func _update_camera(dt: float) -> void:
 		var a := time_ms * 0.00006
 		camera.position = Vector3(sin(a) * 62.0, 17.0, cos(a) * 62.0)
 		camera.look_at(Vector3(0, 2, 0), Vector3.UP)
+
+# Command-view height that keeps the whole clan ring (radius ~5) in frame. Tall/
+# narrow phone screens have a tighter horizontal field of view, so the camera is
+# pulled up further on those — never below the ASSIGN_CAM_H floor.
+func _assign_cam_height() -> float:
+	var vp := get_viewport().get_visible_rect().size
+	var aspect: float = (vp.x / vp.y) if vp.y > 1.0 else 1.7
+	var half_v := tan(deg_to_rad(camera.fov * 0.5))
+	if half_v < 0.01:
+		return ASSIGN_CAM_H
+	var fit := 7.0 / (half_v * minf(1.0, aspect))   # clan ring radius + margin
+	return maxf(ASSIGN_CAM_H, fit)
 
 func _cam_obstruction(px: float, pz: float, dx: float, dz: float, maxd: float) -> float:
 	var best := maxd

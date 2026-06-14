@@ -20,11 +20,12 @@ var _forced := false              # explicitly forced via ?touch=1 (testing)
 var _use_mouse := false           # let the mouse drive the controls (desktop / forced)
 var _home := Vector2.ZERO         # resting joystick centre (bottom-left)
 var _sprint_c := Vector2.ZERO     # sprint button centre (bottom-right)
-const BASE_R := 80.0
-const KNOB_R := 38.0
-const TRAVEL := 62.0
-const SPRINT_R := 66.0
-const DEADZONE := 9.0
+const UI_SCALE := 2.0             # phone controls are drawn this much bigger
+const BASE_R := 80.0 * UI_SCALE
+const KNOB_R := 38.0 * UI_SCALE
+const TRAVEL := 62.0 * UI_SCALE
+const SPRINT_R := 66.0 * UI_SCALE
+const DEADZONE := 9.0 * UI_SCALE
 var _joy_zone := Rect2()
 
 # Active interaction. Index is the touch finger id, or -1 for the mouse
@@ -51,10 +52,21 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_recompute)
 	_recompute()
 
-func _resolve_enabled() -> bool:
-	var qp = null
+static func _touch_param() -> Variant:
+	# ?touch=1 / ?touch=0 on web overrides auto-detection (used for testing).
 	if OS.has_feature("web"):
-		qp = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('touch')", true)
+		return JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('touch')", true)
+	return null
+
+# Is this a touch/phone session? Shared by the HUD so it scales to match.
+static func is_touch_session() -> bool:
+	var qp = _touch_param()
+	if qp != null:
+		return str(qp) != "0"
+	return DisplayServer.is_touchscreen_available()
+
+func _resolve_enabled() -> bool:
+	var qp = _touch_param()
 	if qp != null:
 		_forced = str(qp) != "0"
 		return _forced
@@ -171,14 +183,14 @@ func _on_draw() -> void:
 	var a := 0.85 if _joy_idx == -2 else 1.0
 	# dark translucent fill + white ring reads on both light and dark scenery
 	_pad.draw_circle(origin, BASE_R, Color(0.10, 0.10, 0.16, 0.24 * a))
-	_pad.draw_arc(origin, BASE_R, 0.0, TAU, 64, Color(1, 1, 1, 0.70 * a), 3.5, true)
+	_pad.draw_arc(origin, BASE_R, 0.0, TAU, 64, Color(1, 1, 1, 0.70 * a), 3.5 * UI_SCALE, true)
 	_pad.draw_circle(origin + _knob, KNOB_R, Color(1, 1, 1, 0.78 * a))
-	_pad.draw_arc(origin + _knob, KNOB_R, 0.0, TAU, 48, Color(0.10, 0.10, 0.16, 0.55 * a), 2.5, true)
+	_pad.draw_arc(origin + _knob, KNOB_R, 0.0, TAU, 48, Color(0.10, 0.10, 0.16, 0.55 * a), 2.5 * UI_SCALE, true)
 
 	var on := _sprint_idx != -2
 	_pad.draw_circle(_sprint_c, SPRINT_R, Color(0.94, 0.33, 0.10, 0.88 if on else 0.52))
-	_pad.draw_arc(_sprint_c, SPRINT_R, 0.0, TAU, 64, Color(1, 1, 1, 0.85), 3.5, true)
+	_pad.draw_arc(_sprint_c, SPRINT_R, 0.0, TAU, 64, Color(1, 1, 1, 0.85), 3.5 * UI_SCALE, true)
 	var font := ThemeDB.fallback_font
-	var fs := 19
+	var fs := int(19 * UI_SCALE)
 	var tw := font.get_string_size("SPRINT", HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	_pad.draw_string(font, _sprint_c + Vector2(-tw * 0.5, fs * 0.35), "SPRINT", HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1, 1.0))
