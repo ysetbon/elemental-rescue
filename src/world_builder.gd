@@ -502,6 +502,8 @@ static func _scatter() -> void:
 
 # ------------------------------------------------------------- wind leaves
 static func _build_wind_leaves() -> void:
+	if _game.mode == Game.Mode.SERVER:
+		return   # headless authority renders nothing — wind-leaves are pure decoration
 	var A: float = _game.ARENA
 	var mesh := _make_windleaf_mesh()
 	var tones := [0x7cb46c, 0x8fc27e, 0x6aa55e, 0x9acb86]
