@@ -288,9 +288,12 @@ func _ready_server() -> void:
 	randomize()
 	Engine.max_fps = 30   # steady headless tick; keeps Render CPU low (snapshots are 20Hz)
 	_start_net()
+	# Bind an INTERNAL port. In the Render container a tiny TCP proxy owns the public
+	# $PORT (answering Render's HTTP port-scan) and forwards WebSocket traffic here;
+	# locally clients connect to this port directly.
 	var port := NetManager.DEFAULT_PORT
-	if OS.has_environment("PORT"):
-		port = int(OS.get_environment("PORT"))   # Render injects $PORT (default 10000)
+	if OS.has_environment("GAME_PORT"):
+		port = int(OS.get_environment("GAME_PORT"))
 	net.setup_server(port)
 	print("[Elemental Rescue] dedicated server ready (mode=SERVER)")
 	if OS.get_cmdline_user_args().has("servertest"):
@@ -2702,8 +2705,11 @@ func _ready_testclient() -> void:
 			print("[%s] me=(%.1f,%.1f) OTHER#%d=(%.1f,%.1f) actors=%d" % [label,
 				float(me.get("x", 0.0)), float(me.get("z", 0.0)), st["other"],
 				float(ot.get("x", 0.0)), float(ot.get("z", 0.0)), latest.size()])))
-	print("[%s] connecting (%s, code=%s, el=%s)…" % [label, action, code, my_el])
-	net.connect_to("ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT, label, action, code)
+	var tport := NetManager.DEFAULT_PORT
+	if OS.has_environment("TEST_PORT"):
+		tport = int(OS.get_environment("TEST_PORT"))
+	print("[%s] connecting (%s, code=%s, el=%s) port=%d…" % [label, action, code, my_el, tport])
+	net.connect_to("ws://127.0.0.1:%d" % tport, label, action, code)
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60
