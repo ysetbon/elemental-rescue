@@ -20,3 +20,17 @@ services:
       - type: rewrite
         source: /
         destination: /index.html
+
+  # Dedicated authoritative game server for online multiplayer. A headless copy
+  # of the game (Docker) that browser clients connect to over wss://.
+  # NOTE: no healthCheckPath — Render's default TCP probe satisfies a WebSocket
+  # server (Godot does not answer plain HTTP GET). Free tier sleeps after 15 min
+  # idle (~1 min cold start on the first join); bump to a paid plan for always-on.
+  - type: web
+    name: elemental-rescue-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    autoDeploy: true

@@ -99,6 +99,15 @@ var o2_charges := 0              # O₂ sipped this round → bigger effective s
 
 var camera: Camera3D
 var ui: GameUI
+
+# ------------------------------------------------------------- online multiplayer
+enum Mode { SINGLE, SERVER, CLIENT }
+var mode: int = Mode.SINGLE       # SINGLE = local; SERVER = headless authority; CLIENT = networked viewer
+var net: NetManager = null        # /root/Game/Net — present in every mode
+# Production server (set once the Render service is deployed). Override on web
+# with ?server=ws://host:port for local testing.
+const PROD_SERVER_URL := "wss://elemental-rescue-server.onrender.com"
+
 var touch_move := Vector2.ZERO   # mobile joystick: x = strafe, y = forward (set by TouchControls)
 var touch_sprint := false        # mobile sprint button
 var mobile := false              # touch/phone session: bigger HUD + tap targets
@@ -236,6 +245,38 @@ func _build_banner_leaves() -> void:
 
 # ------------------------------------------------------------------- setup
 func _ready() -> void:
+	if _is_server_mode():
+		mode = Mode.SERVER
+		_ready_server()
+		return
+	if OS.get_cmdline_user_args().has("testclient"):
+		_ready_testclient()   # dev hook: headless lobby smoke-test (see _ready_testclient)
+		return
+	_ready_visual()
+
+func _is_server_mode() -> bool:
+	# launched as the dedicated authoritative server (Docker `--server`, or a
+	# server export which advertises the "dedicated_server" feature)
+	return OS.has_feature("dedicated_server") or OS.get_cmdline_user_args().has("server")
+
+func _ready_server() -> void:
+	randomize()
+	Engine.max_fps = 30   # steady headless tick; keeps Render CPU low (snapshots are 20Hz)
+	_start_net()
+	var port := NetManager.DEFAULT_PORT
+	if OS.has_environment("PORT"):
+		port = int(OS.get_environment("PORT"))   # Render injects $PORT (default 10000)
+	net.setup_server(port)
+	print("[Elemental Rescue] dedicated server ready (mode=SERVER)")
+
+# Create the Net node — same path (/root/Game/Net) on server and client so RPCs match.
+func _start_net() -> void:
+	net = NetManager.new()
+	net.name = "Net"
+	net.game = self
+	add_child(net)
+
+func _ready_visual() -> void:
 	var is_banner := OS.get_cmdline_user_args().has("banner")
 	randomize()
 	_build_environment()
@@ -260,6 +301,8 @@ func _ready() -> void:
 	for c in caves:
 		radar_caves.append({ "x": c["x"], "z": c["z"], "r": c["r"], "fill": c["radarFill"] })
 	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
+	_start_net()
+	_wire_online()
 	if OS.get_cmdline_user_args().has("banner"):
 		_setup_banner()
 		return
@@ -326,6 +369,12 @@ func _build_trails() -> void:
 
 # ------------------------------------------------------------------ main loop
 func _process(delta: float) -> void:
+	if mode == Mode.SERVER:
+		_server_process(delta)   # headless authority: simulate, never render (P2+)
+		return
+	if mode == Mode.CLIENT:
+		_client_process(delta)   # networked viewer: render snapshots, never sim locally (P3+)
+		return
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
 	for fn in deco_anims:
@@ -1958,6 +2007,122 @@ func _on_play_again() -> void:
 	ending = false
 	running = false
 	ui.show_start()
+
+# ------------------------------------------------------------------ online (client)
+func _wire_online() -> void:
+	ui.online_pressed.connect(func() -> void: ui.show_online_panel())
+	ui.host_requested.connect(_on_host_requested)
+	ui.join_requested.connect(_on_join_requested)
+	ui.back_pressed.connect(_on_back_pressed)
+	ui.lobby_element_picked.connect(func(el: String) -> void: net.choose_element(el))
+	ui.lobby_start_pressed.connect(func() -> void: net.start_match())
+	net.joined_room.connect(_on_joined_room)
+	net.join_failed.connect(_on_join_failed)
+	net.lobby_changed.connect(_on_lobby_changed)
+	net.match_starting.connect(_on_match_starting)
+	net.connection_lost.connect(_on_connection_lost)
+
+func _server_url() -> String:
+	if OS.has_feature("web"):
+		var ov: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('server')", true)
+		if ov != null and str(ov) != "":
+			return str(ov)
+		return PROD_SERVER_URL
+	return "ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT   # native/editor → local server
+
+func _on_host_requested(name_: String) -> void:
+	mode = Mode.CLIENT
+	ui.set_online_status("Connecting…")
+	net.connect_to(_server_url(), name_, "create", NetManager.gen_code())
+
+func _on_join_requested(name_: String, code: String) -> void:
+	if code.strip_edges() == "":
+		ui.set_online_status("Enter the host's code to join.")
+		return
+	mode = Mode.CLIENT
+	ui.set_online_status("Connecting…")
+	net.connect_to(_server_url(), name_, "join", code)
+
+func _on_back_pressed() -> void:
+	if net:
+		net.leave()
+	mode = Mode.SINGLE
+	ui.show_start()
+
+func _on_joined_room(_code: String) -> void:
+	ui.set_online_status("")   # the lobby screen is drawn by _on_lobby_changed (arrives next)
+
+func _on_join_failed(reason: String) -> void:
+	mode = Mode.SINGLE
+	ui.set_online_status(reason)
+
+func _on_lobby_changed(players: Array, my_id: int, admin_id: int, code: String) -> void:
+	ui.show_lobby(players, my_id, admin_id, code)
+
+func _on_match_starting(_world_seed: int, _humans: Array) -> void:
+	ui.toast("Match starting!  (live gameplay lands in the next build)")   # P0 stub
+
+func _on_connection_lost() -> void:
+	mode = Mode.SINGLE
+	ui.toast("Disconnected from the server.")
+	ui.show_start()
+
+# Called on the SERVER when the admin starts the match. P2+ builds the real sim.
+func server_start_match(_world_seed: int, _humans: Array) -> void:
+	pass
+
+# Headless authority tick. P0: lobby only (peer is auto-polled by the SceneTree),
+# so there's nothing to do until a match is running. P2 fills this with the
+# render-free simulation.
+func _server_process(_delta: float) -> void:
+	pass
+
+# Networked viewer tick. P3 will render interpolated ghosts + predict the local
+# avatar here. For P0/lobby we only idle the 3D backdrop (if visuals exist).
+func _client_process(delta: float) -> void:
+	if camera == null:
+		return   # headless test client / pre-visual: nothing to draw
+	var dt: float = minf(0.05, delta)
+	time_ms += delta * 1000.0
+	for fn in deco_anims:
+		fn.call(time_ms)
+	_update_wind_leaves(dt, time_ms)
+	_update_camera(dt)
+
+# Dev/test hook (no GUI): connect to a local server and exercise the full lobby
+# handshake — create → pick element → start — logging each step, then quit.
+#   godot --headless --path . -- testclient            (create a room)
+#   godot --headless --path . -- testclient join ABCD  (join room ABCD)
+func _ready_testclient() -> void:
+	mode = Mode.CLIENT
+	Engine.max_fps = 60
+	_start_net()
+	get_tree().create_timer(8.0).timeout.connect(func() -> void:
+		print("[test] timeout — quitting"); get_tree().quit())
+	var args := OS.get_cmdline_user_args()
+	var action := "join" if args.has("join") else "create"
+	var code := ""
+	var ix := args.find("join")
+	if ix >= 0 and ix + 1 < args.size():
+		code = args[ix + 1]
+	var st := { "picked": false, "started": false }   # dict = by-reference across lambda calls
+	net.joined_room.connect(func(c: String) -> void: print("[test] joined room ", c))
+	net.join_failed.connect(func(r: String) -> void:
+		print("[test] JOIN FAILED: ", r); get_tree().quit())
+	net.connection_lost.connect(func() -> void:
+		print("[test] connection lost"); get_tree().quit())
+	net.lobby_changed.connect(func(players: Array, my_id: int, admin_id: int, c: String) -> void:
+		print("[test] lobby code=%s players=%s me=%d admin=%d" % [c, str(players), my_id, admin_id])
+		if action == "create" and not st["picked"]:
+			st["picked"] = true
+			net.choose_element("water")
+		elif action == "create" and st["picked"] and not st["started"]:
+			st["started"] = true
+			net.start_match())
+	net.match_starting.connect(func(s: int, h: Array) -> void:
+		print("[test] MATCH STARTING seed=%d humans=%s" % [s, str(h)]); get_tree().quit())
+	print("[test] connecting as '%s' (%s %s)…" % [action, code, ""])
+	net.connect_to("ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT, "Tester-" + action, action, code)
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60

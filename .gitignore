@@ -6,3 +6,7 @@
 studio_banner.png
 _banner.png
 _shot.png
+
+# exported server pack (regenerate at deploy time:
+#   godot --headless --path . --export-pack "Server" build/server.pck)
+build/
