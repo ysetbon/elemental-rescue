@@ -116,7 +116,10 @@ const SNAP_HZ := 20.0             # server snapshot rate
 const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
 const INTERP_DELAY := 0.18        # render remote actors this far in the past (bigger buffer
                                   # smooths over the free server's irregular snapshot timing)
+const META_EVERY := 5             # SERVER: send the bulky status meta (scores/objective/keys)
+                                  # only every Nth snapshot (20Hz / 5 = 4Hz); positions stay 20Hz
 var _snap_accum := 0.0            # SERVER: snapshot send throttle
+var _snap_tick := 0               # SERVER: snapshot counter (gates the meta payload)
 # CLIENT match state
 var local_net_id := 0             # this client's own actor net_id (0 = not in a match)
 var local_el := ""                # this client's element this match
@@ -137,6 +140,11 @@ const PROD_SERVER_URL := "wss://elemental-rescue-server.onrender.com"
 var touch_move := Vector2.ZERO   # mobile joystick: x = strafe, y = forward (set by TouchControls)
 var touch_sprint := false        # mobile sprint button
 var mobile := false              # touch/phone session: bigger HUD + tap targets
+var lite := false                # lighter rendering for weak/touch devices (render-scale,
+                                 # fewer wind-leaves, throttled décor, no SSR)
+var _deco_accum := 0.0           # lite: frame time accumulated between cosmetic updates
+const DECO_LITE_HZ := 20.0       # lite: run décor / wind-leaf animation at this rate, not per-frame
+const PERF_SCALE_LITE := 0.75    # lite: render the 3D world at 75% then upscale (HUD stays sharp)
 var cam_yaw := 0.0
 var dragging := false
 var _press_pos := Vector2.ZERO
@@ -338,6 +346,9 @@ func _start_net() -> void:
 func _ready_visual() -> void:
 	var is_banner := OS.get_cmdline_user_args().has("banner")
 	randomize()
+	mobile = TouchControls.is_touch_session()
+	lite = mobile   # phones get the lighter renderer (set before the world is built)
+	_apply_perf_scale()
 	_build_environment()
 	world_root = Node3D.new()
 	add_child(world_root)
@@ -347,7 +358,6 @@ func _ready_visual() -> void:
 		WorldBuilder.build(self)
 	_build_trails()
 	ui = GameUI.new()
-	mobile = TouchControls.is_touch_session()
 	ui.mobile = mobile   # 2x HUD + task buttons on phones
 	add_child(ui)
 	var touch := TouchControls.new()   # on-screen joystick + sprint (mobile only)
@@ -377,6 +387,32 @@ func _ready_visual() -> void:
 		start_game(_el)
 		running = true
 
+# 3D render-scale is the single biggest phone FPS lever: render the 3D world at a
+# lower internal resolution and upscale it; the 2D HUD / joystick stay crisp. Tune
+# live on web with ?q=high|balanced|max to A/B without a redeploy.
+func _apply_perf_scale() -> void:
+	var scale := PERF_SCALE_LITE if lite else 1.0
+	if OS.has_feature("web"):
+		var q: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('q')", true)
+		match (str(q) if q != null else ""):
+			"high": scale = 1.0
+			"balanced": scale = 0.75
+			"max": scale = 0.6
+	get_viewport().scaling_3d_scale = clampf(scale, 0.4, 1.0)
+
+# How many seconds of decorative animation to advance this frame. On lite devices we
+# batch it to ~20Hz (it's purely cosmetic), returning -1.0 on the frames we skip so the
+# saved CPU goes to a steadier framerate.
+func _cosmetic_step(delta: float) -> float:
+	if not lite:
+		return delta
+	_deco_accum += delta
+	if _deco_accum < 1.0 / DECO_LITE_HZ:
+		return -1.0
+	var d := _deco_accum
+	_deco_accum = 0.0
+	return d
+
 func _build_environment() -> void:
 	camera = Camera3D.new()
 	camera.fov = 60
@@ -402,7 +438,7 @@ func _build_environment() -> void:
 	env.fog_density = FOG_DENSITY
 	env.fog_sky_affect = 0.0
 	env.fog_aerial_perspective = 0.0
-	env.ssr_enabled = true
+	env.ssr_enabled = not lite   # screen-space reflections: off on phones (costly, little benefit)
 	env.ssr_max_steps = 48
 	var we := WorldEnvironment.new()
 	we.environment = env
@@ -440,9 +476,11 @@ func _process(delta: float) -> void:
 		return
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
-	for fn in deco_anims:
-		fn.call(time_ms)
-	_update_wind_leaves(dt, time_ms)
+	var cd := _cosmetic_step(delta)
+	if cd >= 0.0:
+		for fn in deco_anims:
+			fn.call(time_ms)
+		_update_wind_leaves(minf(0.08, cd), time_ms)
 
 	if _banner:
 		_banner_t += delta
@@ -2302,8 +2340,10 @@ func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) ->
 	ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
 	ui.show_task_buttons(false)
 	ui.show_hud()
+	running = true   # CLIENT: the match is live — this is what gates the on-screen touch controls
 
 func _client_clear() -> void:
+	running = false
 	for nid in ghosts:
 		if is_instance_valid(ghosts[nid]):
 			ghosts[nid].queue_free()
@@ -2343,7 +2383,8 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 		_scores[el] = int(sc.get(el, _scores[el]))
 	_net_rk = meta.get("rk", _net_rk)
 	_net_rt = meta.get("rt", _net_rt)
-	_client_sync_keys(meta.get("kp", {}))
+	if meta.has("kp"):   # omitted on the in-between snapshots — keep the keys we have
+		_client_sync_keys(meta["kp"])
 	if player and by_id.has(local_net_id):
 		var srv: Dictionary = by_id[local_net_id]
 		# Prediction-dominant reconciliation: trust local prediction for small errors
@@ -2368,6 +2409,7 @@ func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 
 func _on_connection_lost() -> void:
 	mode = Mode.SINGLE
+	running = false
 	ui.toast("Disconnected from the server.")
 	ui.show_start()
 
@@ -2472,22 +2514,28 @@ func _broadcast_snapshot() -> void:
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
 		i += SNAP_FLOATS
-	# per-element rescue state + key positions, so each client can show its objective
-	# and render the (un-held) keys
-	var kp := {}
-	for el in keys:
-		if not bool(has_key_by_el.get(el, false)):
-			kp[el] = [keys[el]["pos"].x, keys[el]["pos"].z]
-	var rt := {}
-	for el in ["fire", "water", "grass"]:
-		rt[el] = twin_by_el.get(el) != null
-	var meta := {
-		"tl": time_left,
-		"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
-		"rk": has_key_by_el.duplicate(),   # el -> bool (key held)
-		"rt": rt,                          # el -> bool (twin freed)
-		"kp": kp,                          # el -> [x,z] (un-held key positions)
-	}
+	# Per-element rescue state + key positions, so each client can show its objective
+	# and render the (un-held) keys. This changes slowly, so we only attach it every
+	# META_EVERY-th snapshot (4Hz); positions still go out at the full 20Hz. Saves the
+	# fractional-CPU free server most of its per-tick Dictionary-encoding cost. The
+	# client keeps its previous values on the snapshots that omit it.
+	var meta := {}
+	_snap_tick += 1
+	if _snap_tick % META_EVERY == 1:
+		var kp := {}
+		for el in keys:
+			if not bool(has_key_by_el.get(el, false)):
+				kp[el] = [keys[el]["pos"].x, keys[el]["pos"].z]
+		var rt := {}
+		for el in ["fire", "water", "grass"]:
+			rt[el] = twin_by_el.get(el) != null
+		meta = {
+			"tl": time_left,
+			"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
+			"rk": has_key_by_el.duplicate(),   # el -> bool (key held)
+			"rt": rt,                          # el -> bool (twin freed)
+			"kp": kp,                          # el -> [x,z] (un-held key positions)
+		}
 	if net:
 		net.broadcast_snapshot(data, meta)
 
@@ -2577,14 +2625,17 @@ func _client_process(delta: float) -> void:
 		return   # headless test client / pre-visual: nothing to draw
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
-	for fn in deco_anims:
-		fn.call(time_ms)
+	var cd := _cosmetic_step(delta)
+	if cd >= 0.0:
+		for fn in deco_anims:
+			fn.call(time_ms)
 	if local_net_id == 0 or player == null:
 		_update_camera(dt)   # lobby backdrop
 		return
 	_client_predict_local(dt)
 	_client_render_remote(dt)
-	_update_wind_leaves(dt, time_ms)
+	if cd >= 0.0:
+		_update_wind_leaves(minf(0.08, cd), time_ms)
 	_update_camera(dt)
 	_client_update_hud()
 
