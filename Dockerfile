@@ -15,7 +15,7 @@ FROM ubuntu:24.04
 
 ARG GODOT_VERSION=4.6.3
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip libfontconfig1 libfreetype6 \
+        ca-certificates curl unzip libfontconfig1 libfreetype6 nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Stock Godot Linux binary (runs headless via --headless; no editor needed).
@@ -28,10 +28,13 @@ RUN curl -fsSL -o /tmp/godot.zip \
 
 WORKDIR /app
 COPY build/server.pck /app/server.pck
+COPY scripts/render_proxy.js /app/render_proxy.js
 
+# The Godot server binds GAME_PORT internally; the Node proxy owns the public $PORT
+# (answers Render's HTTP port scan, pipes WebSocket traffic through to Godot).
 ENV PORT=10000
+ENV GAME_PORT=8910
 EXPOSE 10000
 
-# `-- server` lands in OS.get_cmdline_user_args() → game.gd runs in SERVER mode
-# and binds WebSocketMultiplayerPeer on $PORT.
-CMD ["godot", "--headless", "--main-pack", "/app/server.pck", "--", "server"]
+# Run the headless Godot server in the background, then the proxy in the foreground.
+CMD ["sh", "-c", "godot --headless --main-pack /app/server.pck -- server & exec node /app/render_proxy.js"]
