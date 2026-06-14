@@ -2234,9 +2234,16 @@ func _on_copy_invite() -> void:
 
 func _invite_link(code: String) -> String:
 	if OS.has_feature("web"):
-		var base: Variant = JavaScriptBridge.eval("location.origin + location.pathname", true)
-		if base != null and str(base) != "":
-			return "%s?room=%s" % [str(base), code]
+		# Build the link in JS so we can carry over an active server override
+		# (?server=…). Without it, an invite from a host on a custom/local server
+		# drops the override and sends invited players to production instead —
+		# they'd just see "No game with that code." The server value is read and
+		# re-encoded entirely inside JS (never interpolated through GDScript), and
+		# `code` is safe alphanumeric from NetManager.gen_code().
+		var js := "(function(c){var p=new URLSearchParams();p.set('room',c);var s=(new URLSearchParams(location.search)).get('server');if(s)p.set('server',s);return location.origin+location.pathname+'?'+p.toString();})('%s')" % code
+		var link: Variant = JavaScriptBridge.eval(js, true)
+		if link != null and str(link) != "":
+			return str(link)
 	return "Join my Elemental Rescue game — room code: %s" % code
 
 # If the page was opened with ?room=CODE (an invite link), jump straight to joining.
