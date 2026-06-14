@@ -266,6 +266,15 @@ func _build_online() -> void:
 	var joinb := _action_button("JOIN GAME", 260, 52, 0x5d93e8, 0xffffff)
 	joinb.pressed.connect(func() -> void: join_requested.emit(online_name.text, online_code.text))
 	v.add_child(_center(joinb))
+	# Mobile: the on-screen keyboard covers the on-canvas buttons, and tapping a
+	# button while the (experimental) virtual keyboard is up gets swallowed — so
+	# JOIN/HOST would appear to do nothing. Let the keyboard's own "Go/Enter" key
+	# submit, and drop focus so it closes (any following button tap is then clean).
+	online_code.text_submitted.connect(func(_t: String) -> void:
+		online_code.release_focus()
+		join_requested.emit(online_name.text, online_code.text))
+	online_name.text_submitted.connect(func(_t: String) -> void:
+		online_name.release_focus())
 	online_status = _olabel("", 15, _c(0xffd9b0))
 	v.add_child(online_status)
 	var backb := _action_button("← BACK", 150, 44, 0x6a6276, 0xffffff)
