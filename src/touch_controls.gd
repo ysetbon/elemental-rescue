@@ -98,11 +98,12 @@ func _recompute() -> void:
 func _process(_dt: float) -> void:
 	if game == null:
 		return
-	# In an online match show the joystick + sprint for EVERY player (mobile and
-	# desktop) — host AND guests, since the host shares one invite link and we can't
-	# tell who's on a phone. Single-player keeps the touch-only rule.
-	var online: bool = game.mode == Game.Mode.CLIENT or game.mode == Game.Mode.HOST
-	var want := (_enabled or online) and game.running and game.player != null and game.player.alive
+	# Show the joystick + sprint by PER-DEVICE detection only (_enabled), in online
+	# AND single-player alike. A desktop session — host OR guest — never gets the
+	# on-screen buttons; a phone/tablet always does. One invite link serves both:
+	# each player's own device decides. The ?touch=1 / ?touch=0 link override still
+	# forces it either way for the rare browser whose touch detection is wrong.
+	var want := _enabled and game.running and game.player != null and game.player.alive
 	if want != _pad.visible:
 		_pad.visible = want
 		if not want:

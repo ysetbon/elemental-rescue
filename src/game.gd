@@ -115,10 +115,20 @@ var net: NetManager = null        # /root/Game/Net — present in every mode
 var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float }
 
 # ---- replication (P3) ----
-const SNAP_HZ := 20.0             # server snapshot rate
+const SNAP_HZ := 30.0             # server snapshot rate (raised from 20 now that online mode
+                                  # drops the O₂/CO₂ molecules → far fewer actors per snapshot)
 const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
-const INTERP_DELAY := 0.18        # render remote actors this far in the past (bigger buffer
-                                  # smooths over the free server's irregular snapshot timing)
+# Remote actors are rendered this far in the past so there are always two snapshots to
+# interpolate between. The buffer is ADAPTIVE: client_on_snapshot measures the real
+# snapshot arrival cadence + jitter and keeps the delay just big enough — small (snappy)
+# on clean links, larger (no stutter) on jittery ones.
+const INTERP_MIN := 0.08
+const INTERP_MAX := 0.22
+const EXTRAP_MAX := 0.12          # if snapshots stall, coast remotes this long before freezing
+var _interp_delay := 0.10         # current adaptive interpolation delay (s)
+var _snap_last_arr := 0.0         # arrival time of the previous snapshot (s)
+var _snap_ema_int := 0.0333       # smoothed snapshot interval (s)
+var _snap_ema_jit := 0.0          # smoothed interval jitter (s)
 const META_EVERY := 5             # SERVER: send the bulky status meta (scores/objective/keys)
                                   # only every Nth snapshot (20Hz / 5 = 4Hz); positions stay 20Hz
 var _snap_accum := 0.0            # SERVER: snapshot send throttle
@@ -2034,10 +2044,12 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 					player = hc
 		for _i in (biggest - human_count[el]):
 			_spawn_element_actor(el, 0, false, false)
-	# fewer molecules online → lighter sim + smaller snapshots on the host's browser
-	# (single-player keeps the full set)
-	var n_o2 := 6 if mode != Mode.SINGLE else N_O2
-	var n_co2 := 2 if mode != Mode.SINGLE else N_CO2
+	# No molecules online → the host doesn't simulate them, they don't go in the
+	# snapshot, and no client renders them as moving ghosts. This is the cheapest
+	# multiplayer lag win: fewer moving actors to sim, encode, send, and draw.
+	# (single-player keeps the full set.)
+	var n_o2 := 0 if mode != Mode.SINGLE else N_O2
+	var n_co2 := 0 if mode != Mode.SINGLE else N_CO2
 	for i in n_o2:
 		var o := make_character("o2")
 		o.pos = random_spot()
@@ -2331,7 +2343,16 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 			"x": adata[b + 1], "z": adata[b + 2], "yaw": adata[b + 3],
 			"spd": adata[b + 4], "flags": int(adata[b + 5]), "hp": int(adata[b + 6]),
 		}
-	snap_buf.append({ "t": _now(), "by_id": by_id })
+	# Measure real arrival cadence + jitter and size the interpolation buffer to match.
+	var arr_t := _now()
+	if _snap_last_arr > 0.0:
+		var iv := arr_t - _snap_last_arr
+		if iv > 0.0 and iv < 1.0:
+			_snap_ema_int = lerpf(_snap_ema_int, iv, 0.1)
+			_snap_ema_jit = lerpf(_snap_ema_jit, absf(iv - _snap_ema_int), 0.1)
+			_interp_delay = clampf(_snap_ema_int + _snap_ema_jit * 2.0 + 0.015, INTERP_MIN, INTERP_MAX)
+	_snap_last_arr = arr_t
+	snap_buf.append({ "t": arr_t, "by_id": by_id })
 	while snap_buf.size() > 10:
 		snap_buf.pop_front()
 	_net_time_left = float(meta.get("tl", _net_time_left))
@@ -2354,6 +2375,9 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 		elif err > 0.8:
 			player.pos = player.pos.lerp(spos, 0.2)    # gentle nudge back
 		player.hp = int(srv["hp"])
+		# Mirror the host's "slowed" state so local prediction runs at the same speed
+		# (otherwise we'd over-predict while slowed and get yanked back every snapshot).
+		player.slow_timer = SLOW_TIME if (int(srv["flags"]) & (1 << 6)) != 0 else 0.0
 
 func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	if ghosts.has(nid):
@@ -2523,6 +2547,7 @@ func _pack_flags(ch: GameChar) -> int:
 	f |= int(_EL_CODE.get(ch.el, 0)) << 2        # bits 2-3 element
 	if ch.alive: f |= 1 << 4
 	if ch.co_timer > 0.0: f |= 1 << 5            # CO (spent / grey)
+	if ch.slow_timer > 0.0: f |= 1 << 6          # slowed (predator hit) → clients predict at half speed too
 	return f
 
 func _broadcast_snapshot() -> void:
@@ -2699,7 +2724,7 @@ func _client_predict_local(dt: float) -> void:
 		var rx := -fz
 		var rz := fx
 		target = Vector3(fx * mz + rx * mx, 0, fz * mz + rz * mx).normalized()
-		target *= player.speed * (1.5 if sprint else 1.0) * terrain_mult(player) * ln
+		target *= player.speed * (1.5 if sprint else 1.0) * terrain_mult(player) * _slow_mult(player) * ln
 	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
 	player.pos += player.vel * dt
 	resolve_collisions(player)
@@ -2712,7 +2737,7 @@ func _client_predict_local(dt: float) -> void:
 func _client_render_remote(dt: float) -> void:
 	if snap_buf.is_empty():
 		return
-	var render_t := _now() - INTERP_DELAY
+	var render_t := _now() - _interp_delay
 	var s0: Dictionary = snap_buf[0]
 	var s1: Dictionary = {}
 	for s in snap_buf:
@@ -2726,6 +2751,11 @@ func _client_render_remote(dt: float) -> void:
 		var span: float = s1["t"] - s0["t"]
 		if span > 0.0001:
 			alpha = clampf((render_t - s0["t"]) / span, 0.0, 1.0)
+	# No newer snapshot to interpolate toward → the stream stalled. Coast each remote
+	# along its last heading for a short while instead of freezing it dead in place.
+	var extrap := 0.0
+	if s1.is_empty():
+		extrap = clampf(render_t - snap_buf[snap_buf.size() - 1]["t"], 0.0, EXTRAP_MAX)
 	var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
 	for nid in latest:
 		if nid == local_net_id:
@@ -2740,6 +2770,8 @@ func _client_render_remote(dt: float) -> void:
 			pos = pos.lerp(Vector3(a1["x"], 0, a1["z"]), alpha)
 			yaw = lerp_angle(yaw, a1["yaw"], alpha)
 			spd = lerpf(spd, a1["spd"], alpha)
+		elif extrap > 0.0 and spd > 0.5:
+			pos += Vector3(sin(yaw), 0, cos(yaw)) * spd * extrap   # coast on last velocity
 		var g := _client_get_ghost(nid, flags)
 		g.visible = (flags & (1 << 4)) != 0
 		g.position = pos

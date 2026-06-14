@@ -38,6 +38,17 @@ var current_code := ""            # the room code (for display / invite links)
 var _pending_action := ""         # "create" | "join", sent once the socket opens
 var _pending_code := ""
 
+# Guest input send-throttle. _client_predict_local calls send_input every rendered
+# frame (could be 60–144 Hz); the host only ever uses the latest input before each sim
+# step, so flooding the relay is wasted uplink. We cap steady-state sends to ~30 Hz but
+# fire instantly on any meaningful change, so key presses/releases are never delayed.
+const INPUT_MIN_MS := 33
+var _li_mx := 0.0
+var _li_mz := 0.0
+var _li_sp := false
+var _li_yaw := 0.0
+var _li_t := 0
+
 # --- host-side room state ---
 var admin_id := 0                 # the host's id (== my_id on the host)
 var started := false
@@ -241,8 +252,15 @@ func start_match() -> void:
 
 # Guest -> host: per-frame input.
 func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> void:
-	if role == "guest":
-		_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw })
+	if role != "guest":
+		return
+	var now := Time.get_ticks_msec()
+	var changed := absf(mx - _li_mx) > 0.04 or absf(mz - _li_mz) > 0.04 \
+		or sprint != _li_sp or absf(wrapf(yaw - _li_yaw, -PI, PI)) > 0.03
+	if not changed and (now - _li_t) < INPUT_MIN_MS:
+		return
+	_li_mx = mx; _li_mz = mz; _li_sp = sprint; _li_yaw = yaw; _li_t = now
+	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw })
 
 # Host -> guests: world snapshot.
 func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
