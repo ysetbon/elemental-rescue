@@ -44,7 +44,10 @@ var _pending_code := ""
 func setup_server(port: int) -> void:
 	is_server = true
 	var peer := WebSocketMultiplayerPeer.new()
-	var err := peer.create_server(port, "*")
+	# Bind to localhost only: in the Render container the proxy (127.0.0.1) is the
+	# sole client, and local testing also connects via 127.0.0.1. This keeps Render's
+	# external port scan off this port, so it stops spamming WebSocket parse errors.
+	var err := peer.create_server(port, "127.0.0.1")
 	if err != OK:
 		push_error("[net] create_server(%d) failed: %s" % [port, error_string(err)])
 		return
