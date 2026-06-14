@@ -101,6 +101,7 @@ var camera: Camera3D
 var ui: GameUI
 var touch_move := Vector2.ZERO   # mobile joystick: x = strafe, y = forward (set by TouchControls)
 var touch_sprint := false        # mobile sprint button
+var mobile := false              # touch/phone session: bigger HUD + tap targets
 var cam_yaw := 0.0
 var dragging := false
 var _press_pos := Vector2.ZERO
@@ -246,7 +247,8 @@ func _ready() -> void:
 		WorldBuilder.build(self)
 	_build_trails()
 	ui = GameUI.new()
-	ui.mobile = TouchControls.is_touch_session()   # 2x HUD + task buttons on phones
+	mobile = TouchControls.is_touch_session()
+	ui.mobile = mobile   # 2x HUD + task buttons on phones
 	add_child(ui)
 	var touch := TouchControls.new()   # on-screen joystick + sprint (mobile only)
 	touch.game = self
@@ -437,7 +439,7 @@ func _ally_at(screen_pos: Vector2) -> GameChar:
 	if not player or allies.is_empty():
 		return null
 	var picked: GameChar = null
-	var best := 64.0   # pixels
+	var best := 150.0 if mobile else 64.0   # pixels; much bigger tap target on phones
 	for a in allies:
 		var wp: Vector3 = a.pos + Vector3(0, 1.4, 0)
 		if camera.is_position_behind(wp):
