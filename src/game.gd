@@ -114,7 +114,8 @@ var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bo
 # ---- replication (P3) ----
 const SNAP_HZ := 20.0             # server snapshot rate
 const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
-const INTERP_DELAY := 0.11        # client renders remote actors this far in the past
+const INTERP_DELAY := 0.18        # render remote actors this far in the past (bigger buffer
+                                  # smooths over the free server's irregular snapshot timing)
 var _snap_accum := 0.0            # SERVER: snapshot send throttle
 # CLIENT match state
 var local_net_id := 0             # this client's own actor net_id (0 = not in a match)
@@ -286,7 +287,7 @@ func _is_server_mode() -> bool:
 
 func _ready_server() -> void:
 	randomize()
-	Engine.max_fps = 30   # steady headless tick; keeps Render CPU low (snapshots are 20Hz)
+	Engine.max_fps = 20   # match the 20Hz snapshot rate; less CPU on the fractional-CPU free tier
 	_start_net()
 	# Bind an INTERNAL port. In the Render container a tiny TCP proxy owns the public
 	# $PORT (answering Render's HTTP port-scan) and forwards WebSocket traffic here;
@@ -2044,12 +2045,15 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 					player = hc
 		for _i in (biggest - human_count[el]):
 			_spawn_element_actor(el, 0, false, false)
-	for i in N_O2:
+	# fewer molecules online → lighter sim on the fractional-CPU free server (single-player keeps the full set)
+	var n_o2 := 6 if mode == Mode.SERVER else N_O2
+	var n_co2 := 2 if mode == Mode.SERVER else N_CO2
+	for i in n_o2:
 		var o := make_character("o2")
 		o.pos = random_spot()
 		if o.group: o.group.position = o.pos
 		npcs.append(o)
-	for i in N_CO2:
+	for i in n_co2:
 		var c := make_character("co2")
 		c.pos = random_spot(40.0)
 		if c.group: c.group.position = c.pos
@@ -2335,7 +2339,15 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 	_client_sync_keys(meta.get("kp", {}))
 	if player and by_id.has(local_net_id):
 		var srv: Dictionary = by_id[local_net_id]
-		player.pos = player.pos.lerp(Vector3(srv["x"], 0, srv["z"]), 0.25)  # blend to authority
+		# Prediction-dominant reconciliation: trust local prediction for small errors
+		# (smooth, no rubber-banding), only correct on real divergence (respawn / hitting
+		# a wall the server saw but we didn't).
+		var spos := Vector3(srv["x"], 0, srv["z"])
+		var err := player.pos.distance_to(spos)
+		if err > 4.0:
+			player.pos = spos                          # big jump (respawn/teleport) → snap
+		elif err > 0.8:
+			player.pos = player.pos.lerp(spos, 0.2)    # gentle nudge back
 		player.hp = int(srv["hp"])
 
 func _client_get_ghost(nid: int, flags: int) -> CharVisual:
