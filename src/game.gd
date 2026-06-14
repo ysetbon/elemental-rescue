@@ -109,6 +109,7 @@ var ui: GameUI
 enum Mode { SINGLE, SERVER, CLIENT }
 var mode: int = Mode.SINGLE       # SINGLE = local; SERVER = headless authority; CLIENT = networked viewer
 var net: NetManager = null        # /root/Game/Net — present in every mode
+var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float, seq:int }
 # Production server (set once the Render service is deployed). Override on web
 # with ?server=ws://host:port for local testing.
 const PROD_SERVER_URL := "wss://elemental-rescue-server.onrender.com"
@@ -273,6 +274,15 @@ func _ready_server() -> void:
 		port = int(OS.get_environment("PORT"))   # Render injects $PORT (default 10000)
 	net.setup_server(port)
 	print("[Elemental Rescue] dedicated server ready (mode=SERVER)")
+	if OS.get_cmdline_user_args().has("servertest"):
+		call_deferred("_server_selftest")   # dev: spin a fake match with no clients
+
+# Dev hook: start a match with fake humans and log the sim so the headless
+# simulation can be smoke-tested with no clients.  godot ... -- server servertest
+func _server_selftest() -> void:
+	server_start_match(12345, [{ "peer": 101, "el": "fire" }, { "peer": 102, "el": "grass" }])
+	print("[selftest] spawned actors=%d npcs=%d by_el=%s" % [actors.size(), npcs.size(),
+		str({ "fire": by_el["fire"].size(), "water": by_el["water"].size(), "grass": by_el["grass"].size() })])
 
 # Create the Net node — same path (/root/Game/Net) on server and client so RPCs match.
 func _start_net() -> void:
@@ -725,6 +735,8 @@ func _update_cave_timers(dt: float) -> void:
 				_eject_from_cave(ch)
 		else:
 			ch.cave_time = 0.0
+	if mode == Mode.SERVER:
+		return
 	if player and player.alive and inside_own_cave(player):
 		ui.set_cave("Home — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
 	elif player and player.cave_cooldown > 0.0:
@@ -1081,6 +1093,8 @@ func _update_co2(ch: GameChar, dt: float) -> void:
 func _co2_to_co(ch: GameChar) -> void:
 	ch.co_timer = CO_REVERT_TIME
 	ch.radar_color = MeshLib.rgb(0x9a97a8)
+	if ch.group == null:
+		return
 	var spare = ch.group.get_meta("spare_o", null)
 	var bond = ch.group.get_meta("spare_bond", null)
 	if spare and is_instance_valid(spare): spare.visible = false
@@ -1090,6 +1104,8 @@ func _co2_to_co(ch: GameChar) -> void:
 func _co_to_co2(ch: GameChar) -> void:
 	ch.co_timer = 0.0
 	ch.radar_color = MeshLib.rgb(0x3a3744)
+	if ch.group == null:
+		return
 	var spare = ch.group.get_meta("spare_o", null)
 	var bond = ch.group.get_meta("spare_bond", null)
 	if spare and is_instance_valid(spare): spare.visible = true
@@ -1097,7 +1113,8 @@ func _co_to_co2(ch: GameChar) -> void:
 
 func _consume_o2(o: GameChar) -> void:
 	o.alive = false
-	o.group.visible = false
+	if o.group:
+		o.group.visible = false
 	o.respawn_timer = O2_RESPAWN
 
 func _update_o2(ch: GameChar, dt: float) -> void:
@@ -1224,6 +1241,23 @@ func alive_elements() -> Array:
 	return actors.filter(func(c): return c.alive)
 
 func make_character(kind: String, el: String = "", is_player: bool = false) -> GameChar:
+	var ch := GameChar.new()
+	ch.kind = kind
+	ch.el = el
+	ch.is_player = is_player
+	ch.net_id = _next_net_id
+	_next_net_id += 1
+	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
+	if kind == "element":
+		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
+	elif kind == "o2":
+		ch.radar_color = MeshLib.rgb(0xeceef6)
+	else:
+		ch.radar_color = MeshLib.rgb(0x3a3744)
+	# headless server has no visuals — leave group null (the GLB models aren't even
+	# shipped in the server pack); every per-frame visual write guards on `ch.group`.
+	if mode == Mode.SERVER:
+		return ch
 	var model: CharVisual
 	if kind == "element":
 		if el == "fire": model = MeshLib.build_flame()
@@ -1240,20 +1274,7 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 		shadow_r = 1.85
 	MeshLib.add_blob_shadow(model, shadow_r)
 	add_child(model)
-	var ch := GameChar.new()
-	ch.kind = kind
-	ch.el = el
-	ch.is_player = is_player
-	ch.net_id = _next_net_id
-	_next_net_id += 1
 	ch.group = model
-	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
-	if kind == "element":
-		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
-	elif kind == "o2":
-		ch.radar_color = MeshLib.rgb(0xeceef6)
-	else:
-		ch.radar_color = MeshLib.rgb(0x3a3744)
 	return ch
 
 # ------------------------------------------------------------- scoring
@@ -1424,7 +1445,8 @@ func _respawn(ch: GameChar) -> void:
 	if cave_by_owner.has(ch.el):
 		var c: Dictionary = cave_by_owner[ch.el]
 		ch.pos = Vector3(c["x"], 0, c["z"])
-		ch.group.position = ch.pos
+		if ch.group:
+			ch.group.position = ch.pos
 	if ch.is_player:
 		ui.toast("Caught! Back to your cave.")
 		_update_hud_hearts()
@@ -1462,9 +1484,10 @@ func _tick_timers(dt: float) -> void:
 			n.respawn_timer = maxf(0.0, n.respawn_timer - dt)
 			if n.respawn_timer <= 0.0:
 				n.pos = random_spot()
-				n.group.position = n.pos
 				n.alive = true
-				n.group.visible = true
+				if n.group:
+					n.group.position = n.pos
+					n.group.visible = true
 
 # Clan members don't follow you — they help. Fetchers go get the key and bring it
 # back; everyone else hunts the element you eat across the whole map.
@@ -1538,6 +1561,8 @@ func _update_ally(a: GameChar, dt: float) -> void:
 	_smart_move(a, attracts, repels, dt, mult)
 
 func _player_in_clan_hall() -> bool:
+	if not player:
+		return false
 	var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
 	return not hall.is_empty() and Vector2(player.pos.x - hall["x"], player.pos.z - hall["z"]).length() < hall["r"]
 
@@ -2017,9 +2042,11 @@ func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool)
 func _run_countdown() -> void:
 	running = false
 	for s in ["3", "2", "1", "GO!"]:
-		ui.set_countdown(s)
+		if mode != Mode.SERVER:
+			ui.set_countdown(s)
 		await get_tree().create_timer(0.75).timeout
-	ui.set_countdown("")
+	if mode != Mode.SERVER:
+		ui.set_countdown("")
 	if not ending:
 		running = true
 
@@ -2151,15 +2178,63 @@ func _on_connection_lost() -> void:
 	ui.toast("Disconnected from the server.")
 	ui.show_start()
 
-# Called on the SERVER when the admin starts the match. P2+ builds the real sim.
-func server_start_match(_world_seed: int, _humans: Array) -> void:
-	pass
+# Called on the SERVER when the admin starts the match. Builds the world (once),
+# spawns humans + NPC fillers, and starts the authoritative simulation.
+func server_start_match(world_seed: int, humans: Array) -> void:
+	seed(world_seed)
+	if world_root == null:
+		world_root = Node3D.new()
+		add_child(world_root)
+		WorldBuilder.build(self)   # full procedural world; headless-safe (no GLB models)
+	var hs: Array = []
+	for h in humans:
+		hs.append({ "peer": int(h["peer"]), "el": String(h["el"]), "local": false })
+	net_input.clear()
+	_spawn_match(hs, "")           # running flips true after the countdown
 
-# Headless authority tick. P0: lobby only (peer is auto-polled by the SceneTree),
-# so there's nothing to do until a match is running. P2 fills this with the
-# render-free simulation.
-func _server_process(_delta: float) -> void:
-	pass
+# Headless authority tick: the render-free simulation. Movement + AI + catches for
+# everyone; no camera/UI/trails. Rescue/clan/training land in P4.
+func _server_process(delta: float) -> void:
+	if not running:
+		return
+	var dt: float = minf(0.05, delta)
+	time_ms += delta * 1000.0
+	_tick_timers(dt)
+	for ch in actors:
+		if ch.is_human:
+			_update_human_net(ch, dt)
+		elif ch.alive:
+			_update_element_ai(ch, dt)
+	for n in npcs:
+		if n.alive:
+			if n.kind == "co2":
+				_update_co2(n, dt)
+			else:
+				_update_o2(n, dt)
+	_update_cave_timers(dt)
+	_check_catches()
+
+# Move a human actor from its latest networked input (server-authoritative). Mirror
+# of _update_player's movement math, minus local-only stamina/o2/disguise/UI.
+func _update_human_net(ch: GameChar, dt: float) -> void:
+	if not ch.alive:
+		return
+	var inp: Dictionary = net_input.get(ch.peer_id, {})
+	var mv: Vector2 = inp.get("move", Vector2.ZERO)
+	var sprint: bool = inp.get("sprint", false)
+	var yaw: float = inp.get("yaw", 0.0)
+	var ln := minf(1.0, mv.length())
+	var target := Vector3.ZERO
+	if ln > 0.05:
+		var fx := -sin(yaw)
+		var fz := -cos(yaw)
+		var rx := -fz
+		var rz := fx
+		target = Vector3(fx * mv.y + rx * mv.x, 0, fz * mv.y + rz * mv.x).normalized()
+		target *= ch.speed * (1.5 if sprint else 1.0) * terrain_mult(ch) * _slow_mult(ch) * ln
+	ch.vel = ch.vel.lerp(target, 1.0 - pow(0.0003, dt))
+	ch.pos += ch.vel * dt
+	resolve_collisions(ch)
 
 # Networked viewer tick. P3 will render interpolated ghosts + predict the local
 # avatar here. For P0/lobby we only idle the 3D backdrop (if visuals exist).
