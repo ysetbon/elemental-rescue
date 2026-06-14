@@ -17,7 +17,7 @@ extends Node
 signal joined_room(code: String)                       # client: server accepted us
 signal join_failed(reason: String)                     # client: rejected / error
 signal lobby_changed(players: Array, my_id: int, admin_id: int, code: String)
-signal match_starting(world_seed: int, humans: Array)  # client: round is starting
+signal match_starting(world_seed: int, humans: Array, net_ids: Dictionary)  # client: round starting
 signal connection_lost()                               # client: server vanished
 
 const MAX_PLAYERS := 7
@@ -185,10 +185,34 @@ func _req_start() -> void:
 	var humans: Array = []
 	for pid in lobby:
 		humans.append({ "peer": pid, "el": lobby[pid]["el"], "name": lobby[pid]["name"] })
-	_match_started.rpc(world_seed, humans)
+	# spawn FIRST so net_ids exist, then tell each client which net_id is theirs
 	if game and game.has_method("server_start_match"):
-		game.server_start_match(world_seed, humans)   # P2+ spins up the sim
+		game.server_start_match(world_seed, humans)
+	var mapping: Dictionary = {}
+	if game:
+		for pid in game.peer_actor:
+			mapping[pid] = game.peer_actor[pid].net_id
+	_match_started.rpc(world_seed, humans, mapping)
 	print("[net] match started, seed=%d, humans=%d" % [world_seed, humans.size()])
+
+# ---- per-frame input (client -> server) ----
+func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> void:
+	_input_frame.rpc_id(1, mx, mz, sprint, yaw)
+
+@rpc("any_peer", "unreliable_ordered")
+func _input_frame(mx: float, mz: float, sprint: bool, yaw: float) -> void:
+	if not is_server or game == null:
+		return
+	game.server_set_input(multiplayer.get_remote_sender_id(), mx, mz, sprint, yaw)
+
+# ---- snapshots (server -> clients) ----
+func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
+	_snapshot.rpc(adata, meta)
+
+@rpc("authority", "unreliable_ordered")
+func _snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
+	if game:
+		game.client_on_snapshot(adata, meta)
 
 func _broadcast_lobby() -> void:
 	var players: Array = []
@@ -215,5 +239,5 @@ func _lobby_state(players: Array, admin_id: int, code: String) -> void:
 	lobby_changed.emit(players, multiplayer.get_unique_id(), admin_id, code)
 
 @rpc("authority", "reliable")
-func _match_started(world_seed: int, humans: Array) -> void:
-	match_starting.emit(world_seed, humans)
+func _match_started(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+	match_starting.emit(world_seed, humans, net_ids)

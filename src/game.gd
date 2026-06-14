@@ -109,7 +109,20 @@ var ui: GameUI
 enum Mode { SINGLE, SERVER, CLIENT }
 var mode: int = Mode.SINGLE       # SINGLE = local; SERVER = headless authority; CLIENT = networked viewer
 var net: NetManager = null        # /root/Game/Net — present in every mode
-var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float, seq:int }
+var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float }
+
+# ---- replication (P3) ----
+const SNAP_HZ := 20.0             # server snapshot rate
+const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
+const INTERP_DELAY := 0.11        # client renders remote actors this far in the past
+var _snap_accum := 0.0            # SERVER: snapshot send throttle
+# CLIENT match state
+var local_net_id := 0             # this client's own actor net_id (0 = not in a match)
+var local_el := ""                # this client's element this match
+var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we render)
+var snap_buf: Array = []          # recent snapshots [{ t, by_id:{net_id->Dictionary} }]
+var _scores := { "fire": 0, "water": 0, "grass": 0 }
+var _net_time_left := ROUND_TIME
 # Production server (set once the Render service is deployed). Override on web
 # with ?server=ws://host:port for local testing.
 const PROD_SERVER_URL := "wss://elemental-rescue-server.onrender.com"
@@ -1258,6 +1271,12 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 	# shipped in the server pack); every per-frame visual write guards on `ch.group`.
 	if mode == Mode.SERVER:
 		return ch
+	ch.group = _build_char_visual(kind, el)
+	return ch
+
+# Build + parent a CharVisual for a kind/element (shared by make_character and the
+# client's networked ghosts).
+func _build_char_visual(kind: String, el: String) -> CharVisual:
 	var model: CharVisual
 	if kind == "element":
 		if el == "fire": model = MeshLib.build_flame()
@@ -1274,8 +1293,7 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 		shadow_r = 1.85
 	MeshLib.add_blob_shadow(model, shadow_r)
 	add_child(model)
-	ch.group = model
-	return ch
+	return model
 
 # ------------------------------------------------------------- scoring
 func update_board() -> void:
@@ -1963,6 +1981,8 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	won = false
 	stamina = 100.0
 	o2_charges = 0
+	time_left = ROUND_TIME
+	_snap_accum = 0.0
 	# reset rescue state
 	allies = []
 	freed_twin = null
@@ -2170,8 +2190,85 @@ func _on_join_failed(reason: String) -> void:
 func _on_lobby_changed(players: Array, my_id: int, admin_id: int, code: String) -> void:
 	ui.show_lobby(players, my_id, admin_id, code)
 
-func _on_match_starting(_world_seed: int, _humans: Array) -> void:
-	ui.toast("Match starting!  (live gameplay lands in the next build)")   # P0 stub
+func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+	_client_start_match(world_seed, humans, net_ids)
+
+# CLIENT: enter a networked match. We keep the local backdrop world; the local
+# avatar is predicted from input and every other actor is an interpolated ghost.
+func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+	seed(world_seed)
+	_client_clear()
+	var my_peer := multiplayer.get_unique_id()
+	local_net_id = int(net_ids.get(my_peer, 0))
+	local_el = "fire"
+	for h in humans:
+		if int(h["peer"]) == my_peer:
+			local_el = String(h["el"])
+	# local predicted avatar (drives the camera + sends input)
+	player = make_character("element", local_el, true)
+	player.is_human = true
+	player.net_id = local_net_id
+	var c: Dictionary = cave_by_owner[local_el]
+	var a: float = c["openAngle"]
+	player.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	if player.group:
+		player.group.position = player.pos
+	cam_yaw = atan2(player.pos.x, player.pos.z)
+	stamina = 100.0
+	o2_charges = 0
+	var me: Dictionary = ELEMENTS[local_el]
+	ui.set_role("You: %s — catch %s, flee %s" % [me["label"], ELEMENTS[me["prey"]]["label"], ELEMENTS[me["predator"]]["label"]])
+	ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
+	ui.show_task_buttons(false)
+	ui.show_hud()
+
+func _client_clear() -> void:
+	for nid in ghosts:
+		if is_instance_valid(ghosts[nid]):
+			ghosts[nid].queue_free()
+	ghosts.clear()
+	snap_buf.clear()
+	if player and player.group and is_instance_valid(player.group):
+		player.group.queue_free()
+	player = null
+	local_net_id = 0
+
+func _now() -> float:
+	return float(Time.get_ticks_msec()) / 1000.0
+
+# CLIENT: a snapshot arrived — buffer it for interpolation and nudge the local
+# predicted avatar toward the server's authoritative position.
+func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
+	if local_net_id == 0:
+		return
+	var by_id: Dictionary = {}
+	var count := adata.size() / SNAP_FLOATS
+	for k in count:
+		var b := k * SNAP_FLOATS
+		by_id[int(adata[b])] = {
+			"x": adata[b + 1], "z": adata[b + 2], "yaw": adata[b + 3],
+			"spd": adata[b + 4], "flags": int(adata[b + 5]), "hp": int(adata[b + 6]),
+		}
+	snap_buf.append({ "t": _now(), "by_id": by_id })
+	while snap_buf.size() > 10:
+		snap_buf.pop_front()
+	_net_time_left = float(meta.get("tl", _net_time_left))
+	var sc: Dictionary = meta.get("sc", {})
+	for el in ["fire", "water", "grass"]:
+		_scores[el] = int(sc.get(el, _scores[el]))
+	if player and by_id.has(local_net_id):
+		var srv: Dictionary = by_id[local_net_id]
+		player.pos = player.pos.lerp(Vector3(srv["x"], 0, srv["z"]), 0.25)  # blend to authority
+		player.hp = int(srv["hp"])
+
+func _client_get_ghost(nid: int, flags: int) -> CharVisual:
+	if ghosts.has(nid):
+		return ghosts[nid]
+	var kind: String = _KIND_NAME[flags & 3]
+	var el: String = _EL_NAME[(flags >> 2) & 3]
+	var cv := _build_char_visual(kind, el)
+	ghosts[nid] = cv
+	return cv
 
 func _on_connection_lost() -> void:
 	mode = Mode.SINGLE
@@ -2199,6 +2296,7 @@ func _server_process(delta: float) -> void:
 		return
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
+	time_left = maxf(0.0, time_left - dt)
 	_tick_timers(dt)
 	for ch in actors:
 		if ch.is_human:
@@ -2213,6 +2311,10 @@ func _server_process(delta: float) -> void:
 				_update_o2(n, dt)
 	_update_cave_timers(dt)
 	_check_catches()
+	_snap_accum += dt
+	if _snap_accum >= 1.0 / SNAP_HZ:
+		_snap_accum = 0.0
+		_broadcast_snapshot()
 
 # Move a human actor from its latest networked input (server-authoritative). Mirror
 # of _update_player's movement math, minus local-only stamina/o2/disguise/UI.
@@ -2236,8 +2338,55 @@ func _update_human_net(ch: GameChar, dt: float) -> void:
 	ch.pos += ch.vel * dt
 	resolve_collisions(ch)
 
-# Networked viewer tick. P3 will render interpolated ghosts + predict the local
-# avatar here. For P0/lobby we only idle the 3D backdrop (if visuals exist).
+# SERVER: stash a peer's latest input (consumed by _update_human_net).
+func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float) -> void:
+	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw }
+
+# ---- snapshot encoding (shared layout, server packs / client unpacks) ----
+const _KIND_CODE := { "element": 0, "o2": 1, "co2": 2 }
+const _EL_CODE := { "": 0, "fire": 1, "water": 2, "grass": 3 }
+const _EL_NAME := ["", "fire", "water", "grass"]
+const _KIND_NAME := ["element", "o2", "co2"]
+
+func _pack_flags(ch: GameChar) -> int:
+	var f := int(_KIND_CODE[ch.kind])           # bits 0-1 kind
+	f |= int(_EL_CODE.get(ch.el, 0)) << 2        # bits 2-3 element
+	if ch.alive: f |= 1 << 4
+	if ch.co_timer > 0.0: f |= 1 << 5            # CO (spent / grey)
+	return f
+
+func _broadcast_snapshot() -> void:
+	var list: Array = []
+	list.append_array(actors)
+	list.append_array(npcs)
+	var data := PackedFloat32Array()
+	data.resize(list.size() * SNAP_FLOATS)
+	var i := 0
+	for ch in list:
+		var yaw := atan2(ch.vel.x, ch.vel.z) if ch.vel.length_squared() > 0.04 else 0.0
+		data[i] = float(ch.net_id)
+		data[i + 1] = ch.pos.x
+		data[i + 2] = ch.pos.z
+		data[i + 3] = yaw
+		data[i + 4] = ch.vel.length()
+		data[i + 5] = float(_pack_flags(ch))
+		data[i + 6] = float(ch.hp)
+		i += SNAP_FLOATS
+	var meta := {
+		"tl": time_left,
+		"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
+	}
+	if net:
+		net.broadcast_snapshot(data, meta)
+
+func _team_score(el: String) -> int:
+	var s := 0
+	for c in by_el.get(el, []):
+		s += c.score
+	return s
+
+# Networked viewer tick: predict the local avatar from input, draw every other
+# actor as an interpolated ghost, follow with the camera. No local simulation.
 func _client_process(delta: float) -> void:
 	if camera == null:
 		return   # headless test client / pre-visual: nothing to draw
@@ -2245,8 +2394,100 @@ func _client_process(delta: float) -> void:
 	time_ms += delta * 1000.0
 	for fn in deco_anims:
 		fn.call(time_ms)
+	if local_net_id == 0 or player == null:
+		_update_camera(dt)   # lobby backdrop
+		return
+	_client_predict_local(dt)
+	_client_render_remote(dt)
 	_update_wind_leaves(dt, time_ms)
 	_update_camera(dt)
+	_client_update_hud()
+
+func _client_predict_local(dt: float) -> void:
+	var mx := 0.0
+	var mz := 0.0
+	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
+	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN): mz -= 1.0
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT): mx += 1.0
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT): mx -= 1.0
+	mx += touch_move.x
+	mz += touch_move.y
+	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
+	var sprint := (Input.is_key_pressed(KEY_SHIFT) or touch_sprint) and ln > 0.05 and stamina > 1.0
+	if sprint:
+		stamina = maxf(0.0, stamina - dt * 30.0)
+	else:
+		stamina = minf(100.0, stamina + dt * 13.0)
+	ui.set_stamina(stamina)
+	net.send_input(mx, mz, sprint, cam_yaw)   # authoritative movement happens on the server
+	# local prediction so it feels instant
+	var target := Vector3.ZERO
+	if ln > 0.05:
+		var fx := -sin(cam_yaw)
+		var fz := -cos(cam_yaw)
+		var rx := -fz
+		var rz := fx
+		target = Vector3(fx * mz + rx * mx, 0, fz * mz + rz * mx).normalized()
+		target *= player.speed * (1.5 if sprint else 1.0) * terrain_mult(player) * ln
+	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
+	player.pos += player.vel * dt
+	resolve_collisions(player)
+	if player.group:
+		player.group.position = player.pos
+		if player.vel.length_squared() > 0.5:
+			player.group.rotation.y = lerp_angle(player.group.rotation.y, atan2(player.vel.x, player.vel.z), 1.0 - pow(0.001, dt))
+		player.group.animate(time_ms, player.vel.length())
+
+func _client_render_remote(dt: float) -> void:
+	if snap_buf.is_empty():
+		return
+	var render_t := _now() - INTERP_DELAY
+	var s0: Dictionary = snap_buf[0]
+	var s1: Dictionary = {}
+	for s in snap_buf:
+		if s["t"] <= render_t:
+			s0 = s
+		elif s1.is_empty():
+			s1 = s
+			break
+	var alpha := 0.0
+	if not s1.is_empty():
+		var span: float = s1["t"] - s0["t"]
+		if span > 0.0001:
+			alpha = clampf((render_t - s0["t"]) / span, 0.0, 1.0)
+	var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
+	for nid in latest:
+		if nid == local_net_id:
+			continue
+		var flags: int = latest[nid]["flags"]
+		var a0: Dictionary = s0["by_id"].get(nid, latest[nid])
+		var pos := Vector3(a0["x"], 0, a0["z"])
+		var yaw: float = a0["yaw"]
+		var spd: float = a0["spd"]
+		if not s1.is_empty() and s1["by_id"].has(nid) and s0["by_id"].has(nid):
+			var a1: Dictionary = s1["by_id"][nid]
+			pos = pos.lerp(Vector3(a1["x"], 0, a1["z"]), alpha)
+			yaw = lerp_angle(yaw, a1["yaw"], alpha)
+			spd = lerpf(spd, a1["spd"], alpha)
+		var g := _client_get_ghost(nid, flags)
+		g.visible = (flags & (1 << 4)) != 0
+		g.position = pos
+		if spd > 0.5:
+			g.rotation.y = lerp_angle(g.rotation.y, yaw, 1.0 - pow(0.001, dt))
+		g.animate(time_ms, spd)
+	for nid in ghosts.keys():
+		if not latest.has(nid):
+			if is_instance_valid(ghosts[nid]):
+				ghosts[nid].queue_free()
+			ghosts.erase(nid)
+
+func _client_update_hud() -> void:
+	ui.set_hearts(player.hp, maxi(BASE_HP, player.hp))
+	ui.set_timer(_fmt_time(_net_time_left))
+	var entries: Array = []
+	for el in ["fire", "water", "grass"]:
+		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
+	ui.set_board(entries)
 
 # Dev/test hook (no GUI): connect to a local server and exercise the full lobby
 # handshake — create → pick element → start — logging each step, then quit.
@@ -2256,7 +2497,7 @@ func _ready_testclient() -> void:
 	mode = Mode.CLIENT
 	Engine.max_fps = 60
 	_start_net()
-	get_tree().create_timer(8.0).timeout.connect(func() -> void:
+	get_tree().create_timer(12.0).timeout.connect(func() -> void:
 		print("[test] timeout — quitting"); get_tree().quit())
 	var args := OS.get_cmdline_user_args()
 	var action := "join" if args.has("join") else "create"
@@ -2278,8 +2519,16 @@ func _ready_testclient() -> void:
 		elif action == "create" and st["picked"] and not st["started"]:
 			st["started"] = true
 			net.start_match())
-	net.match_starting.connect(func(s: int, h: Array) -> void:
-		print("[test] MATCH STARTING seed=%d humans=%s" % [s, str(h)]); get_tree().quit())
+	net.match_starting.connect(func(s: int, h: Array, ids: Dictionary) -> void:
+		local_net_id = int(ids.get(multiplayer.get_unique_id(), 0))
+		print("[test] MATCH STARTING seed=%d net_ids=%s my_net_id=%d" % [s, str(ids), local_net_id])
+		# drive input (move "forward") and watch snapshots come back with our pos moving
+		var tk := Timer.new(); tk.wait_time = 0.5; tk.autostart = true; add_child(tk)
+		tk.timeout.connect(func() -> void:
+			net.send_input(0.0, 1.0, false, 0.0)
+			var me: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"].get(local_net_id, {}) if not snap_buf.is_empty() else {}
+			print("[test] snaps=%d  my pos=(%.1f,%.1f)" % [snap_buf.size(),
+				float(me.get("x", 0.0)), float(me.get("z", 0.0))])))
 	print("[test] connecting as '%s' (%s %s)…" % [action, code, ""])
 	net.connect_to("ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT, "Tester-" + action, action, code)
 
