@@ -60,14 +60,27 @@ static func _touch_param() -> Variant:
 
 # Godot's DisplayServer.is_touchscreen_available() is unreliable in the web export
 # (many phone browsers report false), which is why the joystick went missing on
-# mobile. Ask the browser directly — touch events / coarse pointer / touch points.
+# mobile. But asking only "does the browser expose touch?" is too broad the other
+# way: plenty of desktops report navigator.maxTouchPoints > 0 (a phantom touch
+# digitiser — e.g. Windows machines report 10) while being driven by a mouse, so
+# they wrongly got the joystick. So a session counts as touch only when it's a real
+# phone/tablet: the UA says mobile, OR it has touch AND lacks a desktop-style
+# pointer — a precise "fine" pointer that can hover, i.e. a mouse. A touchscreen
+# laptop with a mouse keeps the keyboard game; a phone/tablet (incl. iPad, whose UA
+# looks like desktop Safari) still gets the controls.
 static func _web_has_touch() -> bool:
 	if not OS.has_feature("web"):
 		return false
 	var r = JavaScriptBridge.eval(
-		"(('ontouchstart' in window) || (navigator.maxTouchPoints > 0)" +
-		" || (navigator.msMaxTouchPoints > 0)" +
-		" || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) ? 1 : 0", true)
+		"(function(){" +
+		"var d=navigator.userAgentData,u=navigator.userAgent||'';" +
+		"var m=(d&&typeof d.mobile==='boolean')?d.mobile:" +
+		"/Android|iPhone|iPad|iPod|IEMobile|BlackBerry|Opera Mini|Mobile/i.test(u);" +
+		"var mm=window.matchMedia;" +
+		"var fine=!!(mm&&mm('(pointer: fine)').matches);" +
+		"var hover=!!(mm&&mm('(any-hover: hover)').matches);" +
+		"var t=('ontouchstart' in window)||navigator.maxTouchPoints>0||navigator.msMaxTouchPoints>0;" +
+		"return (m||(t&&!(fine&&hover)))?1:0;})()", true)
 	return r != null and int(r) == 1
 
 # Best-effort: is this a phone/tablet (touch) session? Used here and by the HUD.
