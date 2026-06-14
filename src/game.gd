@@ -106,8 +106,11 @@ var camera: Camera3D
 var ui: GameUI
 
 # ------------------------------------------------------------- online multiplayer
-enum Mode { SINGLE, SERVER, CLIENT }
-var mode: int = Mode.SINGLE       # SINGLE = local; SERVER = headless authority; CLIENT = networked viewer
+enum Mode { SINGLE, SERVER, CLIENT, HOST }
+var mode: int = Mode.SINGLE       # SINGLE = local; HOST = this browser is the authority
+                                  # (runs the sim + plays); CLIENT = guest viewer.
+                                  # SERVER (old headless authority) is retired — kept in
+                                  # the enum only so CLIENT keeps its value.
 var net: NetManager = null        # /root/Game/Net — present in every mode
 var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float }
 
@@ -279,64 +282,12 @@ func _build_banner_leaves() -> void:
 
 # ------------------------------------------------------------------- setup
 func _ready() -> void:
-	if _is_server_mode():
-		mode = Mode.SERVER
-		_ready_server()
-		return
 	if OS.get_cmdline_user_args().has("testclient"):
 		_ready_testclient()   # dev hook: headless lobby smoke-test (see _ready_testclient)
 		return
 	_ready_visual()
 
-func _is_server_mode() -> bool:
-	# launched as the dedicated authoritative server (Docker `--server`, or a
-	# server export which advertises the "dedicated_server" feature)
-	return OS.has_feature("dedicated_server") or OS.get_cmdline_user_args().has("server")
-
-func _ready_server() -> void:
-	randomize()
-	Engine.max_fps = 20   # match the 20Hz snapshot rate; less CPU on the fractional-CPU free tier
-	_start_net()
-	# Bind an INTERNAL port. In the Render container a tiny TCP proxy owns the public
-	# $PORT (answering Render's HTTP port-scan) and forwards WebSocket traffic here;
-	# locally clients connect to this port directly.
-	var port := NetManager.DEFAULT_PORT
-	if OS.has_environment("GAME_PORT"):
-		port = int(OS.get_environment("GAME_PORT"))
-	net.setup_server(port)
-	print("[Elemental Rescue] dedicated server ready (mode=SERVER)")
-	if OS.get_cmdline_user_args().has("servertest"):
-		call_deferred("_server_selftest")   # dev: spin a fake match with no clients
-
-# Dev hook: start a match with fake humans and log the sim so the headless
-# simulation can be smoke-tested with no clients.  godot ... -- server servertest
-func _server_selftest() -> void:
-	server_start_match(12345, [{ "peer": 101, "el": "fire" }, { "peer": 102, "el": "grass" }])
-	print("[selftest] spawned actors=%d npcs=%d" % [actors.size(), npcs.size()])
-	var fh: GameChar = by_el["fire"][0]   # the fire human — drive it through the rescue
-	var step := { "n": 0 }
-	var t := Timer.new(); t.wait_time = 1.0; t.autostart = true; add_child(t)
-	t.timeout.connect(func() -> void:
-		step["n"] += 1
-		var n: int = step["n"]
-		if n == 4:
-			fh.pos = keys["fire"]["pos"]
-			print("[selftest] -> teleported fire human onto its key")
-		elif n == 5:
-			print("[selftest] has_key[fire]=%s" % str(has_key_by_el.get("fire", false)))
-			var cg: Dictionary = cage_by_el["fire"]
-			fh.pos = Vector3(cg["x"], 0, cg["z"])
-			print("[selftest] -> teleported fire human to its cage")
-		elif n == 6:
-			print("[selftest] twin[fire] freed=%s" % str(twin_by_el.get("fire") != null))
-			if twin_by_el.get("fire") != null:
-				var hc: Dictionary = cave_by_owner["fire"]
-				twin_by_el["fire"].pos = Vector3(hc["x"], 0, hc["z"])
-				print("[selftest] -> teleported fire twin to home cave")
-		elif n == 7:
-			print("[selftest] RESULT ending=%s won=%s" % [str(ending), str(won)]))
-
-# Create the Net node — same path (/root/Game/Net) on server and client so RPCs match.
+# Create the Net node — same path (/root/Game/Net) on host and guests so messages line up.
 func _start_net() -> void:
 	net = NetManager.new()
 	net.name = "Net"
@@ -468,11 +419,11 @@ func _build_trails() -> void:
 
 # ------------------------------------------------------------------ main loop
 func _process(delta: float) -> void:
-	if mode == Mode.SERVER:
-		_server_process(delta)   # headless authority: simulate, never render (P2+)
+	if mode == Mode.HOST:
+		_host_process(delta)     # this browser is the authority: simulate, render, play
 		return
 	if mode == Mode.CLIENT:
-		_client_process(delta)   # networked viewer: render snapshots, never sim locally (P3+)
+		_client_process(delta)   # guest viewer: render snapshots, never sim locally
 		return
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
@@ -2083,9 +2034,10 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 					player = hc
 		for _i in (biggest - human_count[el]):
 			_spawn_element_actor(el, 0, false, false)
-	# fewer molecules online → lighter sim on the fractional-CPU free server (single-player keeps the full set)
-	var n_o2 := 6 if mode == Mode.SERVER else N_O2
-	var n_co2 := 2 if mode == Mode.SERVER else N_CO2
+	# fewer molecules online → lighter sim + smaller snapshots on the host's browser
+	# (single-player keeps the full set)
+	var n_o2 := 6 if mode != Mode.SINGLE else N_O2
+	var n_co2 := 2 if mode != Mode.SINGLE else N_CO2
 	for i in n_o2:
 		var o := make_character("o2")
 		o.pos = random_spot()
@@ -2215,6 +2167,10 @@ func _on_play_again() -> void:
 	_clear_actors()
 	ending = false
 	running = false
+	if mode != Mode.SINGLE:   # leaving an online match → disconnect cleanly
+		if net:
+			net.leave()
+		mode = Mode.SINGLE
 	ui.show_start()
 
 # ------------------------------------------------------------------ online (client)
@@ -2242,7 +2198,7 @@ func _server_url() -> String:
 	return "ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT   # native/editor → local server
 
 func _on_host_requested(name_: String) -> void:
-	mode = Mode.CLIENT
+	mode = Mode.HOST   # the host browser runs the authoritative game
 	ui.set_online_status("Connecting…")
 	net.connect_to(_server_url(), name_, "create", NetManager.gen_code())
 
@@ -2317,8 +2273,9 @@ func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary) -> 
 func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
 	seed(world_seed)
 	_client_clear()
-	var my_peer := multiplayer.get_unique_id()
-	local_net_id = int(net_ids.get(my_peer, 0))
+	var my_peer := net.my_id
+	# net_ids came over JSON, so its keys are strings (e.g. {"3": 5}); check both forms.
+	local_net_id = int(net_ids.get(str(my_peer), net_ids.get(my_peer, 0)))
 	local_el = "fire"
 	for h in humans:
 		if int(h["peer"]) == my_peer:
@@ -2413,47 +2370,121 @@ func _on_connection_lost() -> void:
 	ui.toast("Disconnected from the server.")
 	ui.show_start()
 
-# Called on the SERVER when the admin starts the match. Builds the world (once),
-# spawns humans + NPC fillers, and starts the authoritative simulation.
-func server_start_match(world_seed: int, humans: Array) -> void:
+# HOST: the admin clicked START. The host browser is the authority — it builds the
+# match (humans + NPC fillers, with visuals), plays as its own avatar, and streams
+# snapshots to the guests. net.gd calls this, then broadcasts "start" to the guests.
+func host_start_match(world_seed: int, humans: Array) -> void:
 	seed(world_seed)
 	if world_root == null:
 		world_root = Node3D.new()
 		add_child(world_root)
-		WorldBuilder.build(self)   # full procedural world; headless-safe (no GLB models)
+		WorldBuilder.build(self)
 	var hs: Array = []
+	var my_el := "fire"
 	for h in humans:
-		hs.append({ "peer": int(h["peer"]), "el": String(h["el"]), "local": false })
+		var is_local: bool = bool(h.get("local", false))
+		hs.append({ "peer": int(h["peer"]), "el": String(h["el"]), "local": is_local })
+		if is_local:
+			my_el = String(h["el"])
 	net_input.clear()
-	_spawn_match(hs, "")           # running flips true after the countdown
+	local_el = my_el
+	_spawn_match(hs, my_el)        # creates visuals + the host's own avatar; running flips true after the countdown
 
-# Headless authority tick: the render-free simulation. Movement + AI + catches for
-# everyone; no camera/UI/trails. Rescue/clan/training land in P4.
-func _server_process(delta: float) -> void:
-	if not running:
+# HOST: a guest dropped — leave their avatar behind as an AI filler so its team isn't
+# suddenly a player short, and stop reading their (now absent) input.
+func host_remove_peer(peer: int) -> void:
+	net_input.erase(peer)
+	if peer_actor.has(peer):
+		var ch: GameChar = peer_actor[peer]
+		ch.is_human = false
+		ch.peer_id = 0
+		peer_actor.erase(peer)
+
+# HOST authority tick: simulate everyone (the host's own avatar from local input, the
+# guests from their relayed input, plus AI + molecules), resolve catches/rescue, render
+# the world, and stream snapshots to the guests.
+func _host_process(delta: float) -> void:
+	if camera == null:
 		return
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
-	time_left = maxf(0.0, time_left - dt)
-	_tick_timers(dt)
-	for ch in actors:
-		if ch.is_human:
-			_update_human_net(ch, dt)
-		elif ch.alive:
-			_update_element_ai(ch, dt)
-	for n in npcs:
-		if n.alive:
-			if n.kind == "co2":
-				_update_co2(n, dt)
-			else:
-				_update_o2(n, dt)
-	_update_cave_timers(dt)
-	_check_catches()
-	_server_rescue(dt)
-	_snap_accum += dt
-	if _snap_accum >= 1.0 / SNAP_HZ:
-		_snap_accum = 0.0
-		_broadcast_snapshot()
+	var cd := _cosmetic_step(delta)
+	if cd >= 0.0:
+		for fn in deco_anims:
+			fn.call(time_ms)
+	if running:
+		time_left = maxf(0.0, time_left - dt)
+		_host_capture_local_input(dt)        # host's own avatar input -> net_input[my_id]
+		_tick_timers(dt)
+		for ch in actors:
+			if ch.is_human:
+				_update_human_net(ch, dt)
+			elif ch.alive:
+				_update_element_ai(ch, dt)
+		for n in npcs:
+			if n.alive:
+				if n.kind == "co2":
+					_update_co2(n, dt)
+				else:
+					_update_o2(n, dt)
+		_update_cave_timers(dt)
+		_check_catches()
+		_server_rescue(dt)
+		_host_sync_hud()
+		_snap_accum += dt
+		if _snap_accum >= 1.0 / SNAP_HZ:
+			_snap_accum = 0.0
+			_broadcast_snapshot()
+	if cd >= 0.0:
+		_update_wind_leaves(minf(0.08, cd), time_ms)
+	_update_trails(dt)
+	for ch in all_chars():
+		if not ch.alive or ch.group == null:
+			continue
+		ch.group.position = ch.pos
+		if ch.vel.length_squared() > 0.5:
+			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
+		ch.group.animate(time_ms, ch.vel.length())
+	_update_camera(dt)
+
+# HOST: read this player's own input (keyboard + on-screen joystick/sprint) and stash
+# it as net_input so _update_human_net moves the host's avatar like any other human.
+func _host_capture_local_input(dt: float) -> void:
+	var hid := net.my_id
+	if player == null or not player.alive:
+		net_input[hid] = { "move": Vector2.ZERO, "sprint": false, "yaw": cam_yaw }
+		return
+	var mx := 0.0
+	var mz := 0.0
+	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
+	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN): mz -= 1.0
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT): mx += 1.0
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT): mx -= 1.0
+	mx += touch_move.x   # mobile joystick (zero on desktop)
+	mz += touch_move.y
+	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
+	var sprint := (Input.is_key_pressed(KEY_SHIFT) or touch_sprint) and ln > 0.05 and stamina > 1.0
+	if sprint:
+		stamina = maxf(0.0, stamina - dt * 30.0)
+	else:
+		stamina = minf(100.0, stamina + dt * 13.0)
+	ui.set_stamina(stamina)
+	net_input[hid] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": cam_yaw }
+
+# HOST: drive the shared HUD from the host's own authoritative state (it reuses the
+# client HUD helpers, which read these _net_* mirrors).
+func _host_sync_hud() -> void:
+	if player == null:
+		return
+	local_el = player.el
+	for el in ["fire", "water", "grass"]:
+		_net_rk[el] = bool(has_key_by_el.get(el, false))
+		_net_rt[el] = twin_by_el.get(el) != null
+		_scores[el] = _team_score(el)
+	_net_time_left = time_left
+	has_key = bool(has_key_by_el.get(player.el, false))   # radar objective marker
+	freed_twin = twin_by_el.get(player.el)
+	_client_update_hud()
 
 # Move a human actor from its latest networked input (server-authoritative). Mirror
 # of _update_player's movement math, minus local-only stamina/o2/disguise/UI.
@@ -2616,7 +2647,11 @@ func _server_end_match(reason: String, winner_el: String) -> void:
 		standings.append({ "el": el, "score": _team_score(el), "winner": el == winner_el })
 	if net:
 		net.broadcast_end(reason, winner_el, standings)
-	print("[server] match ended: %s team wins (%s)" % [winner_el, reason])
+	# the host doesn't receive its own broadcast — show it the end screen directly,
+	# keeping its actors on screen (like single-player).
+	if mode == Mode.HOST:
+		_show_end_screen(reason, winner_el, standings.duplicate(true))
+	print("[host] match ended: %s team wins (%s)" % [winner_el, reason])
 
 # Networked viewer tick: predict the local avatar from input, draw every other
 # actor as an interpolated ghost, follow with the camera. No local simulation.
@@ -2746,7 +2781,14 @@ func _client_sync_keys(kp: Dictionary) -> void:
 			else:
 				node.visible = false   # picked up → hide
 
+# GUEST: the host told us the round is over. Tear down the networked view, then show
+# the end screen.
 func _on_match_ended(reason: String, winner_el: String, standings: Array) -> void:
+	_client_clear()
+	_show_end_screen(reason, winner_el, standings)
+
+# Shared end screen (guest + host). Reads local_el for the "me"/"your team" wording.
+func _show_end_screen(reason: String, winner_el: String, standings: Array) -> void:
 	standings.sort_custom(func(a, b): return a["score"] > b["score"])
 	var out: Array = []
 	for i in standings.size():
@@ -2764,7 +2806,6 @@ func _on_match_ended(reason: String, winner_el: String, standings: Array) -> voi
 		else:
 			title = "%s team wins!" % ELEMENTS[winner_el]["label"]
 			sub = "%s completed their rescue first." % ELEMENTS[winner_el]["label"]
-	_client_clear()
 	ui.show_end(out, title, sub)
 
 # Dev/test hook (no GUI): connect to a local server and exercise the full lobby
@@ -2796,8 +2837,8 @@ func _ready_testclient() -> void:
 			print("[%s] 2 players in lobby — starting match" % label)
 			net.start_match())
 	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary) -> void:
-		var mine := multiplayer.get_unique_id()
-		local_net_id = int(ids.get(mine, 0))
+		var mine := net.my_id
+		local_net_id = int(ids.get(str(mine), ids.get(mine, 0)))
 		for pid in ids:
 			if int(pid) != mine:
 				st["other"] = int(ids[pid])

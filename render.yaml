@@ -21,16 +21,18 @@ services:
         source: /
         destination: /index.html
 
-  # Dedicated authoritative game server for online multiplayer. A headless copy
-  # of the game (Docker) that browser clients connect to over wss://.
-  # NOTE: no healthCheckPath — Render's default TCP probe satisfies a WebSocket
-  # server (Godot does not answer plain HTTP GET). Free tier sleeps after 15 min
-  # idle (~1 min cold start on the first join); bump to a paid plan for always-on.
+  # Online-multiplayer relay (server.js). A tiny Node WebSocket relay — NO game
+  # engine on the server. One player's browser is the HOST and runs the game; this
+  # just shuttles messages between the host and the guests.
+  # On the paid Starter plan ($7/mo): always-on (no 15-min sleep / cold start) and a
+  # steady dedicated CPU, so the relay forwards friends' traffic with the lowest,
+  # most consistent latency. (The relay is light — Free works too, but it sleeps and
+  # cold-starts on the first connect.)
   - type: web
     name: elemental-rescue-server
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    plan: starter   # paid ($7/mo): one steady CPU + always-on (no 15-min sleep / cold start)
+    runtime: node
+    plan: starter
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
     region: oregon
     autoDeploy: true

@@ -47,7 +47,7 @@ func _ready() -> void:
 	# Drive with the mouse on desktop, or whenever testing via ?touch=1 (even on
 	# a touchscreen laptop). On a real phone touch drives it and the emulated
 	# mouse is blocked so the camera never spins.
-	_use_mouse = _forced or not DisplayServer.is_touchscreen_available()
+	_use_mouse = _forced or not _detect_touch()
 	visible = _enabled
 	get_viewport().size_changed.connect(_recompute)
 	_recompute()
@@ -58,19 +58,35 @@ static func _touch_param() -> Variant:
 		return JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('touch')", true)
 	return null
 
+# Godot's DisplayServer.is_touchscreen_available() is unreliable in the web export
+# (many phone browsers report false), which is why the joystick went missing on
+# mobile. Ask the browser directly — touch events / coarse pointer / touch points.
+static func _web_has_touch() -> bool:
+	if not OS.has_feature("web"):
+		return false
+	var r = JavaScriptBridge.eval(
+		"(('ontouchstart' in window) || (navigator.maxTouchPoints > 0)" +
+		" || (navigator.msMaxTouchPoints > 0)" +
+		" || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) ? 1 : 0", true)
+	return r != null and int(r) == 1
+
+# Best-effort: is this a phone/tablet (touch) session? Used here and by the HUD.
+static func _detect_touch() -> bool:
+	return DisplayServer.is_touchscreen_available() or _web_has_touch()
+
 # Is this a touch/phone session? Shared by the HUD so it scales to match.
 static func is_touch_session() -> bool:
 	var qp = _touch_param()
 	if qp != null:
 		return str(qp) != "0"
-	return DisplayServer.is_touchscreen_available()
+	return _detect_touch()
 
 func _resolve_enabled() -> bool:
 	var qp = _touch_param()
 	if qp != null:
 		_forced = str(qp) != "0"
 		return _forced
-	return DisplayServer.is_touchscreen_available()
+	return _detect_touch()
 
 func _recompute() -> void:
 	var s := get_viewport().get_visible_rect().size
@@ -82,7 +98,11 @@ func _recompute() -> void:
 func _process(_dt: float) -> void:
 	if game == null:
 		return
-	var want := _enabled and game.running and game.player != null and game.player.alive
+	# In an online match show the joystick + sprint for EVERY player (mobile and
+	# desktop) — host AND guests, since the host shares one invite link and we can't
+	# tell who's on a phone. Single-player keeps the touch-only rule.
+	var online: bool = game.mode == Game.Mode.CLIENT or game.mode == Game.Mode.HOST
+	var want := (_enabled or online) and game.running and game.player != null and game.player.alive
 	if want != _pad.visible:
 		_pad.visible = want
 		if not want:
