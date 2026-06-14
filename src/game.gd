@@ -87,9 +87,14 @@ var deco_anims: Array = []       # [Callable(t_ms)]
 var wind_leaves: Array = []
 
 # --------------------------------------------------------------- game state
-var chars: Dictionary = {}       # el -> GameChar
-var npcs: Array = []             # [GameChar]
-var player: GameChar = null
+# element actors — generalized from the old single-`chars[el]` model so each
+# element can hold many actors (humans + NPC fillers) for online multiplayer.
+var actors: Array = []           # all element actors (humans + NPC fillers)
+var by_el: Dictionary = {}       # el -> Array[GameChar]
+var peer_actor: Dictionary = {}  # peer_id -> GameChar (humans only)
+var _next_net_id := 1
+var npcs: Array = []             # [GameChar] — O₂ / CO₂ molecules
+var player: GameChar = null      # the LOCAL human's actor (null on the server)
 var running := false
 var ending := false
 var time_ms := 0.0
@@ -394,8 +399,8 @@ func _process(delta: float) -> void:
 	if running:
 		_tick_timers(dt)
 		_update_player(dt)
-		for ch in chars.values():
-			if not ch.is_player and ch.alive:
+		for ch in actors:
+			if not ch.is_human and ch.alive:
 				_update_element_ai(ch, dt)
 		for a in allies:
 			_update_ally(a, dt)
@@ -416,8 +421,8 @@ func _process(delta: float) -> void:
 		_check_catches()
 		_check_rescue()
 		_update_hud_status()
-		for ch in chars.values():
-			if ch.alive and not ch.is_player and ch.vel.length_squared() > 120.0 and randf() < dt * 14.0:
+		for ch in actors:
+			if ch.alive and not ch.is_human and ch.vel.length_squared() > 120.0 and randf() < dt * 14.0:
 				_spawn_trail(ch)
 
 	_update_trails(dt)
@@ -708,7 +713,7 @@ func _eject_from_cave(ch: GameChar) -> void:
 		ui.toast("Ejected! Cave locked for %ds" % int(CAVE_LOCKOUT))
 
 func _update_cave_timers(dt: float) -> void:
-	for ch in chars.values():
+	for ch in actors:
 		if not ch.alive:
 			continue
 		if ch.cave_cooldown > 0.0:
@@ -986,10 +991,22 @@ func _smart_move(ch: GameChar, attracts: Array, repels: Array, dt: float, speed_
 			best = score; best_dir = dir
 	_steer(ch, best_dir, dt, speed_mult)
 
+# nearest ALIVE actor of a group (the per-element array in by_el) to a point.
+func _nearest_in(group: Array, from: Vector3) -> GameChar:
+	var best: GameChar = null
+	var bd := 1.0e20
+	for c in group:
+		if not c.alive:
+			continue
+		var d: float = from.distance_to(c.pos)
+		if d < bd:
+			bd = d; best = c
+	return best
+
 func _update_element_ai(ch: GameChar, dt: float) -> void:
 	var me: Dictionary = ELEMENTS[ch.el]
-	var predator: GameChar = chars.get(me["predator"])
-	var prey: GameChar = chars.get(me["prey"])
+	var predator: GameChar = _nearest_in(by_el.get(me["predator"], []), ch.pos)
+	var prey: GameChar = _nearest_in(by_el.get(me["prey"], []), ch.pos)
 	# while the player wears a black stone they're "energized" — the element they'd
 	# normally eat them (this char, if its prey is the player) must flee instead.
 	var prey_is_empowered: bool = prey != null and prey.is_player and _is_disguised()
@@ -1095,7 +1112,7 @@ func _update_o2(ch: GameChar, dt: float) -> void:
 		return
 	# otherwise drift, fleeing any element that gets close (without cornering itself)
 	var repels: Array = []
-	for e in chars.values():
+	for e in actors:
 		if e.alive and ch.pos.distance_to(e.pos) < 11.0:
 			repels.append({ "pos": e.pos, "weight": 2.2, "range": 11.0 })
 	for a in allies:
@@ -1196,7 +1213,7 @@ func _update_wind_leaves(dt: float, t: float) -> void:
 
 # ------------------------------------------------------------- characters
 func all_chars() -> Array:
-	var a: Array = chars.values().duplicate()
+	var a: Array = actors.duplicate()
 	a.append_array(npcs)
 	a.append_array(allies)
 	if freed_twin:
@@ -1204,7 +1221,7 @@ func all_chars() -> Array:
 	return a
 
 func alive_elements() -> Array:
-	return chars.values().filter(func(c): return c.alive)
+	return actors.filter(func(c): return c.alive)
 
 func make_character(kind: String, el: String = "", is_player: bool = false) -> GameChar:
 	var model: CharVisual
@@ -1227,6 +1244,8 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 	ch.kind = kind
 	ch.el = el
 	ch.is_player = is_player
+	ch.net_id = _next_net_id
+	_next_net_id += 1
 	ch.group = model
 	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
 	if kind == "element":
@@ -1239,37 +1258,48 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 
 # ------------------------------------------------------------- scoring
 func update_board() -> void:
+	var my_el := player.el if player else ""
 	var entries: Array = []
 	for el in ["fire", "water", "grass"]:
-		var ch: GameChar = chars.get(el)
-		if ch == null:
+		var group: Array = by_el.get(el, [])
+		if group.is_empty():
 			continue
-		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": ch.score, "alive": ch.alive, "me": ch.is_player })
+		var score := 0
+		var any_alive := false
+		for c in group:
+			score += c.score
+			if c.alive:
+				any_alive = true
+		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": score, "alive": any_alive, "me": el == my_el })
 	ui.set_board(entries)
 
 func _check_catches() -> void:
-	# elemental predators hit their prey (a hit costs a heart, not a life)
-	for el in ["fire", "water", "grass"]:
-		var a: GameChar = chars.get(el)
-		if a == null or not a.alive or inside_own_cave(a):
+	# elemental predators hit the nearest catchable prey actor (a hit costs a heart)
+	for a in actors:
+		if not a.alive or inside_own_cave(a):
 			continue
-		var prey: GameChar = chars.get(ELEMENTS[el]["prey"])
-		if prey == null or not prey.alive or inside_own_cave(prey) or inside_own_room(prey):
-			continue
-		if prey.is_player and _is_disguised():
-			continue        # energized: your predator can't catch you right now
-		if a.pos.distance_to(prey.pos) < CATCH_DIST:
+		var prey: GameChar = null
+		var nd := 1.0e20
+		for p in by_el.get(ELEMENTS[a.el]["prey"], []):
+			if not p.alive or inside_own_cave(p) or inside_own_room(p):
+				continue
+			if p.is_player and _is_disguised():
+				continue        # energized: their predator can't catch them right now
+			var d: float = a.pos.distance_to(p.pos)
+			if d < nd:
+				nd = d; prey = p
+		if prey and nd < CATCH_DIST:
 			_take_hit(prey, a)
 	# black-stone power-up (Pac-Man style): while disguised you can EAT your predator
 	if _is_disguised() and player and player.alive and not inside_own_cave(player):
-		var pred: GameChar = chars.get(ELEMENTS[player.el]["predator"])
-		if pred and pred.alive and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST:
+		var pred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos)
+		if pred and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST:
 			ui.toast("Gotcha! You caught your predator %s!" % ELEMENTS[pred.el]["label"])
 			_take_hit(pred, player)
 	# ATTACK clan smack the element you hunt
 	if player and player.alive and not allies.is_empty():
-		var prey: GameChar = chars.get(ELEMENTS[player.el]["prey"])
-		if prey != null and prey.alive and not inside_own_cave(prey) and not inside_own_room(prey):
+		var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["prey"], []), player.pos)
+		if prey != null and not inside_own_cave(prey) and not inside_own_room(prey):
 			for a in allies:
 				if a.role == "attack" and a.pos.distance_to(prey.pos) < CATCH_DIST:
 					_take_hit(prey, a)
@@ -1279,11 +1309,12 @@ func _check_catches() -> void:
 	# DIE doing it once the whole clan is assigned — while you're still organising, the
 	# predator/CO₂ can't actually catch your defenders. (מתאבדים, once you're committed.)
 	var clan_live := _all_clan_assigned()
+	var ppred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos) if player else null
 	for a in allies.duplicate():
 		if a.role != "protect":
 			continue
-		var pred: GameChar = chars.get(ELEMENTS[player.el]["predator"])
-		if pred and pred.alive and not inside_own_cave(pred) and pred.slow_timer <= 0.0 and a.pos.distance_to(pred.pos) < CATCH_DIST:
+		var pred: GameChar = ppred
+		if pred and not inside_own_cave(pred) and pred.slow_timer <= 0.0 and a.pos.distance_to(pred.pos) < CATCH_DIST:
 			pred.slow_timer = SLOW_TIME    # brief slow-down, not a trip home
 			if clan_live:
 				ui.toast("A clan member sacrificed itself to slow %s!" % ELEMENTS[pred.el]["label"])
@@ -1344,7 +1375,7 @@ func _co2_targets() -> Array:
 	# while you're home in the clan house, CO₂ can't see you or any of your clan
 	var hide_mine := _player_in_clan_hall()
 	var out: Array = []
-	for e in chars.values():
+	for e in actors:
 		if not e.alive or inside_cave(e.pos) or inside_own_room(e):
 			continue
 		if e.is_player and (_is_disguised() or hide_mine):
@@ -1474,7 +1505,7 @@ func _update_ally(a: GameChar, dt: float) -> void:
 		"attack":
 			# ALWAYS hunt the element you eat — chase it down, and if it ducks into its
 			# cave just camp at the entrance. Never trot back to you (that yo-yo looked silly).
-			var prey: GameChar = chars.get(ELEMENTS[player.el]["prey"])
+			var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["prey"], []), a.pos)
 			if prey and prey.alive:
 				attracts.append({ "pos": _lead_point(a.pos, prey, a.speed), "weight": 3.6, "range": 320.0 })
 		"protect":
@@ -1532,7 +1563,7 @@ func _clan_assign_active() -> bool:
 func _nearest_threat_to_player(a: GameChar) -> GameChar:
 	var best: GameChar = null
 	var bd := 1.0e20
-	var pred: GameChar = chars.get(ELEMENTS[player.el]["predator"])
+	var pred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos)
 	if pred and pred.alive and not inside_own_cave(pred):
 		bd = player.pos.distance_to(pred.pos); best = pred
 	for n in npcs:
@@ -1894,7 +1925,14 @@ func _update_objective() -> void:
 	ui.set_objective(txt)
 
 # ------------------------------------------------------------- game flow
+# Single-player entry: one local human + NPC fillers (the N=1 case of _spawn_match).
 func start_game(my_el: String) -> void:
+	_spawn_match([{ "peer": 1, "el": my_el, "local": true }], my_el)
+
+# Build a match from a list of humans [{peer, el, local?}]. Each element is filled
+# with NPC elementals up to the largest human team ("match the biggest team"), so
+# the three elements stay balanced however players pick. Single-player is N=1.
+func _spawn_match(humans: Array, local_el: String = "") -> void:
 	_clear_actors()
 	ending = false
 	won = false
@@ -1909,44 +1947,72 @@ func start_game(my_el: String) -> void:
 	teach_progress = 0.0
 	clan_cooldown = 0.0
 	disguise_timer = 0.0
+	_next_net_id = 1
 	WorldBuilder.reset_cages(self)
+	var human_count := { "fire": 0, "water": 0, "grass": 0 }
+	for h in humans:
+		human_count[h["el"]] += 1
+	var biggest := maxi(1, maxi(human_count["fire"], maxi(human_count["water"], human_count["grass"])))
 	for el in ["fire", "water", "grass"]:
-		var ch := make_character("element", el, el == my_el)
-		ch.max_hp = BASE_HP
-		ch.hp = BASE_HP
-		var c: Dictionary = cave_by_owner[el]
-		var a: float = c["openAngle"]
-		# spawn well clear of the cave mouth so the chase camera (which sits behind
-		# the player, i.e. back toward the cave) isn't looking through the rocks.
-		ch.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
-		ch.group.position = ch.pos
-		ch.group.rotation.y = atan2(-ch.pos.x, -ch.pos.z)
-		chars[el] = ch
-		if ch.is_player:
-			player = ch
+		by_el[el] = []
+		for h in humans:
+			if h["el"] == el:
+				var is_local: bool = (mode != Mode.SERVER) and bool(h.get("local", false))
+				var hc := _spawn_element_actor(el, int(h["peer"]), true, is_local)
+				if is_local:
+					player = hc
+		for _i in (biggest - human_count[el]):
+			_spawn_element_actor(el, 0, false, false)
 	for i in N_O2:
 		var o := make_character("o2")
 		o.pos = random_spot()
-		o.group.position = o.pos
+		if o.group: o.group.position = o.pos
 		npcs.append(o)
 	for i in N_CO2:
 		var c := make_character("co2")
 		c.pos = random_spot(40.0)
-		c.group.position = c.pos
+		if c.group: c.group.position = c.pos
 		npcs.append(c)
-	var me: Dictionary = ELEMENTS[my_el]
-	ui.set_role("You: %s — catch %s, flee %s" % [me["label"], ELEMENTS[me["prey"]]["label"], ELEMENTS[me["predator"]]["label"]])
-	cam_yaw = atan2(player.pos.x, player.pos.z)
-	ui.show_hud()
-	ui.setup_task_icons(my_el, ELEMENTS[my_el]["predator"], ELEMENTS[my_el]["prey"])
-	ui.show_task_buttons(false)
+	if mode != Mode.SERVER and local_el != "":
+		var me: Dictionary = ELEMENTS[local_el]
+		ui.set_role("You: %s — catch %s, flee %s" % [me["label"], ELEMENTS[me["prey"]]["label"], ELEMENTS[me["predator"]]["label"]])
+		if player:
+			cam_yaw = atan2(player.pos.x, player.pos.z)
+		ui.show_hud()
+		ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
+		ui.show_task_buttons(false)
 	_spawn_keys()
 	_spawn_black_stones()
-	_update_hud_hearts()
-	_update_hud_status()
-	_update_objective()
-	update_board()
+	if mode != Mode.SERVER:
+		_update_hud_hearts()
+		_update_hud_status()
+		_update_objective()
+		update_board()
 	_run_countdown()
+
+# Create one element actor (human or NPC filler), placed at its element's cave
+# mouth and registered in actors / by_el / peer_actor.
+func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool) -> GameChar:
+	var ch := make_character("element", el, is_local)
+	ch.peer_id = peer
+	ch.is_human = is_human
+	ch.max_hp = BASE_HP
+	ch.hp = BASE_HP
+	var c: Dictionary = cave_by_owner[el]
+	var base_a: float = c["openAngle"]
+	# fan multiple same-element actors around the cave mouth so they don't stack
+	var idx: int = by_el[el].size()
+	var a: float = base_a + (0.0 if idx == 0 else (float((idx + 1) / 2) * 0.42 * (1 if idx % 2 == 1 else -1)))
+	# spawn well clear of the cave mouth so the chase camera isn't looking through rocks
+	ch.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	if ch.group:
+		ch.group.position = ch.pos
+		ch.group.rotation.y = atan2(-ch.pos.x, -ch.pos.z)
+	by_el[el].append(ch)
+	actors.append(ch)
+	if peer != 0:
+		peer_actor[peer] = ch
+	return ch
 
 func _run_countdown() -> void:
 	running = false
@@ -1962,31 +2028,49 @@ func end_game(reason: String) -> void:
 		return
 	ending = true
 	running = false
-	var rows: Array = chars.values().duplicate()
-	rows.sort_custom(func(a, b): return a.score > b.score)
+	# standings are per-element TEAM (humans + NPC fillers of that element aggregated)
+	var rows: Array = []
+	for el in ["fire", "water", "grass"]:
+		var group: Array = by_el.get(el, [])
+		if group.is_empty():
+			continue
+		var score := 0
+		var any_alive := false
+		var is_me := false
+		for c in group:
+			score += c.score
+			if c.alive:
+				any_alive = true
+			if c.is_player:
+				is_me = true
+		rows.append({ "el": el, "score": score, "alive": any_alive, "me": is_me })
+	rows.sort_custom(func(a, b): return a["score"] > b["score"])
 	var out: Array = []
 	for i in rows.size():
-		var ch: GameChar = rows[i]
+		var r: Dictionary = rows[i]
 		out.append({
-			"label": ELEMENTS[ch.el]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[ch.el]),
-			"score": ch.score, "me": ch.is_player, "alive": ch.alive, "winner": i == 0,
+			"label": ELEMENTS[r["el"]]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[r["el"]]),
+			"score": r["score"], "me": r["me"], "alive": r["alive"], "winner": i == 0,
 		})
-	var top: GameChar = rows[0] if rows.size() > 0 else null
+	var top: Dictionary = rows[0] if rows.size() > 0 else {}
 	var title := "Round over"
 	var sub := "Final standings above."
 	if reason == "rescued" and player:
 		title = "You freed %s!  🎉" % ELEMENTS[player.el]["label"]
 		sub = "You brought your twin safely home. Rescue complete!"
-	elif top and top.is_player:
+	elif not top.is_empty() and top["me"]:
 		title = "You win!"
-	elif top:
-		title = ELEMENTS[top.el]["label"] + " leads!"
+	elif not top.is_empty():
+		title = ELEMENTS[top["el"]]["label"] + " leads!"
 	ui.show_end(out, title, sub)
 
 func _clear_actors() -> void:
 	for ch in all_chars():
-		ch.group.queue_free()
-	chars = {}
+		if ch.group:
+			ch.group.queue_free()
+	actors = []
+	by_el = {}
+	peer_actor = {}
 	npcs = []
 	allies = []
 	freed_twin = null
