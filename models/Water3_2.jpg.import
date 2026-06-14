@@ -3,10 +3,9 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://duxm2cgpuxkab"
-path.s3tc="res://.godot/imported/Water3_2.jpg-b3ebab75e09d1e966f26bf93a70006f4.s3tc.ctex"
+path="res://.godot/imported/Water3_2.jpg-b3ebab75e09d1e966f26bf93a70006f4.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
+"vram_texture": false
 }
 generator_parameters={
 "md5": "97f271cdcdb743a10449130869c6ceb7"
@@ -15,11 +14,11 @@ generator_parameters={
 [deps]
 
 source_file="res://models/Water3_2.jpg"
-dest_files=["res://.godot/imported/Water3_2.jpg-b3ebab75e09d1e966f26bf93a70006f4.s3tc.ctex"]
+dest_files=["res://.godot/imported/Water3_2.jpg-b3ebab75e09d1e966f26bf93a70006f4.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=1
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
