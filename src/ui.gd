@@ -14,6 +14,7 @@ signal join_requested(player_name: String, code: String) # online panel → join
 signal back_pressed()                                     # online/lobby → back to start
 signal lobby_element_picked(el: String)                  # lobby → pick / change element
 signal lobby_start_pressed()                             # lobby → admin starts the match
+signal copy_invite_pressed()                             # lobby → copy a shareable invite link
 
 const UI_COLORS := { "fire": 0xf0541a, "water": 0x5d93e8, "grass": 0x55b06a }
 const TEXT := Color(0.227, 0.208, 0.314)
@@ -279,9 +280,13 @@ func _build_lobby() -> void:
 	center.add_child(v)
 	lobby_code_label = _make_label("ROOM —", 44, _c(0xfff1e0))
 	v.add_child(lobby_code_label)
+	var copyb := _action_button("🔗 COPY INVITE LINK", 300, 46, 0x5db0a0, 0xffffff)
+	copyb.pressed.connect(func() -> void: copy_invite_pressed.emit())
+	v.add_child(_center(copyb))
 	v.add_child(_make_label(
-		"Share this code with your friends. Pick your element — you can all pick the same one;\n"
-		+ "NPCs fill the other teams so it stays fair.", 15, Color(1, 1, 1, 0.9)))
+		"Send the link (or the code above) to up to 6 friends — they tap it to join.\n"
+		+ "Pick your element (you can all pick the same one); NPCs fill the other teams so it stays fair.",
+		15, Color(1, 1, 1, 0.9)))
 	var cards := HBoxContainer.new()
 	cards.add_theme_constant_override("separation", 14)
 	cards.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -612,6 +617,10 @@ func show_online_panel() -> void:
 func set_online_status(text: String) -> void:
 	if online_status:
 		online_status.text = text
+
+func set_join_code(code: String) -> void:
+	if online_code:
+		online_code.text = code
 
 func show_lobby(players: Array, my_id: int, admin_id: int, code: String) -> void:
 	_hide_all()
