@@ -3,10 +3,9 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://5jhsptgplovr"
-path.s3tc="res://.godot/imported/Fire3_2.jpg-e5f7e5dbfe92796cf0bfbd127c15bb7c.s3tc.ctex"
+path="res://.godot/imported/Fire3_2.jpg-e5f7e5dbfe92796cf0bfbd127c15bb7c.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
+"vram_texture": false
 }
 generator_parameters={
 "md5": "6800032b0687ccf1231e36a03be4b1e2"
@@ -15,11 +14,11 @@ generator_parameters={
 [deps]
 
 source_file="res://models/Fire3_2.jpg"
-dest_files=["res://.godot/imported/Fire3_2.jpg-e5f7e5dbfe92796cf0bfbd127c15bb7c.s3tc.ctex"]
+dest_files=["res://.godot/imported/Fire3_2.jpg-e5f7e5dbfe92796cf0bfbd127c15bb7c.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=1
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0

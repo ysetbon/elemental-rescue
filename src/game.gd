@@ -87,9 +87,14 @@ var deco_anims: Array = []       # [Callable(t_ms)]
 var wind_leaves: Array = []
 
 # --------------------------------------------------------------- game state
-var chars: Dictionary = {}       # el -> GameChar
-var npcs: Array = []             # [GameChar]
-var player: GameChar = null
+# element actors — generalized from the old single-`chars[el]` model so each
+# element can hold many actors (humans + NPC fillers) for online multiplayer.
+var actors: Array = []           # all element actors (humans + NPC fillers)
+var by_el: Dictionary = {}       # el -> Array[GameChar]
+var peer_actor: Dictionary = {}  # peer_id -> GameChar (humans only)
+var _next_net_id := 1
+var npcs: Array = []             # [GameChar] — O₂ / CO₂ molecules
+var player: GameChar = null      # the LOCAL human's actor (null on the server)
 var running := false
 var ending := false
 var time_ms := 0.0
@@ -99,6 +104,35 @@ var o2_charges := 0              # O₂ sipped this round → bigger effective s
 
 var camera: Camera3D
 var ui: GameUI
+
+# ------------------------------------------------------------- online multiplayer
+enum Mode { SINGLE, SERVER, CLIENT }
+var mode: int = Mode.SINGLE       # SINGLE = local; SERVER = headless authority; CLIENT = networked viewer
+var net: NetManager = null        # /root/Game/Net — present in every mode
+var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float }
+
+# ---- replication (P3) ----
+const SNAP_HZ := 20.0             # server snapshot rate
+const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
+const INTERP_DELAY := 0.11        # client renders remote actors this far in the past
+var _snap_accum := 0.0            # SERVER: snapshot send throttle
+# CLIENT match state
+var local_net_id := 0             # this client's own actor net_id (0 = not in a match)
+var local_el := ""                # this client's element this match
+var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we render)
+var snap_buf: Array = []          # recent snapshots [{ t, by_id:{net_id->Dictionary} }]
+var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
+var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
+var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
+var _scores := { "fire": 0, "water": 0, "grass": 0 }
+var _net_time_left := ROUND_TIME
+# SERVER rescue state, shared per element (one key/twin per team)
+var has_key_by_el := {}            # el -> bool
+var twin_by_el := {}               # el -> GameChar (freed twin) or absent
+# Production server (set once the Render service is deployed). Override on web
+# with ?server=ws://host:port for local testing.
+const PROD_SERVER_URL := "wss://elemental-rescue-server.onrender.com"
+
 var touch_move := Vector2.ZERO   # mobile joystick: x = strafe, y = forward (set by TouchControls)
 var touch_sprint := false        # mobile sprint button
 var mobile := false              # touch/phone session: bigger HUD + tap targets
@@ -236,6 +270,68 @@ func _build_banner_leaves() -> void:
 
 # ------------------------------------------------------------------- setup
 func _ready() -> void:
+	if _is_server_mode():
+		mode = Mode.SERVER
+		_ready_server()
+		return
+	if OS.get_cmdline_user_args().has("testclient"):
+		_ready_testclient()   # dev hook: headless lobby smoke-test (see _ready_testclient)
+		return
+	_ready_visual()
+
+func _is_server_mode() -> bool:
+	# launched as the dedicated authoritative server (Docker `--server`, or a
+	# server export which advertises the "dedicated_server" feature)
+	return OS.has_feature("dedicated_server") or OS.get_cmdline_user_args().has("server")
+
+func _ready_server() -> void:
+	randomize()
+	Engine.max_fps = 30   # steady headless tick; keeps Render CPU low (snapshots are 20Hz)
+	_start_net()
+	var port := NetManager.DEFAULT_PORT
+	if OS.has_environment("PORT"):
+		port = int(OS.get_environment("PORT"))   # Render injects $PORT (default 10000)
+	net.setup_server(port)
+	print("[Elemental Rescue] dedicated server ready (mode=SERVER)")
+	if OS.get_cmdline_user_args().has("servertest"):
+		call_deferred("_server_selftest")   # dev: spin a fake match with no clients
+
+# Dev hook: start a match with fake humans and log the sim so the headless
+# simulation can be smoke-tested with no clients.  godot ... -- server servertest
+func _server_selftest() -> void:
+	server_start_match(12345, [{ "peer": 101, "el": "fire" }, { "peer": 102, "el": "grass" }])
+	print("[selftest] spawned actors=%d npcs=%d" % [actors.size(), npcs.size()])
+	var fh: GameChar = by_el["fire"][0]   # the fire human — drive it through the rescue
+	var step := { "n": 0 }
+	var t := Timer.new(); t.wait_time = 1.0; t.autostart = true; add_child(t)
+	t.timeout.connect(func() -> void:
+		step["n"] += 1
+		var n: int = step["n"]
+		if n == 4:
+			fh.pos = keys["fire"]["pos"]
+			print("[selftest] -> teleported fire human onto its key")
+		elif n == 5:
+			print("[selftest] has_key[fire]=%s" % str(has_key_by_el.get("fire", false)))
+			var cg: Dictionary = cage_by_el["fire"]
+			fh.pos = Vector3(cg["x"], 0, cg["z"])
+			print("[selftest] -> teleported fire human to its cage")
+		elif n == 6:
+			print("[selftest] twin[fire] freed=%s" % str(twin_by_el.get("fire") != null))
+			if twin_by_el.get("fire") != null:
+				var hc: Dictionary = cave_by_owner["fire"]
+				twin_by_el["fire"].pos = Vector3(hc["x"], 0, hc["z"])
+				print("[selftest] -> teleported fire twin to home cave")
+		elif n == 7:
+			print("[selftest] RESULT ending=%s won=%s" % [str(ending), str(won)]))
+
+# Create the Net node — same path (/root/Game/Net) on server and client so RPCs match.
+func _start_net() -> void:
+	net = NetManager.new()
+	net.name = "Net"
+	net.game = self
+	add_child(net)
+
+func _ready_visual() -> void:
 	var is_banner := OS.get_cmdline_user_args().has("banner")
 	randomize()
 	_build_environment()
@@ -260,6 +356,8 @@ func _ready() -> void:
 	for c in caves:
 		radar_caves.append({ "x": c["x"], "z": c["z"], "r": c["r"], "fill": c["radarFill"] })
 	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
+	_start_net()
+	_wire_online()
 	if OS.get_cmdline_user_args().has("banner"):
 		_setup_banner()
 		return
@@ -326,6 +424,12 @@ func _build_trails() -> void:
 
 # ------------------------------------------------------------------ main loop
 func _process(delta: float) -> void:
+	if mode == Mode.SERVER:
+		_server_process(delta)   # headless authority: simulate, never render (P2+)
+		return
+	if mode == Mode.CLIENT:
+		_client_process(delta)   # networked viewer: render snapshots, never sim locally (P3+)
+		return
 	var dt: float = minf(0.05, delta)
 	time_ms += delta * 1000.0
 	for fn in deco_anims:
@@ -345,8 +449,8 @@ func _process(delta: float) -> void:
 	if running:
 		_tick_timers(dt)
 		_update_player(dt)
-		for ch in chars.values():
-			if not ch.is_player and ch.alive:
+		for ch in actors:
+			if not ch.is_human and ch.alive:
 				_update_element_ai(ch, dt)
 		for a in allies:
 			_update_ally(a, dt)
@@ -367,8 +471,8 @@ func _process(delta: float) -> void:
 		_check_catches()
 		_check_rescue()
 		_update_hud_status()
-		for ch in chars.values():
-			if ch.alive and not ch.is_player and ch.vel.length_squared() > 120.0 and randf() < dt * 14.0:
+		for ch in actors:
+			if ch.alive and not ch.is_human and ch.vel.length_squared() > 120.0 and randf() < dt * 14.0:
 				_spawn_trail(ch)
 
 	_update_trails(dt)
@@ -659,7 +763,7 @@ func _eject_from_cave(ch: GameChar) -> void:
 		ui.toast("Ejected! Cave locked for %ds" % int(CAVE_LOCKOUT))
 
 func _update_cave_timers(dt: float) -> void:
-	for ch in chars.values():
+	for ch in actors:
 		if not ch.alive:
 			continue
 		if ch.cave_cooldown > 0.0:
@@ -671,6 +775,8 @@ func _update_cave_timers(dt: float) -> void:
 				_eject_from_cave(ch)
 		else:
 			ch.cave_time = 0.0
+	if mode == Mode.SERVER:
+		return
 	if player and player.alive and inside_own_cave(player):
 		ui.set_cave("Home — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
 	elif player and player.cave_cooldown > 0.0:
@@ -937,10 +1043,22 @@ func _smart_move(ch: GameChar, attracts: Array, repels: Array, dt: float, speed_
 			best = score; best_dir = dir
 	_steer(ch, best_dir, dt, speed_mult)
 
+# nearest ALIVE actor of a group (the per-element array in by_el) to a point.
+func _nearest_in(group: Array, from: Vector3) -> GameChar:
+	var best: GameChar = null
+	var bd := 1.0e20
+	for c in group:
+		if not c.alive:
+			continue
+		var d: float = from.distance_to(c.pos)
+		if d < bd:
+			bd = d; best = c
+	return best
+
 func _update_element_ai(ch: GameChar, dt: float) -> void:
 	var me: Dictionary = ELEMENTS[ch.el]
-	var predator: GameChar = chars.get(me["predator"])
-	var prey: GameChar = chars.get(me["prey"])
+	var predator: GameChar = _nearest_in(by_el.get(me["predator"], []), ch.pos)
+	var prey: GameChar = _nearest_in(by_el.get(me["prey"], []), ch.pos)
 	# while the player wears a black stone they're "energized" — the element they'd
 	# normally eat them (this char, if its prey is the player) must flee instead.
 	var prey_is_empowered: bool = prey != null and prey.is_player and _is_disguised()
@@ -1015,6 +1133,8 @@ func _update_co2(ch: GameChar, dt: float) -> void:
 func _co2_to_co(ch: GameChar) -> void:
 	ch.co_timer = CO_REVERT_TIME
 	ch.radar_color = MeshLib.rgb(0x9a97a8)
+	if ch.group == null:
+		return
 	var spare = ch.group.get_meta("spare_o", null)
 	var bond = ch.group.get_meta("spare_bond", null)
 	if spare and is_instance_valid(spare): spare.visible = false
@@ -1024,6 +1144,8 @@ func _co2_to_co(ch: GameChar) -> void:
 func _co_to_co2(ch: GameChar) -> void:
 	ch.co_timer = 0.0
 	ch.radar_color = MeshLib.rgb(0x3a3744)
+	if ch.group == null:
+		return
 	var spare = ch.group.get_meta("spare_o", null)
 	var bond = ch.group.get_meta("spare_bond", null)
 	if spare and is_instance_valid(spare): spare.visible = true
@@ -1031,7 +1153,8 @@ func _co_to_co2(ch: GameChar) -> void:
 
 func _consume_o2(o: GameChar) -> void:
 	o.alive = false
-	o.group.visible = false
+	if o.group:
+		o.group.visible = false
 	o.respawn_timer = O2_RESPAWN
 
 func _update_o2(ch: GameChar, dt: float) -> void:
@@ -1046,7 +1169,7 @@ func _update_o2(ch: GameChar, dt: float) -> void:
 		return
 	# otherwise drift, fleeing any element that gets close (without cornering itself)
 	var repels: Array = []
-	for e in chars.values():
+	for e in actors:
 		if e.alive and ch.pos.distance_to(e.pos) < 11.0:
 			repels.append({ "pos": e.pos, "weight": 2.2, "range": 11.0 })
 	for a in allies:
@@ -1147,7 +1270,7 @@ func _update_wind_leaves(dt: float, t: float) -> void:
 
 # ------------------------------------------------------------- characters
 func all_chars() -> Array:
-	var a: Array = chars.values().duplicate()
+	var a: Array = actors.duplicate()
 	a.append_array(npcs)
 	a.append_array(allies)
 	if freed_twin:
@@ -1155,9 +1278,32 @@ func all_chars() -> Array:
 	return a
 
 func alive_elements() -> Array:
-	return chars.values().filter(func(c): return c.alive)
+	return actors.filter(func(c): return c.alive)
 
 func make_character(kind: String, el: String = "", is_player: bool = false) -> GameChar:
+	var ch := GameChar.new()
+	ch.kind = kind
+	ch.el = el
+	ch.is_player = is_player
+	ch.net_id = _next_net_id
+	_next_net_id += 1
+	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
+	if kind == "element":
+		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
+	elif kind == "o2":
+		ch.radar_color = MeshLib.rgb(0xeceef6)
+	else:
+		ch.radar_color = MeshLib.rgb(0x3a3744)
+	# headless server has no visuals — leave group null (the GLB models aren't even
+	# shipped in the server pack); every per-frame visual write guards on `ch.group`.
+	if mode == Mode.SERVER:
+		return ch
+	ch.group = _build_char_visual(kind, el)
+	return ch
+
+# Build + parent a CharVisual for a kind/element (shared by make_character and the
+# client's networked ghosts).
+func _build_char_visual(kind: String, el: String) -> CharVisual:
 	var model: CharVisual
 	if kind == "element":
 		if el == "fire": model = MeshLib.build_flame()
@@ -1174,53 +1320,52 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 		shadow_r = 1.85
 	MeshLib.add_blob_shadow(model, shadow_r)
 	add_child(model)
-	var ch := GameChar.new()
-	ch.kind = kind
-	ch.el = el
-	ch.is_player = is_player
-	ch.group = model
-	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
-	if kind == "element":
-		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
-	elif kind == "o2":
-		ch.radar_color = MeshLib.rgb(0xeceef6)
-	else:
-		ch.radar_color = MeshLib.rgb(0x3a3744)
-	return ch
+	return model
 
 # ------------------------------------------------------------- scoring
 func update_board() -> void:
+	var my_el := player.el if player else ""
 	var entries: Array = []
 	for el in ["fire", "water", "grass"]:
-		var ch: GameChar = chars.get(el)
-		if ch == null:
+		var group: Array = by_el.get(el, [])
+		if group.is_empty():
 			continue
-		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": ch.score, "alive": ch.alive, "me": ch.is_player })
+		var score := 0
+		var any_alive := false
+		for c in group:
+			score += c.score
+			if c.alive:
+				any_alive = true
+		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": score, "alive": any_alive, "me": el == my_el })
 	ui.set_board(entries)
 
 func _check_catches() -> void:
-	# elemental predators hit their prey (a hit costs a heart, not a life)
-	for el in ["fire", "water", "grass"]:
-		var a: GameChar = chars.get(el)
-		if a == null or not a.alive or inside_own_cave(a):
+	# elemental predators hit the nearest catchable prey actor (a hit costs a heart)
+	for a in actors:
+		if not a.alive or inside_own_cave(a):
 			continue
-		var prey: GameChar = chars.get(ELEMENTS[el]["prey"])
-		if prey == null or not prey.alive or inside_own_cave(prey) or inside_own_room(prey):
-			continue
-		if prey.is_player and _is_disguised():
-			continue        # energized: your predator can't catch you right now
-		if a.pos.distance_to(prey.pos) < CATCH_DIST:
+		var prey: GameChar = null
+		var nd := 1.0e20
+		for p in by_el.get(ELEMENTS[a.el]["prey"], []):
+			if not p.alive or inside_own_cave(p) or inside_own_room(p):
+				continue
+			if p.is_player and _is_disguised():
+				continue        # energized: their predator can't catch them right now
+			var d: float = a.pos.distance_to(p.pos)
+			if d < nd:
+				nd = d; prey = p
+		if prey and nd < CATCH_DIST:
 			_take_hit(prey, a)
 	# black-stone power-up (Pac-Man style): while disguised you can EAT your predator
 	if _is_disguised() and player and player.alive and not inside_own_cave(player):
-		var pred: GameChar = chars.get(ELEMENTS[player.el]["predator"])
-		if pred and pred.alive and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST:
+		var pred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos)
+		if pred and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST:
 			ui.toast("Gotcha! You caught your predator %s!" % ELEMENTS[pred.el]["label"])
 			_take_hit(pred, player)
 	# ATTACK clan smack the element you hunt
 	if player and player.alive and not allies.is_empty():
-		var prey: GameChar = chars.get(ELEMENTS[player.el]["prey"])
-		if prey != null and prey.alive and not inside_own_cave(prey) and not inside_own_room(prey):
+		var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["prey"], []), player.pos)
+		if prey != null and not inside_own_cave(prey) and not inside_own_room(prey):
 			for a in allies:
 				if a.role == "attack" and a.pos.distance_to(prey.pos) < CATCH_DIST:
 					_take_hit(prey, a)
@@ -1230,11 +1375,12 @@ func _check_catches() -> void:
 	# DIE doing it once the whole clan is assigned — while you're still organising, the
 	# predator/CO₂ can't actually catch your defenders. (מתאבדים, once you're committed.)
 	var clan_live := _all_clan_assigned()
+	var ppred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos) if player else null
 	for a in allies.duplicate():
 		if a.role != "protect":
 			continue
-		var pred: GameChar = chars.get(ELEMENTS[player.el]["predator"])
-		if pred and pred.alive and not inside_own_cave(pred) and pred.slow_timer <= 0.0 and a.pos.distance_to(pred.pos) < CATCH_DIST:
+		var pred: GameChar = ppred
+		if pred and not inside_own_cave(pred) and pred.slow_timer <= 0.0 and a.pos.distance_to(pred.pos) < CATCH_DIST:
 			pred.slow_timer = SLOW_TIME    # brief slow-down, not a trip home
 			if clan_live:
 				ui.toast("A clan member sacrificed itself to slow %s!" % ELEMENTS[pred.el]["label"])
@@ -1295,7 +1441,7 @@ func _co2_targets() -> Array:
 	# while you're home in the clan house, CO₂ can't see you or any of your clan
 	var hide_mine := _player_in_clan_hall()
 	var out: Array = []
-	for e in chars.values():
+	for e in actors:
 		if not e.alive or inside_cave(e.pos) or inside_own_room(e):
 			continue
 		if e.is_player and (_is_disguised() or hide_mine):
@@ -1344,7 +1490,8 @@ func _respawn(ch: GameChar) -> void:
 	if cave_by_owner.has(ch.el):
 		var c: Dictionary = cave_by_owner[ch.el]
 		ch.pos = Vector3(c["x"], 0, c["z"])
-		ch.group.position = ch.pos
+		if ch.group:
+			ch.group.position = ch.pos
 	if ch.is_player:
 		ui.toast("Caught! Back to your cave.")
 		_update_hud_hearts()
@@ -1382,9 +1529,10 @@ func _tick_timers(dt: float) -> void:
 			n.respawn_timer = maxf(0.0, n.respawn_timer - dt)
 			if n.respawn_timer <= 0.0:
 				n.pos = random_spot()
-				n.group.position = n.pos
 				n.alive = true
-				n.group.visible = true
+				if n.group:
+					n.group.position = n.pos
+					n.group.visible = true
 
 # Clan members don't follow you — they help. Fetchers go get the key and bring it
 # back; everyone else hunts the element you eat across the whole map.
@@ -1425,7 +1573,7 @@ func _update_ally(a: GameChar, dt: float) -> void:
 		"attack":
 			# ALWAYS hunt the element you eat — chase it down, and if it ducks into its
 			# cave just camp at the entrance. Never trot back to you (that yo-yo looked silly).
-			var prey: GameChar = chars.get(ELEMENTS[player.el]["prey"])
+			var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["prey"], []), a.pos)
 			if prey and prey.alive:
 				attracts.append({ "pos": _lead_point(a.pos, prey, a.speed), "weight": 3.6, "range": 320.0 })
 		"protect":
@@ -1458,6 +1606,8 @@ func _update_ally(a: GameChar, dt: float) -> void:
 	_smart_move(a, attracts, repels, dt, mult)
 
 func _player_in_clan_hall() -> bool:
+	if not player:
+		return false
 	var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
 	return not hall.is_empty() and Vector2(player.pos.x - hall["x"], player.pos.z - hall["z"]).length() < hall["r"]
 
@@ -1483,7 +1633,7 @@ func _clan_assign_active() -> bool:
 func _nearest_threat_to_player(a: GameChar) -> GameChar:
 	var best: GameChar = null
 	var bd := 1.0e20
-	var pred: GameChar = chars.get(ELEMENTS[player.el]["predator"])
+	var pred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos)
 	if pred and pred.alive and not inside_own_cave(pred):
 		bd = player.pos.distance_to(pred.pos); best = pred
 	for n in npcs:
@@ -1845,12 +1995,23 @@ func _update_objective() -> void:
 	ui.set_objective(txt)
 
 # ------------------------------------------------------------- game flow
+# Single-player entry: one local human + NPC fillers (the N=1 case of _spawn_match).
 func start_game(my_el: String) -> void:
+	_spawn_match([{ "peer": 1, "el": my_el, "local": true }], my_el)
+
+# Build a match from a list of humans [{peer, el, local?}]. Each element is filled
+# with NPC elementals up to the largest human team ("match the biggest team"), so
+# the three elements stay balanced however players pick. Single-player is N=1.
+func _spawn_match(humans: Array, local_el: String = "") -> void:
 	_clear_actors()
 	ending = false
 	won = false
 	stamina = 100.0
 	o2_charges = 0
+	time_left = ROUND_TIME
+	_snap_accum = 0.0
+	has_key_by_el = {}
+	twin_by_el = {}
 	# reset rescue state
 	allies = []
 	freed_twin = null
@@ -1860,51 +2021,81 @@ func start_game(my_el: String) -> void:
 	teach_progress = 0.0
 	clan_cooldown = 0.0
 	disguise_timer = 0.0
+	_next_net_id = 1
 	WorldBuilder.reset_cages(self)
+	var human_count := { "fire": 0, "water": 0, "grass": 0 }
+	for h in humans:
+		human_count[h["el"]] += 1
+	var biggest := maxi(1, maxi(human_count["fire"], maxi(human_count["water"], human_count["grass"])))
 	for el in ["fire", "water", "grass"]:
-		var ch := make_character("element", el, el == my_el)
-		ch.max_hp = BASE_HP
-		ch.hp = BASE_HP
-		var c: Dictionary = cave_by_owner[el]
-		var a: float = c["openAngle"]
-		# spawn well clear of the cave mouth so the chase camera (which sits behind
-		# the player, i.e. back toward the cave) isn't looking through the rocks.
-		ch.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
-		ch.group.position = ch.pos
-		ch.group.rotation.y = atan2(-ch.pos.x, -ch.pos.z)
-		chars[el] = ch
-		if ch.is_player:
-			player = ch
+		by_el[el] = []
+		for h in humans:
+			if h["el"] == el:
+				var is_local: bool = (mode != Mode.SERVER) and bool(h.get("local", false))
+				var hc := _spawn_element_actor(el, int(h["peer"]), true, is_local)
+				if is_local:
+					player = hc
+		for _i in (biggest - human_count[el]):
+			_spawn_element_actor(el, 0, false, false)
 	for i in N_O2:
 		var o := make_character("o2")
 		o.pos = random_spot()
-		o.group.position = o.pos
+		if o.group: o.group.position = o.pos
 		npcs.append(o)
 	for i in N_CO2:
 		var c := make_character("co2")
 		c.pos = random_spot(40.0)
-		c.group.position = c.pos
+		if c.group: c.group.position = c.pos
 		npcs.append(c)
-	var me: Dictionary = ELEMENTS[my_el]
-	ui.set_role("You: %s — catch %s, flee %s" % [me["label"], ELEMENTS[me["prey"]]["label"], ELEMENTS[me["predator"]]["label"]])
-	cam_yaw = atan2(player.pos.x, player.pos.z)
-	ui.show_hud()
-	ui.setup_task_icons(my_el, ELEMENTS[my_el]["predator"], ELEMENTS[my_el]["prey"])
-	ui.show_task_buttons(false)
+	if mode != Mode.SERVER and local_el != "":
+		var me: Dictionary = ELEMENTS[local_el]
+		ui.set_role("You: %s — catch %s, flee %s" % [me["label"], ELEMENTS[me["prey"]]["label"], ELEMENTS[me["predator"]]["label"]])
+		if player:
+			cam_yaw = atan2(player.pos.x, player.pos.z)
+		ui.show_hud()
+		ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
+		ui.show_task_buttons(false)
 	_spawn_keys()
 	_spawn_black_stones()
-	_update_hud_hearts()
-	_update_hud_status()
-	_update_objective()
-	update_board()
+	if mode != Mode.SERVER:
+		_update_hud_hearts()
+		_update_hud_status()
+		_update_objective()
+		update_board()
 	_run_countdown()
+
+# Create one element actor (human or NPC filler), placed at its element's cave
+# mouth and registered in actors / by_el / peer_actor.
+func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool) -> GameChar:
+	var ch := make_character("element", el, is_local)
+	ch.peer_id = peer
+	ch.is_human = is_human
+	ch.max_hp = BASE_HP
+	ch.hp = BASE_HP
+	var c: Dictionary = cave_by_owner[el]
+	var base_a: float = c["openAngle"]
+	# fan multiple same-element actors around the cave mouth so they don't stack
+	var idx: int = by_el[el].size()
+	var a: float = base_a + (0.0 if idx == 0 else (float((idx + 1) / 2) * 0.42 * (1 if idx % 2 == 1 else -1)))
+	# spawn well clear of the cave mouth so the chase camera isn't looking through rocks
+	ch.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	if ch.group:
+		ch.group.position = ch.pos
+		ch.group.rotation.y = atan2(-ch.pos.x, -ch.pos.z)
+	by_el[el].append(ch)
+	actors.append(ch)
+	if peer != 0:
+		peer_actor[peer] = ch
+	return ch
 
 func _run_countdown() -> void:
 	running = false
 	for s in ["3", "2", "1", "GO!"]:
-		ui.set_countdown(s)
+		if mode != Mode.SERVER:
+			ui.set_countdown(s)
 		await get_tree().create_timer(0.75).timeout
-	ui.set_countdown("")
+	if mode != Mode.SERVER:
+		ui.set_countdown("")
 	if not ending:
 		running = true
 
@@ -1913,31 +2104,49 @@ func end_game(reason: String) -> void:
 		return
 	ending = true
 	running = false
-	var rows: Array = chars.values().duplicate()
-	rows.sort_custom(func(a, b): return a.score > b.score)
+	# standings are per-element TEAM (humans + NPC fillers of that element aggregated)
+	var rows: Array = []
+	for el in ["fire", "water", "grass"]:
+		var group: Array = by_el.get(el, [])
+		if group.is_empty():
+			continue
+		var score := 0
+		var any_alive := false
+		var is_me := false
+		for c in group:
+			score += c.score
+			if c.alive:
+				any_alive = true
+			if c.is_player:
+				is_me = true
+		rows.append({ "el": el, "score": score, "alive": any_alive, "me": is_me })
+	rows.sort_custom(func(a, b): return a["score"] > b["score"])
 	var out: Array = []
 	for i in rows.size():
-		var ch: GameChar = rows[i]
+		var r: Dictionary = rows[i]
 		out.append({
-			"label": ELEMENTS[ch.el]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[ch.el]),
-			"score": ch.score, "me": ch.is_player, "alive": ch.alive, "winner": i == 0,
+			"label": ELEMENTS[r["el"]]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[r["el"]]),
+			"score": r["score"], "me": r["me"], "alive": r["alive"], "winner": i == 0,
 		})
-	var top: GameChar = rows[0] if rows.size() > 0 else null
+	var top: Dictionary = rows[0] if rows.size() > 0 else {}
 	var title := "Round over"
 	var sub := "Final standings above."
 	if reason == "rescued" and player:
 		title = "You freed %s!  🎉" % ELEMENTS[player.el]["label"]
 		sub = "You brought your twin safely home. Rescue complete!"
-	elif top and top.is_player:
+	elif not top.is_empty() and top["me"]:
 		title = "You win!"
-	elif top:
-		title = ELEMENTS[top.el]["label"] + " leads!"
+	elif not top.is_empty():
+		title = ELEMENTS[top["el"]]["label"] + " leads!"
 	ui.show_end(out, title, sub)
 
 func _clear_actors() -> void:
 	for ch in all_chars():
-		ch.group.queue_free()
-	chars = {}
+		if ch.group:
+			ch.group.queue_free()
+	actors = []
+	by_el = {}
+	peer_actor = {}
 	npcs = []
 	allies = []
 	freed_twin = null
@@ -1958,6 +2167,543 @@ func _on_play_again() -> void:
 	ending = false
 	running = false
 	ui.show_start()
+
+# ------------------------------------------------------------------ online (client)
+func _wire_online() -> void:
+	ui.online_pressed.connect(func() -> void: ui.show_online_panel())
+	ui.host_requested.connect(_on_host_requested)
+	ui.join_requested.connect(_on_join_requested)
+	ui.back_pressed.connect(_on_back_pressed)
+	ui.lobby_element_picked.connect(func(el: String) -> void: net.choose_element(el))
+	ui.lobby_start_pressed.connect(func() -> void: net.start_match())
+	net.joined_room.connect(_on_joined_room)
+	net.join_failed.connect(_on_join_failed)
+	net.lobby_changed.connect(_on_lobby_changed)
+	net.match_starting.connect(_on_match_starting)
+	net.match_ended.connect(_on_match_ended)
+	net.connection_lost.connect(_on_connection_lost)
+
+func _server_url() -> String:
+	if OS.has_feature("web"):
+		var ov: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('server')", true)
+		if ov != null and str(ov) != "":
+			return str(ov)
+		return PROD_SERVER_URL
+	return "ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT   # native/editor → local server
+
+func _on_host_requested(name_: String) -> void:
+	mode = Mode.CLIENT
+	ui.set_online_status("Connecting…")
+	net.connect_to(_server_url(), name_, "create", NetManager.gen_code())
+
+func _on_join_requested(name_: String, code: String) -> void:
+	if code.strip_edges() == "":
+		ui.set_online_status("Enter the host's code to join.")
+		return
+	mode = Mode.CLIENT
+	ui.set_online_status("Connecting…")
+	net.connect_to(_server_url(), name_, "join", code)
+
+func _on_back_pressed() -> void:
+	if net:
+		net.leave()
+	mode = Mode.SINGLE
+	ui.show_start()
+
+func _on_joined_room(_code: String) -> void:
+	ui.set_online_status("")   # the lobby screen is drawn by _on_lobby_changed (arrives next)
+
+func _on_join_failed(reason: String) -> void:
+	mode = Mode.SINGLE
+	ui.set_online_status(reason)
+
+func _on_lobby_changed(players: Array, my_id: int, admin_id: int, code: String) -> void:
+	ui.show_lobby(players, my_id, admin_id, code)
+
+func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+	_client_start_match(world_seed, humans, net_ids)
+
+# CLIENT: enter a networked match. We keep the local backdrop world; the local
+# avatar is predicted from input and every other actor is an interpolated ghost.
+func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+	seed(world_seed)
+	_client_clear()
+	var my_peer := multiplayer.get_unique_id()
+	local_net_id = int(net_ids.get(my_peer, 0))
+	local_el = "fire"
+	for h in humans:
+		if int(h["peer"]) == my_peer:
+			local_el = String(h["el"])
+	# local predicted avatar (drives the camera + sends input)
+	player = make_character("element", local_el, true)
+	player.is_human = true
+	player.net_id = local_net_id
+	var c: Dictionary = cave_by_owner[local_el]
+	var a: float = c["openAngle"]
+	player.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	if player.group:
+		player.group.position = player.pos
+	cam_yaw = atan2(player.pos.x, player.pos.z)
+	stamina = 100.0
+	o2_charges = 0
+	var me: Dictionary = ELEMENTS[local_el]
+	ui.set_role("You: %s — catch %s, flee %s" % [me["label"], ELEMENTS[me["prey"]]["label"], ELEMENTS[me["predator"]]["label"]])
+	ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
+	ui.show_task_buttons(false)
+	ui.show_hud()
+
+func _client_clear() -> void:
+	for nid in ghosts:
+		if is_instance_valid(ghosts[nid]):
+			ghosts[nid].queue_free()
+	ghosts.clear()
+	for el in key_nodes:
+		if is_instance_valid(key_nodes[el]):
+			key_nodes[el].queue_free()
+	key_nodes.clear()
+	snap_buf.clear()
+	if player and player.group and is_instance_valid(player.group):
+		player.group.queue_free()
+	player = null
+	local_net_id = 0
+
+func _now() -> float:
+	return float(Time.get_ticks_msec()) / 1000.0
+
+# CLIENT: a snapshot arrived — buffer it for interpolation and nudge the local
+# predicted avatar toward the server's authoritative position.
+func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
+	if local_net_id == 0:
+		return
+	var by_id: Dictionary = {}
+	var count := adata.size() / SNAP_FLOATS
+	for k in count:
+		var b := k * SNAP_FLOATS
+		by_id[int(adata[b])] = {
+			"x": adata[b + 1], "z": adata[b + 2], "yaw": adata[b + 3],
+			"spd": adata[b + 4], "flags": int(adata[b + 5]), "hp": int(adata[b + 6]),
+		}
+	snap_buf.append({ "t": _now(), "by_id": by_id })
+	while snap_buf.size() > 10:
+		snap_buf.pop_front()
+	_net_time_left = float(meta.get("tl", _net_time_left))
+	var sc: Dictionary = meta.get("sc", {})
+	for el in ["fire", "water", "grass"]:
+		_scores[el] = int(sc.get(el, _scores[el]))
+	_net_rk = meta.get("rk", _net_rk)
+	_net_rt = meta.get("rt", _net_rt)
+	_client_sync_keys(meta.get("kp", {}))
+	if player and by_id.has(local_net_id):
+		var srv: Dictionary = by_id[local_net_id]
+		player.pos = player.pos.lerp(Vector3(srv["x"], 0, srv["z"]), 0.25)  # blend to authority
+		player.hp = int(srv["hp"])
+
+func _client_get_ghost(nid: int, flags: int) -> CharVisual:
+	if ghosts.has(nid):
+		return ghosts[nid]
+	var kind: String = _KIND_NAME[flags & 3]
+	var el: String = _EL_NAME[(flags >> 2) & 3]
+	var cv := _build_char_visual(kind, el)
+	ghosts[nid] = cv
+	return cv
+
+func _on_connection_lost() -> void:
+	mode = Mode.SINGLE
+	ui.toast("Disconnected from the server.")
+	ui.show_start()
+
+# Called on the SERVER when the admin starts the match. Builds the world (once),
+# spawns humans + NPC fillers, and starts the authoritative simulation.
+func server_start_match(world_seed: int, humans: Array) -> void:
+	seed(world_seed)
+	if world_root == null:
+		world_root = Node3D.new()
+		add_child(world_root)
+		WorldBuilder.build(self)   # full procedural world; headless-safe (no GLB models)
+	var hs: Array = []
+	for h in humans:
+		hs.append({ "peer": int(h["peer"]), "el": String(h["el"]), "local": false })
+	net_input.clear()
+	_spawn_match(hs, "")           # running flips true after the countdown
+
+# Headless authority tick: the render-free simulation. Movement + AI + catches for
+# everyone; no camera/UI/trails. Rescue/clan/training land in P4.
+func _server_process(delta: float) -> void:
+	if not running:
+		return
+	var dt: float = minf(0.05, delta)
+	time_ms += delta * 1000.0
+	time_left = maxf(0.0, time_left - dt)
+	_tick_timers(dt)
+	for ch in actors:
+		if ch.is_human:
+			_update_human_net(ch, dt)
+		elif ch.alive:
+			_update_element_ai(ch, dt)
+	for n in npcs:
+		if n.alive:
+			if n.kind == "co2":
+				_update_co2(n, dt)
+			else:
+				_update_o2(n, dt)
+	_update_cave_timers(dt)
+	_check_catches()
+	_server_rescue(dt)
+	_snap_accum += dt
+	if _snap_accum >= 1.0 / SNAP_HZ:
+		_snap_accum = 0.0
+		_broadcast_snapshot()
+
+# Move a human actor from its latest networked input (server-authoritative). Mirror
+# of _update_player's movement math, minus local-only stamina/o2/disguise/UI.
+func _update_human_net(ch: GameChar, dt: float) -> void:
+	if not ch.alive:
+		return
+	var inp: Dictionary = net_input.get(ch.peer_id, {})
+	var mv: Vector2 = inp.get("move", Vector2.ZERO)
+	var sprint: bool = inp.get("sprint", false)
+	var yaw: float = inp.get("yaw", 0.0)
+	var ln := minf(1.0, mv.length())
+	var target := Vector3.ZERO
+	if ln > 0.05:
+		var fx := -sin(yaw)
+		var fz := -cos(yaw)
+		var rx := -fz
+		var rz := fx
+		target = Vector3(fx * mv.y + rx * mv.x, 0, fz * mv.y + rz * mv.x).normalized()
+		target *= ch.speed * (1.5 if sprint else 1.0) * terrain_mult(ch) * _slow_mult(ch) * ln
+	ch.vel = ch.vel.lerp(target, 1.0 - pow(0.0003, dt))
+	ch.pos += ch.vel * dt
+	resolve_collisions(ch)
+
+# SERVER: stash a peer's latest input (consumed by _update_human_net).
+func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float) -> void:
+	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw }
+
+# ---- snapshot encoding (shared layout, server packs / client unpacks) ----
+const _KIND_CODE := { "element": 0, "o2": 1, "co2": 2 }
+const _EL_CODE := { "": 0, "fire": 1, "water": 2, "grass": 3 }
+const _EL_NAME := ["", "fire", "water", "grass"]
+const _KIND_NAME := ["element", "o2", "co2"]
+
+func _pack_flags(ch: GameChar) -> int:
+	var f := int(_KIND_CODE[ch.kind])           # bits 0-1 kind
+	f |= int(_EL_CODE.get(ch.el, 0)) << 2        # bits 2-3 element
+	if ch.alive: f |= 1 << 4
+	if ch.co_timer > 0.0: f |= 1 << 5            # CO (spent / grey)
+	return f
+
+func _broadcast_snapshot() -> void:
+	var list: Array = []
+	list.append_array(actors)
+	list.append_array(npcs)
+	for el in twin_by_el:
+		if twin_by_el[el] != null:
+			list.append(twin_by_el[el])
+	var data := PackedFloat32Array()
+	data.resize(list.size() * SNAP_FLOATS)
+	var i := 0
+	for ch in list:
+		var yaw := atan2(ch.vel.x, ch.vel.z) if ch.vel.length_squared() > 0.04 else 0.0
+		data[i] = float(ch.net_id)
+		data[i + 1] = ch.pos.x
+		data[i + 2] = ch.pos.z
+		data[i + 3] = yaw
+		data[i + 4] = ch.vel.length()
+		data[i + 5] = float(_pack_flags(ch))
+		data[i + 6] = float(ch.hp)
+		i += SNAP_FLOATS
+	# per-element rescue state + key positions, so each client can show its objective
+	# and render the (un-held) keys
+	var kp := {}
+	for el in keys:
+		if not bool(has_key_by_el.get(el, false)):
+			kp[el] = [keys[el]["pos"].x, keys[el]["pos"].z]
+	var rt := {}
+	for el in ["fire", "water", "grass"]:
+		rt[el] = twin_by_el.get(el) != null
+	var meta := {
+		"tl": time_left,
+		"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
+		"rk": has_key_by_el.duplicate(),   # el -> bool (key held)
+		"rt": rt,                          # el -> bool (twin freed)
+		"kp": kp,                          # el -> [x,z] (un-held key positions)
+	}
+	if net:
+		net.broadcast_snapshot(data, meta)
+
+func _team_score(el: String) -> int:
+	var s := 0
+	for c in by_el.get(el, []):
+		s += c.score
+	return s
+
+# ---- server-authoritative rescue (shared per element) ----
+# One key / one caged twin per element team. Any human of element E can grab E's
+# key, free E's twin at E's cage, and escort it home to win for the whole team.
+func _server_rescue(dt: float) -> void:
+	for el in ["fire", "water", "grass"]:
+		var grp: Array = by_el.get(el, [])
+		# pick up the team key
+		if not bool(has_key_by_el.get(el, false)) and keys.has(el):
+			var kp: Vector3 = keys[el]["pos"]
+			for h in grp:
+				if h.is_human and h.alive and h.pos.distance_to(kp) < KEY_PICK_DIST:
+					has_key_by_el[el] = true
+					break
+		# free the caged twin once a teammate carrying the key reaches the cage
+		if bool(has_key_by_el.get(el, false)) and twin_by_el.get(el) == null and cage_by_el.has(el):
+			var cg: Dictionary = cage_by_el[el]
+			var cgp := Vector3(cg["x"], 0, cg["z"])
+			for h in grp:
+				if h.is_human and h.alive and h.pos.distance_to(cgp) < CAGE_RELEASE_DIST:
+					_server_release_twin(el)
+					break
+		# escort: the twin trails the nearest teammate; reaching home wins the round
+		var twin: GameChar = twin_by_el.get(el)
+		if twin != null and twin.alive:
+			var lead := _nearest_human_of(el, twin.pos)
+			if lead != null:
+				var d := twin.pos.distance_to(lead.pos)
+				if d <= TWIN_LEASH and d > 2.6:
+					var dir := lead.pos - twin.pos
+					dir.y = 0
+					twin.vel = twin.vel.lerp(dir.normalized() * twin.speed * 1.05, 1.0 - pow(0.0006, dt))
+					twin.pos += twin.vel * dt
+					resolve_collisions(twin)
+				else:
+					twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))
+			if cave_by_owner.has(el):
+				var hc: Dictionary = cave_by_owner[el]
+				if twin.pos.distance_to(Vector3(hc["x"], 0, hc["z"])) < RESCUE_WIN_DIST:
+					_server_end_match("rescued", el)
+					return
+
+func _server_release_twin(el: String) -> void:
+	var t := make_character("element", el)   # group null on server
+	t.is_twin = true
+	t.max_hp = 1
+	t.hp = 1
+	var cg: Dictionary = cage_by_el[el]
+	t.pos = Vector3(cg["x"], 0, cg["z"])
+	twin_by_el[el] = t
+
+func _nearest_human_of(el: String, from: Vector3) -> GameChar:
+	var best: GameChar = null
+	var bd := 1.0e20
+	for h in by_el.get(el, []):
+		if h.is_human and h.alive:
+			var d: float = from.distance_to(h.pos)
+			if d < bd:
+				bd = d; best = h
+	return best
+
+func _server_end_match(reason: String, winner_el: String) -> void:
+	if ending:
+		return
+	ending = true
+	running = false
+	won = true
+	var standings: Array = []
+	for el in ["fire", "water", "grass"]:
+		standings.append({ "el": el, "score": _team_score(el), "winner": el == winner_el })
+	if net:
+		net.broadcast_end(reason, winner_el, standings)
+	print("[server] match ended: %s team wins (%s)" % [winner_el, reason])
+
+# Networked viewer tick: predict the local avatar from input, draw every other
+# actor as an interpolated ghost, follow with the camera. No local simulation.
+func _client_process(delta: float) -> void:
+	if camera == null:
+		return   # headless test client / pre-visual: nothing to draw
+	var dt: float = minf(0.05, delta)
+	time_ms += delta * 1000.0
+	for fn in deco_anims:
+		fn.call(time_ms)
+	if local_net_id == 0 or player == null:
+		_update_camera(dt)   # lobby backdrop
+		return
+	_client_predict_local(dt)
+	_client_render_remote(dt)
+	_update_wind_leaves(dt, time_ms)
+	_update_camera(dt)
+	_client_update_hud()
+
+func _client_predict_local(dt: float) -> void:
+	var mx := 0.0
+	var mz := 0.0
+	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
+	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN): mz -= 1.0
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT): mx += 1.0
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT): mx -= 1.0
+	mx += touch_move.x
+	mz += touch_move.y
+	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
+	var sprint := (Input.is_key_pressed(KEY_SHIFT) or touch_sprint) and ln > 0.05 and stamina > 1.0
+	if sprint:
+		stamina = maxf(0.0, stamina - dt * 30.0)
+	else:
+		stamina = minf(100.0, stamina + dt * 13.0)
+	ui.set_stamina(stamina)
+	net.send_input(mx, mz, sprint, cam_yaw)   # authoritative movement happens on the server
+	# local prediction so it feels instant
+	var target := Vector3.ZERO
+	if ln > 0.05:
+		var fx := -sin(cam_yaw)
+		var fz := -cos(cam_yaw)
+		var rx := -fz
+		var rz := fx
+		target = Vector3(fx * mz + rx * mx, 0, fz * mz + rz * mx).normalized()
+		target *= player.speed * (1.5 if sprint else 1.0) * terrain_mult(player) * ln
+	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
+	player.pos += player.vel * dt
+	resolve_collisions(player)
+	if player.group:
+		player.group.position = player.pos
+		if player.vel.length_squared() > 0.5:
+			player.group.rotation.y = lerp_angle(player.group.rotation.y, atan2(player.vel.x, player.vel.z), 1.0 - pow(0.001, dt))
+		player.group.animate(time_ms, player.vel.length())
+
+func _client_render_remote(dt: float) -> void:
+	if snap_buf.is_empty():
+		return
+	var render_t := _now() - INTERP_DELAY
+	var s0: Dictionary = snap_buf[0]
+	var s1: Dictionary = {}
+	for s in snap_buf:
+		if s["t"] <= render_t:
+			s0 = s
+		elif s1.is_empty():
+			s1 = s
+			break
+	var alpha := 0.0
+	if not s1.is_empty():
+		var span: float = s1["t"] - s0["t"]
+		if span > 0.0001:
+			alpha = clampf((render_t - s0["t"]) / span, 0.0, 1.0)
+	var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
+	for nid in latest:
+		if nid == local_net_id:
+			continue
+		var flags: int = latest[nid]["flags"]
+		var a0: Dictionary = s0["by_id"].get(nid, latest[nid])
+		var pos := Vector3(a0["x"], 0, a0["z"])
+		var yaw: float = a0["yaw"]
+		var spd: float = a0["spd"]
+		if not s1.is_empty() and s1["by_id"].has(nid) and s0["by_id"].has(nid):
+			var a1: Dictionary = s1["by_id"][nid]
+			pos = pos.lerp(Vector3(a1["x"], 0, a1["z"]), alpha)
+			yaw = lerp_angle(yaw, a1["yaw"], alpha)
+			spd = lerpf(spd, a1["spd"], alpha)
+		var g := _client_get_ghost(nid, flags)
+		g.visible = (flags & (1 << 4)) != 0
+		g.position = pos
+		if spd > 0.5:
+			g.rotation.y = lerp_angle(g.rotation.y, yaw, 1.0 - pow(0.001, dt))
+		g.animate(time_ms, spd)
+	for nid in ghosts.keys():
+		if not latest.has(nid):
+			if is_instance_valid(ghosts[nid]):
+				ghosts[nid].queue_free()
+			ghosts.erase(nid)
+
+func _client_update_hud() -> void:
+	ui.set_hearts(player.hp, maxi(BASE_HP, player.hp))
+	if bool(_net_rt.get(local_el, false)):
+		ui.set_objective("Escort your twin home to your cave!")
+	elif bool(_net_rk.get(local_el, false)):
+		ui.set_objective("Free your twin at the zoo cage")
+	else:
+		ui.set_objective("Find your %s key" % ELEMENTS[local_el]["label"])
+	var entries: Array = []
+	for el in ["fire", "water", "grass"]:
+		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
+	ui.set_board(entries)
+
+# CLIENT: build/position/hide the team keys from snapshot meta (kp = un-held keys).
+func _client_sync_keys(kp: Dictionary) -> void:
+	for el in ["fire", "water", "grass"]:
+		var present: bool = kp.has(el)
+		if present and not key_nodes.has(el):
+			var node := _make_key_node(el)
+			add_child(node)
+			key_nodes[el] = node
+		if key_nodes.has(el):
+			var node: Node3D = key_nodes[el]
+			if present:
+				node.position = Vector3(kp[el][0], 1.0, kp[el][1])
+				node.visible = true
+			else:
+				node.visible = false   # picked up → hide
+
+func _on_match_ended(reason: String, winner_el: String, standings: Array) -> void:
+	standings.sort_custom(func(a, b): return a["score"] > b["score"])
+	var out: Array = []
+	for i in standings.size():
+		var s: Dictionary = standings[i]
+		out.append({
+			"label": ELEMENTS[s["el"]]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[s["el"]]),
+			"score": s["score"], "me": s["el"] == local_el, "alive": true, "winner": bool(s.get("winner", false)),
+		})
+	var title := "Round over"
+	var sub := "Final standings above."
+	if reason == "rescued":
+		if winner_el == local_el:
+			title = "Your team freed %s!  🎉" % ELEMENTS[winner_el]["label"]
+			sub = "You brought your twin safely home. Rescue complete!"
+		else:
+			title = "%s team wins!" % ELEMENTS[winner_el]["label"]
+			sub = "%s completed their rescue first." % ELEMENTS[winner_el]["label"]
+	_client_clear()
+	ui.show_end(out, title, sub)
+
+# Dev/test hook (no GUI): connect to a local server and exercise the full lobby
+# handshake — create → pick element → start — logging each step, then quit.
+#   godot --headless --path . -- testclient            (create a room)
+#   godot --headless --path . -- testclient join ABCD  (join room ABCD)
+func _ready_testclient() -> void:
+	mode = Mode.CLIENT
+	Engine.max_fps = 60
+	_start_net()
+	var args := OS.get_cmdline_user_args()
+	var action := "join" if args.has("join") else "create"
+	var label := "B-join" if action == "join" else "A-host"
+	var my_el := "fire" if action == "join" else "water"
+	var code := "TEST"   # fixed code so two separate processes meet in the same room
+	get_tree().create_timer(22.0).timeout.connect(func() -> void:
+		print("[%s] timeout — quitting" % label); get_tree().quit())
+	# host moves +z, joiner moves +x → distinct paths so each clearly sees the other move
+	var st := { "picked": false, "started": false, "other": 0, "mx": (1.0 if action == "join" else 0.0), "mz": (0.0 if action == "join" else 1.0) }
+	net.joined_room.connect(func(c: String) -> void: print("[%s] joined room %s" % [label, c]))
+	net.join_failed.connect(func(r: String) -> void: print("[%s] JOIN FAILED: %s" % [label, r]); get_tree().quit())
+	net.connection_lost.connect(func() -> void: print("[%s] connection lost" % label); get_tree().quit())
+	net.lobby_changed.connect(func(players: Array, _my_id: int, _admin_id: int, _c: String) -> void:
+		if not st["picked"]:
+			st["picked"] = true
+			net.choose_element(my_el)
+		if action == "create" and not st["started"] and players.size() >= 2:
+			st["started"] = true
+			print("[%s] 2 players in lobby — starting match" % label)
+			net.start_match())
+	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary) -> void:
+		var mine := multiplayer.get_unique_id()
+		local_net_id = int(ids.get(mine, 0))
+		for pid in ids:
+			if int(pid) != mine:
+				st["other"] = int(ids[pid])
+		print("[%s] MATCH STARTING my_net_id=%d other_net_id=%d" % [label, local_net_id, st["other"]])
+		var tk := Timer.new(); tk.wait_time = 0.6; tk.autostart = true; add_child(tk)
+		tk.timeout.connect(func() -> void:
+			net.send_input(st["mx"], st["mz"], false, 0.0)
+			if snap_buf.is_empty(): return
+			var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
+			var me: Dictionary = latest.get(local_net_id, {})
+			var ot: Dictionary = latest.get(st["other"], {})
+			print("[%s] me=(%.1f,%.1f) OTHER#%d=(%.1f,%.1f) actors=%d" % [label,
+				float(me.get("x", 0.0)), float(me.get("z", 0.0)), st["other"],
+				float(ot.get("x", 0.0)), float(ot.get("z", 0.0)), latest.size()])))
+	print("[%s] connecting (%s, code=%s, el=%s)…" % [label, action, code, my_el])
+	net.connect_to("ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT, label, action, code)
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60

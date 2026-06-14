@@ -7,6 +7,14 @@ signal element_selected(el: String)
 signal play_again()
 signal task_assigned(task: String)
 
+# --- online multiplayer ---
+signal online_pressed()                                  # start screen → open online panel
+signal host_requested(player_name: String)               # online panel → host a new room
+signal join_requested(player_name: String, code: String) # online panel → join a room
+signal back_pressed()                                     # online/lobby → back to start
+signal lobby_element_picked(el: String)                  # lobby → pick / change element
+signal lobby_start_pressed()                             # lobby → admin starts the match
+
 const UI_COLORS := { "fire": 0xf0541a, "water": 0x5d93e8, "grass": 0x55b06a }
 const TEXT := Color(0.227, 0.208, 0.314)
 
@@ -36,6 +44,16 @@ var end_sub: Label
 
 var task_root: Control
 var task_icons: Array = []        # [TextureRect] one per task button
+
+# --- online panel + lobby ---
+var online_root: Control
+var lobby_root: Control
+var online_name: LineEdit
+var online_code: LineEdit
+var online_status: Label
+var lobby_code_label: Label
+var lobby_list: VBoxContainer
+var lobby_start_btn: Button
 var _icon_viewports: Array = []   # SubViewports backing the icons (freed on re-setup)
 
 var _toast_timer := 0.0
@@ -48,6 +66,8 @@ func _ready() -> void:
 	layer = 10
 	_build_background()
 	_build_start()
+	_build_online()
+	_build_lobby()
 	_build_hud()
 	_build_radar()
 	_build_toast_countdown()
@@ -130,6 +150,10 @@ func _build_start() -> void:
 	_add_card(cards, "water", "WATER", "catches Fire\nflees Leaf\nswims full speed")
 	_add_card(cards, "grass", "LEAF", "catches Water\nflees Fire")
 
+	var online_btn := _action_button("🌐  PLAY ONLINE WITH FRIENDS", 360, 50)
+	online_btn.pressed.connect(func() -> void: online_pressed.emit())
+	v.add_child(_center(online_btn))
+
 	var hint := _make_label(
 		"Hearts: a touch from your rival or CO₂ costs a heart — at zero you're sent home (you're never out)\n"
 		+ "Training totem by your cave: earn an extra heart   ·   Clan hall: teach 20s for a clan of 10, then click them to assign tasks\n"
@@ -141,7 +165,7 @@ func _build_start() -> void:
 		13, Color(1, 1, 1, 0.85))
 	v.add_child(hint)
 
-func _add_card(parent: Node, el: String, name_: String, rel: String) -> void:
+func _add_card(parent: Node, el: String, name_: String, rel: String, online := false) -> void:
 	var s := 2.0 if mobile else 1.0   # phones get twice-as-big tappable element cards
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(160, 150) * s
@@ -162,8 +186,123 @@ func _add_card(parent: Node, el: String, name_: String, rel: String) -> void:
 	btn.add_theme_font_size_override("font_size", int(16 * s))
 	btn.text = name_ + "\n\n" + rel
 	btn.autowrap_mode = TextServer.AUTOWRAP_WORD
-	btn.pressed.connect(func() -> void: element_selected.emit(el))
+	if online:
+		btn.pressed.connect(func() -> void: lobby_element_picked.emit(el))
+	else:
+		btn.pressed.connect(func() -> void: element_selected.emit(el))
 	parent.add_child(btn)
+
+# --------------------------------------------------------- online UI helpers
+func _action_button(text: String, w: int = 240, h: int = 52, bg: int = 0xf2a55a, fg: int = 0x5a3a20) -> Button:
+	var s := 1.5 if mobile else 1.0
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(w, h) * s
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = _c(bg)
+	sb.set_corner_radius_all(14)
+	sb.set_content_margin_all(8)
+	b.add_theme_stylebox_override("normal", sb)
+	var sbh := sb.duplicate()
+	sbh.bg_color = _c(bg).lightened(0.12)
+	b.add_theme_stylebox_override("hover", sbh)
+	b.add_theme_stylebox_override("pressed", sbh)
+	var sbd := sb.duplicate()
+	sbd.bg_color = Color(0.5, 0.5, 0.55, 0.6)
+	b.add_theme_stylebox_override("disabled", sbd)
+	b.add_theme_color_override("font_color", _c(fg))
+	b.add_theme_color_override("font_hover_color", _c(fg))
+	b.add_theme_color_override("font_pressed_color", _c(fg))
+	b.add_theme_font_size_override("font_size", int(18 * s))
+	return b
+
+func _line_edit(placeholder: String, maxlen: int = 0) -> LineEdit:
+	var s := 1.5 if mobile else 1.0
+	var le := LineEdit.new()
+	le.placeholder_text = placeholder
+	le.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	le.custom_minimum_size = Vector2(260, 44) * s
+	le.add_theme_font_size_override("font_size", int(18 * s))
+	if maxlen > 0:
+		le.max_length = maxlen
+	return le
+
+# center a fixed-size control inside a VBoxContainer (which otherwise stretches children)
+func _center(c: Control) -> Control:
+	c.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	return c
+
+func _build_online() -> void:
+	online_root = Control.new()
+	online_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	online_root.visible = false
+	add_child(online_root)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	online_root.add_child(center)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 14)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(v)
+	v.add_child(_make_label("PLAY ONLINE", 46, _c(0xfff1e0)))
+	v.add_child(_make_label(
+		"Host a game and share the code with up to 6 friends,\nor join with a code someone sent you.",
+		16, Color(1, 1, 1, 0.9)))
+	online_name = _line_edit("Your name", 16)
+	v.add_child(_center(online_name))
+	var hostb := _action_button("HOST NEW GAME", 260)
+	hostb.pressed.connect(func() -> void: host_requested.emit(online_name.text))
+	v.add_child(_center(hostb))
+	v.add_child(_make_label("— or —", 14, Color(1, 1, 1, 0.7)))
+	online_code = _line_edit("Enter code", 8)
+	v.add_child(_center(online_code))
+	var joinb := _action_button("JOIN GAME", 260, 52, 0x5d93e8, 0xffffff)
+	joinb.pressed.connect(func() -> void: join_requested.emit(online_name.text, online_code.text))
+	v.add_child(_center(joinb))
+	online_status = _make_label("", 15, _c(0xffd9b0))
+	v.add_child(online_status)
+	var backb := _action_button("← BACK", 150, 44, 0x6a6276, 0xffffff)
+	backb.pressed.connect(func() -> void: back_pressed.emit())
+	v.add_child(_center(backb))
+
+func _build_lobby() -> void:
+	lobby_root = Control.new()
+	lobby_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lobby_root.visible = false
+	add_child(lobby_root)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lobby_root.add_child(center)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 12)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(v)
+	lobby_code_label = _make_label("ROOM —", 44, _c(0xfff1e0))
+	v.add_child(lobby_code_label)
+	v.add_child(_make_label(
+		"Share this code with your friends. Pick your element — you can all pick the same one;\n"
+		+ "NPCs fill the other teams so it stays fair.", 15, Color(1, 1, 1, 0.9)))
+	var cards := HBoxContainer.new()
+	cards.add_theme_constant_override("separation", 14)
+	cards.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_child(cards)
+	_add_card(cards, "fire", "FIRE", "catches Leaf\nflees Water", true)
+	_add_card(cards, "water", "WATER", "catches Fire\nflees Leaf", true)
+	_add_card(cards, "grass", "LEAF", "catches Water\nflees Fire", true)
+	lobby_list = VBoxContainer.new()
+	lobby_list.add_theme_constant_override("separation", 4)
+	lobby_list.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_child(lobby_list)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 14)
+	v.add_child(row)
+	lobby_start_btn = _action_button("START GAME", 220, 56, 0x55b06a, 0xffffff)
+	lobby_start_btn.pressed.connect(func() -> void: lobby_start_pressed.emit())
+	row.add_child(lobby_start_btn)
+	var leaveb := _action_button("LEAVE", 150, 56, 0x6a6276, 0xffffff)
+	leaveb.pressed.connect(func() -> void: back_pressed.emit())
+	row.add_child(leaveb)
 
 func _build_hud() -> void:
 	hud_root = Control.new()
@@ -449,29 +588,58 @@ func _strip_legs(m: Node3D) -> void:
 			(arm as Node3D).visible = false
 
 # --------------------------------------------------------------- screen state
-func show_start() -> void:
-	bg.visible = true
-	start_root.visible = true
+func _hide_all() -> void:
+	start_root.visible = false
 	end_root.visible = false
 	hud_root.visible = false
 	radar.visible = false
 	if task_root: task_root.visible = false
+	if online_root: online_root.visible = false
+	if lobby_root: lobby_root.visible = false
+
+func show_start() -> void:
+	_hide_all()
+	bg.visible = true
+	start_root.visible = true
 	countdown_label.text = ""
 
+func show_online_panel() -> void:
+	_hide_all()
+	bg.visible = true
+	online_root.visible = true
+	online_status.text = ""
+
+func set_online_status(text: String) -> void:
+	if online_status:
+		online_status.text = text
+
+func show_lobby(players: Array, my_id: int, admin_id: int, code: String) -> void:
+	_hide_all()
+	bg.visible = true
+	lobby_root.visible = true
+	lobby_code_label.text = "ROOM  " + code
+	for c in lobby_list.get_children():
+		c.queue_free()
+	var el_names := { "fire": "Fire", "water": "Water", "grass": "Leaf" }
+	for p in players:
+		var mine: bool = int(p["id"]) == my_id
+		var is_admin: bool = int(p["id"]) == admin_id
+		var txt := ("★ " if is_admin else "•  ") + str(p["name"]) + (" (you)" if mine else "") \
+			+ "   —   " + str(el_names.get(p["el"], p["el"]))
+		lobby_list.add_child(_make_label(txt, 18, _c(UI_COLORS[p["el"]])))
+	lobby_start_btn.visible = (my_id == admin_id)
+	lobby_start_btn.disabled = players.is_empty()
+
 func show_hud() -> void:
+	_hide_all()
 	bg.visible = false
-	start_root.visible = false
-	end_root.visible = false
 	hud_root.visible = true
 	radar.visible = true
 
 func show_end(rows: Array, title: String, sub: String) -> void:
+	_hide_all()
 	bg.visible = true
 	end_root.visible = true
-	hud_root.visible = false
-	radar.visible = false
-	start_root.visible = false
-	if task_root: task_root.visible = false
 	end_title.text = title
 	end_sub.text = sub
 	for c in standings_box.get_children():

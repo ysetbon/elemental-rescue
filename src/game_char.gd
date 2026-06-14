@@ -5,8 +5,11 @@ extends RefCounted
 
 var kind: String = "element"      # "element" | "o2" | "co2"
 var el: String = ""               # "fire" | "water" | "grass" (elements only)
-var is_player: bool = false
-var group: CharVisual = null
+var is_player: bool = false       # the LOCAL player's avatar (client/single only)
+var is_human: bool = false        # controlled by a person (online: any peer) vs AI
+var peer_id: int = 0              # owning network peer (0 = AI filler / single-player NPC)
+var net_id: int = 0               # stable per-match id used in network snapshots
+var group: CharVisual = null      # null on the headless server (no visuals)
 
 var pos := Vector3.ZERO
 var vel := Vector3.ZERO

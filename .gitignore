@@ -6,3 +6,9 @@
 studio_banner.png
 _banner.png
 _shot.png
+
+# exported server pack — committed so Render's Docker build can COPY it.
+# Re-export after changing server-side code:
+#   godot --headless --path . --export-pack "Server" build/server.pck
+build/*
+!build/server.pck

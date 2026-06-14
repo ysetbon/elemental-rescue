@@ -3,10 +3,9 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://i0k3n2erbbw1"
-path.s3tc="res://.godot/imported/Leaf3_3.jpg-9603d21688524a3deb8c1acc8ad0490c.s3tc.ctex"
+path="res://.godot/imported/Leaf3_3.jpg-9603d21688524a3deb8c1acc8ad0490c.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
+"vram_texture": false
 }
 generator_parameters={
 "md5": "44580df5238a19d238f4cd072aadcd05"
@@ -15,11 +14,11 @@ generator_parameters={
 [deps]
 
 source_file="res://models/Leaf3_3.jpg"
-dest_files=["res://.godot/imported/Leaf3_3.jpg-9603d21688524a3deb8c1acc8ad0490c.s3tc.ctex"]
+dest_files=["res://.godot/imported/Leaf3_3.jpg-9603d21688524a3deb8c1acc8ad0490c.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=1
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
