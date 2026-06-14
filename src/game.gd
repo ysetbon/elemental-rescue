@@ -2708,8 +2708,11 @@ func _ready_testclient() -> void:
 	var tport := NetManager.DEFAULT_PORT
 	if OS.has_environment("TEST_PORT"):
 		tport = int(OS.get_environment("TEST_PORT"))
-	print("[%s] connecting (%s, code=%s, el=%s) port=%d…" % [label, action, code, my_el, tport])
-	net.connect_to("ws://127.0.0.1:%d" % tport, label, action, code)
+	var turl := "ws://127.0.0.1:%d" % tport
+	if OS.has_environment("TEST_URL"):
+		turl = OS.get_environment("TEST_URL")
+	print("[%s] connecting (%s, code=%s, el=%s) url=%s…" % [label, action, code, my_el, turl])
+	net.connect_to(turl, label, action, code)
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60
