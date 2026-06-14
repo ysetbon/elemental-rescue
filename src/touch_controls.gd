@@ -26,7 +26,7 @@ const KNOB_R := 38.0 * UI_SCALE
 const TRAVEL := 62.0 * UI_SCALE
 const SPRINT_R := 66.0 * UI_SCALE
 const DEADZONE := 9.0 * UI_SCALE
-var _joy_zone := Rect2()
+const GRAB_R := BASE_R * 1.2       # only a touch this close to the joystick grabs it
 
 # Active interaction. Index is the touch finger id, or -1 for the mouse
 # (desktop testing). -2 means "not held".
@@ -76,7 +76,6 @@ func _recompute() -> void:
 	var s := get_viewport().get_visible_rect().size
 	_home = Vector2(40.0 + BASE_R, s.y - 40.0 - BASE_R)
 	_sprint_c = Vector2(s.x - 44.0 - SPRINT_R, s.y - 52.0 - SPRINT_R)
-	_joy_zone = Rect2(0, s.y * 0.40, s.x * 0.52, s.y * 0.60)
 	if _pad:
 		_pad.queue_redraw()
 
@@ -123,13 +122,21 @@ func _block_mouse() -> bool:
 	return _joy_idx == 0 or _sprint_idx == 0
 
 func _press(idx: int, pos: Vector2) -> bool:
+	# In the clan command view a tap on a clan member must select it, even when the
+	# member is drawn under the joystick or sprint button. Don't claim the touch in
+	# that case — let it fall through to Game's selection (the emulated mouse). Empty
+	# ground still drives the controls, so you can walk away / flee mid-assign.
+	if game and game.touch_selects_clan(pos):
+		return false
 	if _sprint_idx == -2 and pos.distance_to(_sprint_c) <= SPRINT_R * 1.25:
 		_sprint_idx = idx
 		if game:
 			game.touch_sprint = true
 		_pad.queue_redraw()
 		return true
-	if _joy_idx == -2 and _joy_zone.has_point(pos):
+	# Only the joystick's own area activates it — not the whole bottom-left of the
+	# screen as before. A press elsewhere is left for the camera / clan selection.
+	if _joy_idx == -2 and pos.distance_to(_home) <= GRAB_R:
 		_joy_idx = idx
 		_joy_origin = _clamp_origin(pos)
 		_drag_joy(pos)

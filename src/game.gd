@@ -432,9 +432,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.position.distance_to(_press_pos) > 6.0:
 			_press_moved = true
 
-func _click_select(screen_pos: Vector2) -> void:
+# Clan member nearest to a screen position (within the pick radius), or null.
+func _ally_at(screen_pos: Vector2) -> GameChar:
 	if not player or allies.is_empty():
-		return
+		return null
 	var picked: GameChar = null
 	var best := 64.0   # pixels
 	for a in allies:
@@ -445,11 +446,25 @@ func _click_select(screen_pos: Vector2) -> void:
 		var d := sp.distance_to(screen_pos)
 		if d < best:
 			best = d; picked = a
+	return picked
+
+func _click_select(screen_pos: Vector2) -> void:
+	if not player or allies.is_empty():
+		return
+	var picked := _ally_at(screen_pos)
 	if picked:
 		_set_selected(picked, not picked.selected)
 	else:
 		_clear_selection()   # clicked empty space — drop the selection
 	ui.show_task_buttons(_has_selection())
+
+# True when a touch at this screen position should pick a clan member rather than
+# drive the on-screen controls — i.e. we're in the top-down command view and the
+# touch landed on a selectable member. The mobile joystick/sprint use this so a tap
+# on a left-side member (drawn under the joystick) selects it, while taps on empty
+# ground still drive movement so you can walk away / flee.
+func touch_selects_clan(screen_pos: Vector2) -> bool:
+	return _clan_assign_active() and _ally_at(screen_pos) != null
 
 func _set_selected(a: GameChar, on: bool) -> void:
 	a.selected = on
