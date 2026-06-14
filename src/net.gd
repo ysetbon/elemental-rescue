@@ -18,6 +18,7 @@ signal joined_room(code: String)                       # client: server accepted
 signal join_failed(reason: String)                     # client: rejected / error
 signal lobby_changed(players: Array, my_id: int, admin_id: int, code: String)
 signal match_starting(world_seed: int, humans: Array, net_ids: Dictionary)  # client: round starting
+signal match_ended(reason: String, winner_el: String, standings: Array)      # client: round over
 signal connection_lost()                               # client: server vanished
 
 const MAX_PLAYERS := 7
@@ -213,6 +214,15 @@ func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 func _snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 	if game:
 		game.client_on_snapshot(adata, meta)
+
+# ---- end of round (server -> clients) ----
+func broadcast_end(reason: String, winner_el: String, standings: Array) -> void:
+	started = false
+	_end_match.rpc(reason, winner_el, standings)
+
+@rpc("authority", "reliable")
+func _end_match(reason: String, winner_el: String, standings: Array) -> void:
+	match_ended.emit(reason, winner_el, standings)
 
 func _broadcast_lobby() -> void:
 	var players: Array = []

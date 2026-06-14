@@ -121,8 +121,14 @@ var local_net_id := 0             # this client's own actor net_id (0 = not in a
 var local_el := ""                # this client's element this match
 var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we render)
 var snap_buf: Array = []          # recent snapshots [{ t, by_id:{net_id->Dictionary} }]
+var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
+var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
+var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
 var _scores := { "fire": 0, "water": 0, "grass": 0 }
 var _net_time_left := ROUND_TIME
+# SERVER rescue state, shared per element (one key/twin per team)
+var has_key_by_el := {}            # el -> bool
+var twin_by_el := {}               # el -> GameChar (freed twin) or absent
 # Production server (set once the Render service is deployed). Override on web
 # with ?server=ws://host:port for local testing.
 const PROD_SERVER_URL := "wss://elemental-rescue-server.onrender.com"
@@ -294,8 +300,29 @@ func _ready_server() -> void:
 # simulation can be smoke-tested with no clients.  godot ... -- server servertest
 func _server_selftest() -> void:
 	server_start_match(12345, [{ "peer": 101, "el": "fire" }, { "peer": 102, "el": "grass" }])
-	print("[selftest] spawned actors=%d npcs=%d by_el=%s" % [actors.size(), npcs.size(),
-		str({ "fire": by_el["fire"].size(), "water": by_el["water"].size(), "grass": by_el["grass"].size() })])
+	print("[selftest] spawned actors=%d npcs=%d" % [actors.size(), npcs.size()])
+	var fh: GameChar = by_el["fire"][0]   # the fire human — drive it through the rescue
+	var step := { "n": 0 }
+	var t := Timer.new(); t.wait_time = 1.0; t.autostart = true; add_child(t)
+	t.timeout.connect(func() -> void:
+		step["n"] += 1
+		var n: int = step["n"]
+		if n == 4:
+			fh.pos = keys["fire"]["pos"]
+			print("[selftest] -> teleported fire human onto its key")
+		elif n == 5:
+			print("[selftest] has_key[fire]=%s" % str(has_key_by_el.get("fire", false)))
+			var cg: Dictionary = cage_by_el["fire"]
+			fh.pos = Vector3(cg["x"], 0, cg["z"])
+			print("[selftest] -> teleported fire human to its cage")
+		elif n == 6:
+			print("[selftest] twin[fire] freed=%s" % str(twin_by_el.get("fire") != null))
+			if twin_by_el.get("fire") != null:
+				var hc: Dictionary = cave_by_owner["fire"]
+				twin_by_el["fire"].pos = Vector3(hc["x"], 0, hc["z"])
+				print("[selftest] -> teleported fire twin to home cave")
+		elif n == 7:
+			print("[selftest] RESULT ending=%s won=%s" % [str(ending), str(won)]))
 
 # Create the Net node — same path (/root/Game/Net) on server and client so RPCs match.
 func _start_net() -> void:
@@ -1983,6 +2010,8 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	o2_charges = 0
 	time_left = ROUND_TIME
 	_snap_accum = 0.0
+	has_key_by_el = {}
+	twin_by_el = {}
 	# reset rescue state
 	allies = []
 	freed_twin = null
@@ -2151,6 +2180,7 @@ func _wire_online() -> void:
 	net.join_failed.connect(_on_join_failed)
 	net.lobby_changed.connect(_on_lobby_changed)
 	net.match_starting.connect(_on_match_starting)
+	net.match_ended.connect(_on_match_ended)
 	net.connection_lost.connect(_on_connection_lost)
 
 func _server_url() -> String:
@@ -2227,6 +2257,10 @@ func _client_clear() -> void:
 		if is_instance_valid(ghosts[nid]):
 			ghosts[nid].queue_free()
 	ghosts.clear()
+	for el in key_nodes:
+		if is_instance_valid(key_nodes[el]):
+			key_nodes[el].queue_free()
+	key_nodes.clear()
 	snap_buf.clear()
 	if player and player.group and is_instance_valid(player.group):
 		player.group.queue_free()
@@ -2256,6 +2290,9 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 	var sc: Dictionary = meta.get("sc", {})
 	for el in ["fire", "water", "grass"]:
 		_scores[el] = int(sc.get(el, _scores[el]))
+	_net_rk = meta.get("rk", _net_rk)
+	_net_rt = meta.get("rt", _net_rt)
+	_client_sync_keys(meta.get("kp", {}))
 	if player and by_id.has(local_net_id):
 		var srv: Dictionary = by_id[local_net_id]
 		player.pos = player.pos.lerp(Vector3(srv["x"], 0, srv["z"]), 0.25)  # blend to authority
@@ -2311,6 +2348,7 @@ func _server_process(delta: float) -> void:
 				_update_o2(n, dt)
 	_update_cave_timers(dt)
 	_check_catches()
+	_server_rescue(dt)
 	_snap_accum += dt
 	if _snap_accum >= 1.0 / SNAP_HZ:
 		_snap_accum = 0.0
@@ -2359,6 +2397,9 @@ func _broadcast_snapshot() -> void:
 	var list: Array = []
 	list.append_array(actors)
 	list.append_array(npcs)
+	for el in twin_by_el:
+		if twin_by_el[el] != null:
+			list.append(twin_by_el[el])
 	var data := PackedFloat32Array()
 	data.resize(list.size() * SNAP_FLOATS)
 	var i := 0
@@ -2372,9 +2413,21 @@ func _broadcast_snapshot() -> void:
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
 		i += SNAP_FLOATS
+	# per-element rescue state + key positions, so each client can show its objective
+	# and render the (un-held) keys
+	var kp := {}
+	for el in keys:
+		if not bool(has_key_by_el.get(el, false)):
+			kp[el] = [keys[el]["pos"].x, keys[el]["pos"].z]
+	var rt := {}
+	for el in ["fire", "water", "grass"]:
+		rt[el] = twin_by_el.get(el) != null
 	var meta := {
 		"tl": time_left,
 		"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
+		"rk": has_key_by_el.duplicate(),   # el -> bool (key held)
+		"rt": rt,                          # el -> bool (twin freed)
+		"kp": kp,                          # el -> [x,z] (un-held key positions)
 	}
 	if net:
 		net.broadcast_snapshot(data, meta)
@@ -2384,6 +2437,79 @@ func _team_score(el: String) -> int:
 	for c in by_el.get(el, []):
 		s += c.score
 	return s
+
+# ---- server-authoritative rescue (shared per element) ----
+# One key / one caged twin per element team. Any human of element E can grab E's
+# key, free E's twin at E's cage, and escort it home to win for the whole team.
+func _server_rescue(dt: float) -> void:
+	for el in ["fire", "water", "grass"]:
+		var grp: Array = by_el.get(el, [])
+		# pick up the team key
+		if not bool(has_key_by_el.get(el, false)) and keys.has(el):
+			var kp: Vector3 = keys[el]["pos"]
+			for h in grp:
+				if h.is_human and h.alive and h.pos.distance_to(kp) < KEY_PICK_DIST:
+					has_key_by_el[el] = true
+					break
+		# free the caged twin once a teammate carrying the key reaches the cage
+		if bool(has_key_by_el.get(el, false)) and twin_by_el.get(el) == null and cage_by_el.has(el):
+			var cg: Dictionary = cage_by_el[el]
+			var cgp := Vector3(cg["x"], 0, cg["z"])
+			for h in grp:
+				if h.is_human and h.alive and h.pos.distance_to(cgp) < CAGE_RELEASE_DIST:
+					_server_release_twin(el)
+					break
+		# escort: the twin trails the nearest teammate; reaching home wins the round
+		var twin: GameChar = twin_by_el.get(el)
+		if twin != null and twin.alive:
+			var lead := _nearest_human_of(el, twin.pos)
+			if lead != null:
+				var d := twin.pos.distance_to(lead.pos)
+				if d <= TWIN_LEASH and d > 2.6:
+					var dir := lead.pos - twin.pos
+					dir.y = 0
+					twin.vel = twin.vel.lerp(dir.normalized() * twin.speed * 1.05, 1.0 - pow(0.0006, dt))
+					twin.pos += twin.vel * dt
+					resolve_collisions(twin)
+				else:
+					twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))
+			if cave_by_owner.has(el):
+				var hc: Dictionary = cave_by_owner[el]
+				if twin.pos.distance_to(Vector3(hc["x"], 0, hc["z"])) < RESCUE_WIN_DIST:
+					_server_end_match("rescued", el)
+					return
+
+func _server_release_twin(el: String) -> void:
+	var t := make_character("element", el)   # group null on server
+	t.is_twin = true
+	t.max_hp = 1
+	t.hp = 1
+	var cg: Dictionary = cage_by_el[el]
+	t.pos = Vector3(cg["x"], 0, cg["z"])
+	twin_by_el[el] = t
+
+func _nearest_human_of(el: String, from: Vector3) -> GameChar:
+	var best: GameChar = null
+	var bd := 1.0e20
+	for h in by_el.get(el, []):
+		if h.is_human and h.alive:
+			var d: float = from.distance_to(h.pos)
+			if d < bd:
+				bd = d; best = h
+	return best
+
+func _server_end_match(reason: String, winner_el: String) -> void:
+	if ending:
+		return
+	ending = true
+	running = false
+	won = true
+	var standings: Array = []
+	for el in ["fire", "water", "grass"]:
+		standings.append({ "el": el, "score": _team_score(el), "winner": el == winner_el })
+	if net:
+		net.broadcast_end(reason, winner_el, standings)
+	print("[server] match ended: %s team wins (%s)" % [winner_el, reason])
 
 # Networked viewer tick: predict the local avatar from input, draw every other
 # actor as an interpolated ghost, follow with the camera. No local simulation.
@@ -2483,11 +2609,53 @@ func _client_render_remote(dt: float) -> void:
 
 func _client_update_hud() -> void:
 	ui.set_hearts(player.hp, maxi(BASE_HP, player.hp))
-	ui.set_timer(_fmt_time(_net_time_left))
+	if bool(_net_rt.get(local_el, false)):
+		ui.set_objective("Escort your twin home to your cave!")
+	elif bool(_net_rk.get(local_el, false)):
+		ui.set_objective("Free your twin at the zoo cage")
+	else:
+		ui.set_objective("Find your %s key" % ELEMENTS[local_el]["label"])
 	var entries: Array = []
 	for el in ["fire", "water", "grass"]:
 		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
 	ui.set_board(entries)
+
+# CLIENT: build/position/hide the team keys from snapshot meta (kp = un-held keys).
+func _client_sync_keys(kp: Dictionary) -> void:
+	for el in ["fire", "water", "grass"]:
+		var present: bool = kp.has(el)
+		if present and not key_nodes.has(el):
+			var node := _make_key_node(el)
+			add_child(node)
+			key_nodes[el] = node
+		if key_nodes.has(el):
+			var node: Node3D = key_nodes[el]
+			if present:
+				node.position = Vector3(kp[el][0], 1.0, kp[el][1])
+				node.visible = true
+			else:
+				node.visible = false   # picked up → hide
+
+func _on_match_ended(reason: String, winner_el: String, standings: Array) -> void:
+	standings.sort_custom(func(a, b): return a["score"] > b["score"])
+	var out: Array = []
+	for i in standings.size():
+		var s: Dictionary = standings[i]
+		out.append({
+			"label": ELEMENTS[s["el"]]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[s["el"]]),
+			"score": s["score"], "me": s["el"] == local_el, "alive": true, "winner": bool(s.get("winner", false)),
+		})
+	var title := "Round over"
+	var sub := "Final standings above."
+	if reason == "rescued":
+		if winner_el == local_el:
+			title = "Your team freed %s!  🎉" % ELEMENTS[winner_el]["label"]
+			sub = "You brought your twin safely home. Rescue complete!"
+		else:
+			title = "%s team wins!" % ELEMENTS[winner_el]["label"]
+			sub = "%s completed their rescue first." % ELEMENTS[winner_el]["label"]
+	_client_clear()
+	ui.show_end(out, title, sub)
 
 # Dev/test hook (no GUI): connect to a local server and exercise the full lobby
 # handshake — create → pick element → start — logging each step, then quit.
