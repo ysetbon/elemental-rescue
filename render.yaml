@@ -34,5 +34,5 @@ services:
     plan: starter
     buildCommand: npm install --omit=dev
     startCommand: node server.js
-    region: oregon
+    region: ohio   # US-East — keep where the friends/host already connect best
     autoDeploy: true
