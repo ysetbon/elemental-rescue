@@ -195,7 +195,7 @@ func _add_card(parent: Node, el: String, name_: String, rel: String, online := f
 
 # --------------------------------------------------------- online UI helpers
 func _action_button(text: String, w: int = 240, h: int = 52, bg: int = 0xf2a55a, fg: int = 0x5a3a20) -> Button:
-	var s := 1.5 if mobile else 1.0
+	var s := 2.0 if mobile else 1.0
 	var b := Button.new()
 	b.text = text
 	b.custom_minimum_size = Vector2(w, h) * s
@@ -218,12 +218,14 @@ func _action_button(text: String, w: int = 240, h: int = 52, bg: int = 0xf2a55a,
 	return b
 
 func _line_edit(placeholder: String, maxlen: int = 0) -> LineEdit:
-	var s := 1.5 if mobile else 1.0
+	var s := 2.0 if mobile else 1.0
 	var le := LineEdit.new()
 	le.placeholder_text = placeholder
 	le.alignment = HORIZONTAL_ALIGNMENT_CENTER
-	le.custom_minimum_size = Vector2(260, 44) * s
+	le.custom_minimum_size = Vector2(260, 48) * s
 	le.add_theme_font_size_override("font_size", int(18 * s))
+	le.virtual_keyboard_enabled = true   # bring up the on-screen keyboard on mobile/web
+	le.context_menu_enabled = true
 	if maxlen > 0:
 		le.max_length = maxlen
 	return le
@@ -232,6 +234,10 @@ func _line_edit(placeholder: String, maxlen: int = 0) -> LineEdit:
 func _center(c: Control) -> Control:
 	c.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	return c
+
+# label whose font is doubled on mobile/touch (online + lobby screens)
+func _olabel(text: String, size: int, col: Color = TEXT) -> Label:
+	return _make_label(text, int(size * (2.0 if mobile else 1.0)), col)
 
 func _build_online() -> void:
 	online_root = Control.new()
@@ -245,8 +251,8 @@ func _build_online() -> void:
 	v.add_theme_constant_override("separation", 14)
 	v.alignment = BoxContainer.ALIGNMENT_CENTER
 	center.add_child(v)
-	v.add_child(_make_label("PLAY ONLINE", 46, _c(0xfff1e0)))
-	v.add_child(_make_label(
+	v.add_child(_olabel("PLAY ONLINE", 46, _c(0xfff1e0)))
+	v.add_child(_olabel(
 		"Host a game and share the code with up to 6 friends,\nor join with a code someone sent you.",
 		16, Color(1, 1, 1, 0.9)))
 	online_name = _line_edit("Your name", 16)
@@ -254,13 +260,13 @@ func _build_online() -> void:
 	var hostb := _action_button("HOST NEW GAME", 260)
 	hostb.pressed.connect(func() -> void: host_requested.emit(online_name.text))
 	v.add_child(_center(hostb))
-	v.add_child(_make_label("— or —", 14, Color(1, 1, 1, 0.7)))
+	v.add_child(_olabel("— or —", 14, Color(1, 1, 1, 0.7)))
 	online_code = _line_edit("Enter code", 8)
 	v.add_child(_center(online_code))
 	var joinb := _action_button("JOIN GAME", 260, 52, 0x5d93e8, 0xffffff)
 	joinb.pressed.connect(func() -> void: join_requested.emit(online_name.text, online_code.text))
 	v.add_child(_center(joinb))
-	online_status = _make_label("", 15, _c(0xffd9b0))
+	online_status = _olabel("", 15, _c(0xffd9b0))
 	v.add_child(online_status)
 	var backb := _action_button("← BACK", 150, 44, 0x6a6276, 0xffffff)
 	backb.pressed.connect(func() -> void: back_pressed.emit())
@@ -278,12 +284,12 @@ func _build_lobby() -> void:
 	v.add_theme_constant_override("separation", 12)
 	v.alignment = BoxContainer.ALIGNMENT_CENTER
 	center.add_child(v)
-	lobby_code_label = _make_label("ROOM —", 44, _c(0xfff1e0))
+	lobby_code_label = _olabel("ROOM —", 44, _c(0xfff1e0))
 	v.add_child(lobby_code_label)
 	var copyb := _action_button("🔗 COPY INVITE LINK", 300, 46, 0x5db0a0, 0xffffff)
 	copyb.pressed.connect(func() -> void: copy_invite_pressed.emit())
 	v.add_child(_center(copyb))
-	v.add_child(_make_label(
+	v.add_child(_olabel(
 		"Send the link (or the code above) to up to 6 friends — they tap it to join.\n"
 		+ "Pick your element (you can all pick the same one); NPCs fill the other teams so it stays fair.",
 		15, Color(1, 1, 1, 0.9)))
@@ -635,7 +641,7 @@ func show_lobby(players: Array, my_id: int, admin_id: int, code: String) -> void
 		var is_admin: bool = int(p["id"]) == admin_id
 		var txt := ("★ " if is_admin else "•  ") + str(p["name"]) + (" (you)" if mine else "") \
 			+ "   —   " + str(el_names.get(p["el"], p["el"]))
-		lobby_list.add_child(_make_label(txt, 18, _c(UI_COLORS[p["el"]])))
+		lobby_list.add_child(_olabel(txt, 18, _c(UI_COLORS[p["el"]])))
 	lobby_start_btn.visible = (my_id == admin_id)
 	lobby_start_btn.disabled = players.is_empty()
 
