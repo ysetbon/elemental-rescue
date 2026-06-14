@@ -1,41 +1,59 @@
 # Deploying online multiplayer
 
-The online build adds a **dedicated game server** (a headless copy of the game)
-that browser clients connect to over WebSocket. The existing static site keeps
-serving the game; the server is a second, separate Render service.
+Online play uses **host authority over a dumb relay** (the same idea as AniRacers):
 
-Everything is already wired so the client finds the server automatically **if you
-name the Render service `elemental-rescue-server`** (that makes its URL exactly
-`wss://elemental-rescue-server.onrender.com`, which is what the client looks for —
-see `PROD_SERVER_URL` in `src/game.gd`).
+- One player clicks **HOST** — their browser becomes the authority and runs the whole
+  game (spawns the world, moves everyone, decides catches/rescue) and streams
+  snapshots out.
+- Everyone else **JOINS** with the 4-letter code — their browser just sends input and
+  renders the snapshots it gets back.
+- The **relay** (`server.js`) is a tiny Node WebSocket process that only shuttles
+  messages between the host and the guests. There is **no game engine on the server**,
+  no Docker, no headless Godot.
 
-## 1. Deploy the server (one-time)
+```
+guest browsers ── ws ──▶ [relay: server.js] ◀── ws ── HOST browser (runs the game)
+```
+
+If the **host** closes their tab the match ends for everyone; if a **guest** leaves,
+the game keeps going (their character is left behind as an AI filler).
+
+## 1. Deploy the relay (one-time)
+
+The relay must be reachable at `wss://elemental-rescue-server.onrender.com` — that's
+what the client looks for (`PROD_SERVER_URL` in `src/game.gd`). Name the Render
+service `elemental-rescue-server` and that URL is automatic.
 
 In the Render dashboard:
 
 1. **New → Web Service** → connect the `elemental-rescue` GitHub repo.
 2. Settings:
    - **Name:** `elemental-rescue-server`  ← must match for auto-discovery
-   - **Runtime:** Docker (auto-detected from `Dockerfile`)
-   - **Branch:** the branch you merged this into (e.g. `main`)
-   - **Instance type:** Free
-3. **Create Web Service.** Render builds the Docker image (downloads Godot, runs
-   `build/server.pck`) and starts it. First build takes a few minutes.
-4. When it's live you'll see a URL like `https://elemental-rescue-server.onrender.com`.
-   Health: Render's default TCP check passes once the server is listening — there's
-   intentionally **no** `healthCheckPath` (the server speaks WebSocket, not HTTP).
+   - **Runtime:** Node
+   - **Build command:** `npm install --omit=dev`
+   - **Start command:** `node server.js`
+   - **Instance type:** Starter ($7/mo)
+3. **Create Web Service.**
 
-> Alternatively, Render can read `render.yaml` as a **Blueprint** (New → Blueprint)
-> and create the service for you. It also contains the existing static site, so
-> review what it proposes before applying if your static site was made manually.
+> Or let Render read `render.yaml` as a **Blueprint** (New → Blueprint) — it defines
+> both the static site and this relay.
 
-**Free-tier note:** the server sleeps after 15 min idle and takes ~1 min to wake on
-the first join (then it's smooth). Upgrade that service to Starter ($7/mo) for
-always-on if you play often.
+**Plan:** `render.yaml` uses the paid **Starter** plan so the relay is always-on (no
+15-min sleep / cold start) on a steady CPU — the lowest, most consistent latency for the
+guests, whose traffic all flows through it. The relay itself is tiny, so the **Free**
+plan also works fine; it just sleeps after 15 min idle and takes ~30–60s to wake on the
+first connect.
 
-## 2. Publish the online client
+> Note: the relay only forwards messages. The biggest lag levers for your friends are
+> (1) the relay's **region** — set it close to most players, and (2) the **host's**
+> machine + upload, since the host runs the game for everyone.
 
-The web client needs to be re-exported so the live site includes the online UI:
+(If you name the service something else, set `PROD_SERVER_URL` in `src/game.gd` to
+`wss://<your-service>.onrender.com` and re-export the client.)
+
+## 2. Publish the client
+
+Re-export the web client whenever `src/` changes (the build is committed in `web/`):
 
 ```sh
 godot --headless --path . --export-release "Web" web/index.html
@@ -44,36 +62,34 @@ godot --headless --path . --export-release "Web" web/index.html
 Then commit `web/` and push to your deploy branch — the static site redeploys
 automatically.
 
-(If you named the server something other than `elemental-rescue-server`, first set
-`PROD_SERVER_URL` in `src/game.gd` to `wss://<your-service>.onrender.com`, then
-re-export.)
-
 ## 3. Play with friends
 
 1. Open the site, click **🌐 PLAY ONLINE WITH FRIENDS**.
-2. Click **HOST NEW GAME** → you get a 4-letter room code. Share it.
+2. Click **HOST NEW GAME** → you get a 4-letter room code. Share it (or **Copy invite
+   link**).
 3. Friends open the site → **PLAY ONLINE** → type the code → **JOIN GAME**
-   (up to 6 friends, 7 total).
-4. Everyone picks an element (repeats allowed — NPCs fill the other teams to keep
-   it fair). The host clicks **START GAME**.
+   (up to 6 friends, 7 total). An invite link auto-fills the code.
+4. Everyone picks an element (repeats allowed — NPCs fill the other teams to keep it
+   fair). The host clicks **START GAME**.
 
-## Re-exporting the server after server-side code changes
+On phones (and for everyone in an online match) the on-screen **joystick + SPRINT
+button** appear automatically; on desktop you can also play with WASD + mouse-look.
 
-The server pack is committed at `build/server.pck`. After changing any server-side
-game logic, regenerate and commit it:
+## Local testing
 
 ```sh
-godot --headless --path . --export-pack "Server" build/server.pck
+node server.js                  # relay on ws://127.0.0.1:8910 (PORT to override)
 ```
 
-## What's verified vs. pending
+Run two browser tabs against a locally-served `web/` build (see `scripts/serve_web.js`,
+which sets the required COOP/COEP headers), or in the editor the native build connects
+to `ws://127.0.0.1:8910` automatically. Open a tab with `?server=ws://127.0.0.1:8910`
+to point a web build at your local relay.
 
-- **Verified (headless):** lobby + room codes, element pick + NPC fill, two players
-  moving in sync and seeing each other in real time, server-authoritative catches/
-  respawns, and the full rescue (key → free twin → escort home → team wins → end
-  screen).
-- **Best confirmed in a browser with a friend:** visual smoothness (interpolation,
-  camera) and feel over the real internet — tune snapshot rate / interpolation in
-  `src/game.gd` (`SNAP_HZ`, `INTERP_DELAY`) if needed.
-- **Deferred (not blocking play):** clan/training mechanics aren't networked yet —
-  they work in single-player; online play uses the core rescue loop.
+## What's networked
+
+- **Networked:** lobby + room codes, element pick + NPC fill, every player moving in
+  sync, host-authoritative catches/respawns, and the full rescue (key → free twin →
+  escort home → team wins → end screen).
+- **Single-player only (not networked):** clan/training/disguise mechanics — online play
+  uses the core rescue loop.
