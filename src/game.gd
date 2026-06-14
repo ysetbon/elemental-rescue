@@ -2497,40 +2497,45 @@ func _ready_testclient() -> void:
 	mode = Mode.CLIENT
 	Engine.max_fps = 60
 	_start_net()
-	get_tree().create_timer(12.0).timeout.connect(func() -> void:
-		print("[test] timeout — quitting"); get_tree().quit())
 	var args := OS.get_cmdline_user_args()
 	var action := "join" if args.has("join") else "create"
-	var code := ""
-	var ix := args.find("join")
-	if ix >= 0 and ix + 1 < args.size():
-		code = args[ix + 1]
-	var st := { "picked": false, "started": false }   # dict = by-reference across lambda calls
-	net.joined_room.connect(func(c: String) -> void: print("[test] joined room ", c))
-	net.join_failed.connect(func(r: String) -> void:
-		print("[test] JOIN FAILED: ", r); get_tree().quit())
-	net.connection_lost.connect(func() -> void:
-		print("[test] connection lost"); get_tree().quit())
-	net.lobby_changed.connect(func(players: Array, my_id: int, admin_id: int, c: String) -> void:
-		print("[test] lobby code=%s players=%s me=%d admin=%d" % [c, str(players), my_id, admin_id])
-		if action == "create" and not st["picked"]:
+	var label := "B-join" if action == "join" else "A-host"
+	var my_el := "fire" if action == "join" else "water"
+	var code := "TEST"   # fixed code so two separate processes meet in the same room
+	get_tree().create_timer(22.0).timeout.connect(func() -> void:
+		print("[%s] timeout — quitting" % label); get_tree().quit())
+	# host moves +z, joiner moves +x → distinct paths so each clearly sees the other move
+	var st := { "picked": false, "started": false, "other": 0, "mx": (1.0 if action == "join" else 0.0), "mz": (0.0 if action == "join" else 1.0) }
+	net.joined_room.connect(func(c: String) -> void: print("[%s] joined room %s" % [label, c]))
+	net.join_failed.connect(func(r: String) -> void: print("[%s] JOIN FAILED: %s" % [label, r]); get_tree().quit())
+	net.connection_lost.connect(func() -> void: print("[%s] connection lost" % label); get_tree().quit())
+	net.lobby_changed.connect(func(players: Array, _my_id: int, _admin_id: int, _c: String) -> void:
+		if not st["picked"]:
 			st["picked"] = true
-			net.choose_element("water")
-		elif action == "create" and st["picked"] and not st["started"]:
+			net.choose_element(my_el)
+		if action == "create" and not st["started"] and players.size() >= 2:
 			st["started"] = true
+			print("[%s] 2 players in lobby — starting match" % label)
 			net.start_match())
-	net.match_starting.connect(func(s: int, h: Array, ids: Dictionary) -> void:
-		local_net_id = int(ids.get(multiplayer.get_unique_id(), 0))
-		print("[test] MATCH STARTING seed=%d net_ids=%s my_net_id=%d" % [s, str(ids), local_net_id])
-		# drive input (move "forward") and watch snapshots come back with our pos moving
-		var tk := Timer.new(); tk.wait_time = 0.5; tk.autostart = true; add_child(tk)
+	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary) -> void:
+		var mine := multiplayer.get_unique_id()
+		local_net_id = int(ids.get(mine, 0))
+		for pid in ids:
+			if int(pid) != mine:
+				st["other"] = int(ids[pid])
+		print("[%s] MATCH STARTING my_net_id=%d other_net_id=%d" % [label, local_net_id, st["other"]])
+		var tk := Timer.new(); tk.wait_time = 0.6; tk.autostart = true; add_child(tk)
 		tk.timeout.connect(func() -> void:
-			net.send_input(0.0, 1.0, false, 0.0)
-			var me: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"].get(local_net_id, {}) if not snap_buf.is_empty() else {}
-			print("[test] snaps=%d  my pos=(%.1f,%.1f)" % [snap_buf.size(),
-				float(me.get("x", 0.0)), float(me.get("z", 0.0))])))
-	print("[test] connecting as '%s' (%s %s)…" % [action, code, ""])
-	net.connect_to("ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT, "Tester-" + action, action, code)
+			net.send_input(st["mx"], st["mz"], false, 0.0)
+			if snap_buf.is_empty(): return
+			var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
+			var me: Dictionary = latest.get(local_net_id, {})
+			var ot: Dictionary = latest.get(st["other"], {})
+			print("[%s] me=(%.1f,%.1f) OTHER#%d=(%.1f,%.1f) actors=%d" % [label,
+				float(me.get("x", 0.0)), float(me.get("z", 0.0)), st["other"],
+				float(ot.get("x", 0.0)), float(ot.get("z", 0.0)), latest.size()])))
+	print("[%s] connecting (%s, code=%s, el=%s)…" % [label, action, code, my_el])
+	net.connect_to("ws://127.0.0.1:%d" % NetManager.DEFAULT_PORT, label, action, code)
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60
