@@ -113,12 +113,12 @@ var mode: int = Mode.SINGLE       # SINGLE = local; HOST = this browser is the a
                                   # SERVER (old headless authority) is retired — kept in
                                   # the enum only so CLIENT keeps its value.
 var net: NetManager = null        # /root/Game/Net — present in every mode
-var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float }
+var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float, seq:int }
 
 # ---- replication (P3) ----
 const SNAP_HZ := 30.0             # server snapshot rate (raised from 20 now that online mode
                                   # drops the O₂/CO₂ molecules → far fewer actors per snapshot)
-const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
+const SNAP_FLOATS := 8            # per-actor: net_id, x, z, yaw, spd, flags, hp, last_input_seq
 # Remote actors are rendered this far in the past so there are always two snapshots to
 # interpolate between. The buffer is ADAPTIVE: client_on_snapshot measures the real
 # snapshot arrival cadence + jitter and keeps the delay just big enough — small (snappy)
@@ -152,7 +152,10 @@ var local_el := ""                # this client's element this match
 var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we render)
 var _net_actors := {}             # CLIENT: net_id -> { buf:Array, last_t:float, flags:int, hp:int }
                                   # buf entries: { t:float, pos:Vector3, yaw:float, spd:float } (per-actor keyframes)
-const LOCAL_TRUST_SNAP_DIST := 4.0 # CLIENT: only accept server position on obvious desyncs
+const LOCAL_TRUST_SNAP_DIST := 10.0 # CLIENT: emergency snap distance when reconciliation history is unavailable
+const PRED_HIST_MAX := 96
+const RECONCILE_EPS := 0.25
+var _pred_hist: Array = []        # CLIENT: recent predicted frames keyed by latest sent input seq
 var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
 var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
@@ -2411,6 +2414,7 @@ func _client_clear() -> void:
 			key_nodes[el].queue_free()
 	key_nodes.clear()
 	_net_actors.clear()
+	_pred_hist.clear()
 	if player and player.group and is_instance_valid(player.group):
 		player.group.queue_free()
 	player = null
@@ -2438,8 +2442,11 @@ func client_on_snapshot(adata: PackedFloat32Array, _meta: Dictionary) -> void:
 	# Per-actor keyframe ingest (replaces the whole-world snap_buf).
 	var local_seen := false
 	var local_pos := Vector3.ZERO
+	var local_yaw := 0.0
+	var local_spd := 0.0
 	var local_flags := 0
 	var local_hp := BASE_HP
+	var local_ack_seq := 0
 	var count := int(adata.size() / SNAP_FLOATS)
 	for k in count:
 		var b := k * SNAP_FLOATS
@@ -2449,11 +2456,15 @@ func client_on_snapshot(adata: PackedFloat32Array, _meta: Dictionary) -> void:
 		var spd := float(adata[b + 4])
 		var flags := int(adata[b + 5])
 		var hp := int(adata[b + 6])
+		var ack_seq := int(adata[b + 7])
 		if nid == local_net_id and player != null:
 			local_seen = true
 			local_pos = pos
+			local_yaw = yaw
+			local_spd = spd
 			local_flags = flags
 			local_hp = hp
+			local_ack_seq = ack_seq
 			continue
 		var a = _net_actors.get(nid, null)
 		if a == null:
@@ -2466,12 +2477,7 @@ func client_on_snapshot(adata: PackedFloat32Array, _meta: Dictionary) -> void:
 		while a["buf"].size() > 8:
 			a["buf"].pop_front()
 	if player and local_seen:
-		if player.pos.distance_to(local_pos) > LOCAL_TRUST_SNAP_DIST:
-			player.pos = local_pos
-			if player.group:
-				player.group.position = player.pos
-		player.hp = local_hp
-		player.slow_timer = SLOW_TIME if (local_flags & (1 << 6)) != 0 else 0.0
+		_client_reconcile_local(local_pos, local_yaw, local_spd, local_flags, local_hp, local_ack_seq)
 
 # CLIENT: slow status payload (scores / objective / key positions). Arrives as its own
 # JSON message (~6Hz) now that positions ride a separate binary frame. Omitted fields
@@ -2581,7 +2587,7 @@ func _host_process(delta: float) -> void:
 func _host_capture_local_input(dt: float) -> void:
 	var hid := net.my_id
 	if player == null or not player.alive:
-		net_input[hid] = { "move": Vector2.ZERO, "sprint": false, "yaw": cam_yaw }
+		net_input[hid] = { "move": Vector2.ZERO, "sprint": false, "yaw": cam_yaw, "seq": 0 }
 		return
 	var mx := 0.0
 	var mz := 0.0
@@ -2598,7 +2604,7 @@ func _host_capture_local_input(dt: float) -> void:
 	else:
 		stamina = minf(100.0, stamina + dt * 13.0)
 	ui.set_stamina(stamina)
-	net_input[hid] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": cam_yaw }
+	net_input[hid] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": cam_yaw, "seq": 0 }
 
 # HOST: drive the shared HUD from the host's own authoritative state (it reuses the
 # client HUD helpers, which read these _net_* mirrors).
@@ -2624,22 +2630,25 @@ func _update_human_net(ch: GameChar, dt: float) -> void:
 	var mv: Vector2 = inp.get("move", Vector2.ZERO)
 	var sprint: bool = inp.get("sprint", false)
 	var yaw: float = inp.get("yaw", 0.0)
-	var ln := minf(1.0, mv.length())
+	_apply_human_move(ch, mv.x, mv.y, sprint, yaw, dt)
+
+func _apply_human_move(ch: GameChar, mx: float, mz: float, sprint: bool, yaw: float, dt: float) -> void:
+	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
 	var target := Vector3.ZERO
 	if ln > 0.05:
 		var fx := -sin(yaw)
 		var fz := -cos(yaw)
 		var rx := -fz
 		var rz := fx
-		target = Vector3(fx * mv.y + rx * mv.x, 0, fz * mv.y + rz * mv.x).normalized()
+		target = Vector3(fx * mz + rx * mx, 0, fz * mz + rz * mx).normalized()
 		target *= ch.speed * (1.5 if sprint else 1.0) * terrain_mult(ch) * _slow_mult(ch) * ln
 	ch.vel = ch.vel.lerp(target, 1.0 - pow(0.0003, dt))
 	ch.pos += ch.vel * dt
 	resolve_collisions(ch)
 
 # SERVER: stash a peer's latest input (consumed by _update_human_net).
-func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float) -> void:
-	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw }
+func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float, seq: int = 0) -> void:
+	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw, "seq": seq }
 
 # ---- snapshot encoding (shared layout, server packs / client unpacks) ----
 const _KIND_CODE := { "element": 0, "o2": 1, "co2": 2 }
@@ -2682,6 +2691,7 @@ func _broadcast_snapshot() -> void:
 		data[i + 4] = spd
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
+		data[i + 7] = float(int(net_input.get(ch.peer_id, {}).get("seq", 0)) if ch.is_human else 0)
 		_dr_last[ch.net_id] = { "yaw": yaw, "spd": spd, "pos": ch.pos, "t": now }
 		i += SNAP_FLOATS
 	# Per-element rescue state + key positions, so each client can show its objective
@@ -2858,24 +2868,72 @@ func _client_predict_local(dt: float) -> void:
 	else:
 		stamina = minf(100.0, stamina + dt * 13.0)
 	ui.set_stamina(stamina)
-	net.send_input(mx, mz, sprint, cam_yaw)   # authoritative movement happens on the server
+	var seq := net.send_input(mx, mz, sprint, cam_yaw)   # authoritative movement happens on the server
 	# local prediction so it feels instant
-	var target := Vector3.ZERO
-	if ln > 0.05:
-		var fx := -sin(cam_yaw)
-		var fz := -cos(cam_yaw)
-		var rx := -fz
-		var rz := fx
-		target = Vector3(fx * mz + rx * mx, 0, fz * mz + rz * mx).normalized()
-		target *= player.speed * (1.5 if sprint else 1.0) * terrain_mult(player) * _slow_mult(player) * ln
-	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
-	player.pos += player.vel * dt
-	resolve_collisions(player)
+	_apply_human_move(player, mx, mz, sprint, cam_yaw, dt)
+	_pred_hist.append({ "seq": seq, "pos": player.pos, "vel": player.vel, "mx": mx, "mz": mz, "sprint": sprint, "yaw": cam_yaw, "dt": dt })
+	while _pred_hist.size() > PRED_HIST_MAX:
+		_pred_hist.pop_front()
 	if player.group:
 		player.group.position = player.pos
 		if player.vel.length_squared() > 0.5:
 			player.group.rotation.y = lerp_angle(player.group.rotation.y, atan2(player.vel.x, player.vel.z), 1.0 - pow(0.001, dt))
 		player.group.animate(time_ms, player.vel.length())
+
+func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd: float, server_flags: int, server_hp: int, ack_seq: int) -> void:
+	if player == null:
+		return
+	player.hp = server_hp
+	player.slow_timer = SLOW_TIME if (server_flags & (1 << 6)) != 0 else 0.0
+	var server_vel := Vector3.ZERO
+	if server_spd > 0.04:
+		server_vel = Vector3(sin(server_yaw), 0, cos(server_yaw)) * server_spd
+	if ack_seq <= 0 or _pred_hist.is_empty():
+		_client_authority_fallback(server_pos, server_vel)
+		return
+	var ack_idx := -1
+	for i in _pred_hist.size():
+		if int((_pred_hist[i] as Dictionary).get("seq", 0)) == ack_seq:
+			ack_idx = i
+	if ack_idx < 0:
+		_client_authority_fallback(server_pos, server_vel)
+		return
+	var ack_frame: Dictionary = _pred_hist[ack_idx]
+	var predicted_pos: Vector3 = ack_frame.get("pos", player.pos)
+	var error := server_pos - predicted_pos
+	if error.length() <= RECONCILE_EPS:
+		var pending_small: Array = []
+		for j in range(ack_idx + 1, _pred_hist.size()):
+			pending_small.append(_pred_hist[j])
+		_pred_hist = pending_small
+		return
+	player.pos = server_pos
+	player.vel = server_vel
+	var pending: Array = []
+	for j in range(ack_idx + 1, _pred_hist.size()):
+		var st: Dictionary = _pred_hist[j]
+		_apply_human_move(player, float(st.get("mx", 0.0)), float(st.get("mz", 0.0)), bool(st.get("sprint", false)), float(st.get("yaw", 0.0)), float(st.get("dt", 0.0)))
+		st["pos"] = player.pos
+		st["vel"] = player.vel
+		pending.append(st)
+	_pred_hist = pending
+	if player.group:
+		player.group.position = player.pos
+		if player.vel.length_squared() > 0.5:
+			player.group.rotation.y = atan2(player.vel.x, player.vel.z)
+
+func _client_authority_fallback(server_pos: Vector3, server_vel: Vector3) -> void:
+	if player == null:
+		return
+	if player.pos.distance_to(server_pos) <= LOCAL_TRUST_SNAP_DIST:
+		return
+	player.pos = server_pos
+	player.vel = server_vel
+	_pred_hist.clear()
+	if player.group:
+		player.group.position = player.pos
+		if player.vel.length_squared() > 0.5:
+			player.group.rotation.y = atan2(player.vel.x, player.vel.z)
 
 # CLIENT: render each known remote actor from its own keyframe buffer. Interpolate when
 # two keyframes bracket render time (a turn → this IS the smoothing); extrapolate straight

@@ -50,6 +50,7 @@ var _li_mz := 0.0
 var _li_sp := false
 var _li_yaw := 0.0
 var _li_t := 0
+var _out_seq := 0
 
 # --- host-side room state ---
 var admin_id := 0                 # the host's id (== my_id on the host)
@@ -86,6 +87,7 @@ func _reset_state() -> void:
 	lobby.clear()
 	_pending_action = ""
 	_pending_code = ""
+	_out_seq = 0
 
 func _process(_dt: float) -> void:
 	if _ws == null:
@@ -198,7 +200,7 @@ func _on_guest_el(m: Dictionary) -> void:
 func _on_guest_input(m: Dictionary) -> void:
 	if role != "host" or game == null:
 		return
-	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)))
+	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)), int(m.get("seq", 0)))
 
 # ---- guest: receive host broadcasts ----
 func _on_lobby(m: Dictionary) -> void:
@@ -263,17 +265,19 @@ func start_match() -> void:
 			mapping[pid] = game.peer_actor[pid].net_id
 	_send({ "t": "start", "seed": world_seed, "humans": humans, "netids": mapping })
 
-# Guest -> host: per-frame input.
-func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> void:
+# Guest -> host: per-frame input. Returns the latest sequence id the host can ack.
+func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> int:
 	if role != "guest":
-		return
+		return _out_seq
 	var now := Time.get_ticks_msec()
 	var changed := absf(mx - _li_mx) > 0.04 or absf(mz - _li_mz) > 0.04 \
 		or sprint != _li_sp or absf(wrapf(yaw - _li_yaw, -PI, PI)) > 0.03
 	if not changed and (now - _li_t) < INPUT_MIN_MS:
-		return
+		return _out_seq
 	_li_mx = mx; _li_mz = mz; _li_sp = sprint; _li_yaw = yaw; _li_t = now
-	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw })
+	_out_seq += 1
+	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "seq": _out_seq })
+	return _out_seq
 
 # Host -> guests: positions as a compact BINARY frame (raw float32, no JSON ~2.5× smaller);
 # the bulky-but-slow meta (scores/objective/keys) rides its own JSON message when present.
