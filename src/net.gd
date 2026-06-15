@@ -138,6 +138,7 @@ func _on_text(text: String) -> void:
 		"guest_leave": _on_guest_leave(m)   # host
 		"el":       _on_guest_el(m)         # host
 		"in":       _on_guest_input(m)      # host
+		"dbg":      _on_guest_dbg(m)        # host: QA telemetry from a guest (?netlog=1)
 		"lobby":    _on_lobby(m)            # guest
 		"start":    _on_start(m)            # guest
 		"meta":     _on_meta(m)             # guest: slow status (scores/objective/keys)
@@ -201,6 +202,13 @@ func _on_guest_input(m: Dictionary) -> void:
 	if role != "host" or game == null:
 		return
 	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)), int(m.get("seq", 0)))
+
+# host: a guest reported its own smoothness telemetry (only when ?netlog=1). The relay
+# tagged it with `from`. The host prints a unified table so you watch one terminal.
+func _on_guest_dbg(m: Dictionary) -> void:
+	if role != "host" or game == null or not game.has_method("host_on_dbg"):
+		return
+	game.host_on_dbg(int(m.get("from", 0)), m)
 
 # ---- guest: receive host broadcasts ----
 func _on_lobby(m: Dictionary) -> void:
@@ -278,6 +286,16 @@ func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> int:
 	_out_seq += 1
 	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "seq": _out_seq })
 	return _out_seq
+
+# Guest -> host: QA telemetry (skew/jitter/RTT/buffer health). Only called when net
+# logging is on (?netlog=1 / nettest); the relay forwards it to the host like any guest
+# message. No-op on the host itself.
+func send_dbg(stats: Dictionary) -> void:
+	if role != "guest":
+		return
+	var d := stats.duplicate()
+	d["t"] = "dbg"
+	_send(d)
 
 # Host -> guests: positions as a compact BINARY frame (raw float32, no JSON ~2.5× smaller);
 # the bulky-but-slow meta (scores/objective/keys) rides its own JSON message when present.
