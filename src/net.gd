@@ -25,6 +25,7 @@ signal connection_lost()                               # host vanished / socket 
 const MAX_PLAYERS := 7
 const DEFAULT_PORT := 8910        # local relay port (used to build the editor/native URL)
 const CODE_LEN := 4
+const MSG_SNAP := 1               # binary WebSocket frame tag (byte 0): world-position snapshot
 
 var game: Node = null
 
@@ -99,7 +100,10 @@ func _process(_dt: float) -> void:
 			_on_open()
 		while _ws.get_available_packet_count() > 0:
 			var pkt := _ws.get_packet()
-			_on_text(pkt.get_string_from_utf8())
+			if _ws.was_string_packet():
+				_on_text(pkt.get_string_from_utf8())   # control + meta stay JSON
+			else:
+				_on_bin(pkt)                            # hot path: binary position snapshots
 	elif st == WebSocketPeer.STATE_CLOSED:
 		var was_in_room := role != "" or _open
 		_ws = null
@@ -134,7 +138,7 @@ func _on_text(text: String) -> void:
 		"in":       _on_guest_input(m)      # host
 		"lobby":    _on_lobby(m)            # guest
 		"start":    _on_start(m)            # guest
-		"snap":     _on_snap(m)             # guest
+		"meta":     _on_meta(m)             # guest: slow status (scores/objective/keys)
 		"end":      _on_end(m)              # guest
 		"host_gone": _on_host_gone()        # guest
 
@@ -204,15 +208,21 @@ func _on_lobby(m: Dictionary) -> void:
 func _on_start(m: Dictionary) -> void:
 	match_starting.emit(int(m.get("seed", 0)), m.get("humans", []), m.get("netids", {}))
 
-func _on_snap(m: Dictionary) -> void:
-	if game == null:
+# guest: a binary frame arrived (positions). Route by the 1-byte tag, decode the raw
+# float32 payload, and hand it to the game (no JSON on the hot path).
+func _on_bin(pkt: PackedByteArray) -> void:
+	if game == null or pkt.size() < 1:
 		return
-	var arr: Array = m.get("a", [])
-	var data := PackedFloat32Array()
-	data.resize(arr.size())
-	for i in arr.size():
-		data[i] = float(arr[i])
-	game.client_on_snapshot(data, m.get("meta", {}))
+	match pkt[0]:
+		MSG_SNAP:
+			var floats := pkt.slice(1).to_float32_array()
+			game.client_on_snapshot(floats, {})
+
+# guest: slow status payload (scores / objective / key positions), delivered as its own
+# JSON message (~6Hz) now that positions ride a separate binary frame.
+func _on_meta(m: Dictionary) -> void:
+	if game:
+		game.client_on_meta(m.get("meta", {}))
 
 func _on_end(m: Dictionary) -> void:
 	started = false
@@ -267,15 +277,21 @@ func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> void:
 	last_input_seq = _in_seq
 	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "seq": _in_seq })
 
-# Host -> guests: world snapshot.
+# Host -> guests: positions as a compact BINARY frame (raw float32, no JSON ~2.5× smaller);
+# the bulky-but-slow meta (scores/objective/keys) rides its own JSON message when present.
 func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 	if role != "host":
 		return
-	var arr: Array = []
-	arr.resize(adata.size())
-	for i in adata.size():
-		arr[i] = adata[i]
-	_send({ "t": "snap", "a": arr, "meta": meta })
+	if not meta.is_empty():
+		_send({ "t": "meta", "meta": meta })            # slow data, JSON, ~6Hz
+	if adata.size() > 0:
+		var frame := PackedByteArray([MSG_SNAP])
+		frame.append_array(adata.to_byte_array())        # raw float32 bytes
+		_send_bin(frame)
+
+func _send_bin(bytes: PackedByteArray) -> void:
+	if _ws != null and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		_ws.send(bytes)                                  # PackedByteArray -> WRITE_MODE_BINARY frame
 
 # Host -> guests: round over.
 func broadcast_end(reason: String, winner_el: String, standings: Array) -> void:
