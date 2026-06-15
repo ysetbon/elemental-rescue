@@ -32,6 +32,8 @@ var role_label: Label
 var cave_label: Label
 var hearts_box: HBoxContainer
 var hearts_tex: Texture2D
+var _hearts_cur := -1
+var _hearts_max := -1
 var status_label: Label
 var channel_box: PanelContainer
 var channel_label: Label
@@ -711,20 +713,27 @@ func set_objective(text: String) -> void:
 func set_hearts(cur: int, max_hp: int) -> void:
 	if hearts_box == null:
 		return
-	while hearts_box.get_child_count() > 0:
-		var c := hearts_box.get_child(0)
+	if cur == _hearts_cur and max_hp == _hearts_max and hearts_box.get_child_count() == max_hp:
+		return
+	_hearts_cur = cur
+	_hearts_max = max_hp
+	while hearts_box.get_child_count() > max_hp:
+		var c := hearts_box.get_child(hearts_box.get_child_count() - 1)
 		hearts_box.remove_child(c)
 		c.queue_free()
-	for i in max_hp:
+	while hearts_box.get_child_count() < max_hp:
 		var tr := TextureRect.new()
 		tr.texture = hearts_tex
 		tr.custom_minimum_size = Vector2(28, 28)
 		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		if i >= cur:
-			tr.modulate = Color(0.55, 0.55, 0.6, 0.4)   # a lost life — faded
 		hearts_box.add_child(tr)
+	for i in hearts_box.get_child_count():
+		var tr := hearts_box.get_child(i) as TextureRect
+		if tr == null:
+			continue
+		tr.modulate = Color(0.55, 0.55, 0.6, 0.4) if i >= cur else Color(1, 1, 1, 1)
 
 func set_status(text: String) -> void:
 	status_label.text = text
