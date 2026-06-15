@@ -335,12 +335,12 @@ func _ready_visual() -> void:
 	_apply_perf_scale()
 	_apply_net_flags()
 	_build_environment()
-	world_root = Node3D.new()
-	add_child(world_root)
 	if is_banner:
+		world_root = Node3D.new()
+		add_child(world_root)
 		_build_banner_world()    # a dedicated hand-placed scene, not the procedural town
 	else:
-		WorldBuilder.build(self)
+		_rebuild_world(randi())
 	_build_trails()
 	ui = GameUI.new()
 	ui.mobile = mobile   # 2x HUD + task buttons on phones
@@ -351,10 +351,7 @@ func _ready_visual() -> void:
 	ui.element_selected.connect(start_game)
 	ui.play_again.connect(_on_play_again)
 	ui.task_assigned.connect(_assign_task)
-	var radar_caves: Array = []
-	for c in caves:
-		radar_caves.append({ "x": c["x"], "z": c["z"], "r": c["r"], "fill": c["radarFill"] })
-	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
+	_sync_radar_world()
 	_start_net()
 	_wire_online()
 	# opened via an invite link (…?room=CODE) → jump straight to joining that room
@@ -443,6 +440,33 @@ func _build_environment() -> void:
 	sun.shadow_enabled = false
 	add_child(sun)
 	sun.look_at_from_position(SUN_FROM, Vector3.ZERO, Vector3.UP)
+
+func _rebuild_world(world_seed: int) -> void:
+	if world_root != null and is_instance_valid(world_root):
+		world_root.queue_free()
+	world_root = Node3D.new()
+	add_child(world_root)
+	obstacles.clear()
+	rects.clear()
+	caves.clear()
+	cave_by_owner.clear()
+	cages.clear()
+	cage_by_el.clear()
+	clan_hall_by_owner.clear()
+	train_pad_by_owner.clear()
+	deco_anims.clear()
+	wind_leaves.clear()
+	seed(world_seed)
+	WorldBuilder.build(self)
+	_sync_radar_world()
+
+func _sync_radar_world() -> void:
+	if ui == null:
+		return
+	var radar_caves: Array = []
+	for c in caves:
+		radar_caves.append({ "x": c["x"], "z": c["z"], "r": c["r"], "fill": c["radarFill"] })
+	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
 
 func _build_trails() -> void:
 	for i in TRAIL_N:
@@ -2121,13 +2145,9 @@ func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool)
 	ch.is_human = is_human
 	ch.max_hp = BASE_HP
 	ch.hp = BASE_HP
-	var c: Dictionary = cave_by_owner[el]
-	var base_a: float = c["openAngle"]
 	# fan multiple same-element actors around the cave mouth so they don't stack
 	var idx: int = by_el[el].size()
-	var a: float = base_a + (0.0 if idx == 0 else (float((idx + 1) / 2) * 0.42 * (1 if idx % 2 == 1 else -1)))
-	# spawn well clear of the cave mouth so the chase camera isn't looking through rocks
-	ch.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	ch.pos = _element_spawn_pos(el, idx)
 	if ch.group:
 		ch.group.position = ch.pos
 		ch.group.rotation.y = atan2(-ch.pos.x, -ch.pos.z)
@@ -2136,6 +2156,28 @@ func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool)
 	if peer != 0:
 		peer_actor[peer] = ch
 	return ch
+
+func _element_spawn_pos(el: String, idx: int) -> Vector3:
+	var c: Dictionary = cave_by_owner[el]
+	var a: float = _element_spawn_angle(c, idx)
+	# spawn well clear of the cave mouth so the chase camera isn't looking through rocks
+	return Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+
+func _element_spawn_angle(c: Dictionary, idx: int) -> float:
+	var base_a: float = c["openAngle"]
+	if idx == 0:
+		return base_a
+	return base_a + float((idx + 1) / 2) * 0.42 * (1 if idx % 2 == 1 else -1)
+
+func _human_spawn_index(humans: Array, peer: int, el: String) -> int:
+	var idx := 0
+	for h in humans:
+		if String(h["el"]) != el:
+			continue
+		if int(h["peer"]) == peer:
+			return idx
+		idx += 1
+	return 0
 
 func _run_countdown() -> void:
 	running = false
@@ -2191,7 +2233,7 @@ func end_game(reason: String) -> void:
 
 func _clear_actors() -> void:
 	for ch in all_chars():
-		if ch.group:
+		if ch.group and is_instance_valid(ch.group) and not ch.group.is_queued_for_deletion():
 			ch.group.queue_free()
 	actors = []
 	by_el = {}
@@ -2316,25 +2358,27 @@ func _on_lobby_changed(players: Array, my_id: int, admin_id: int, code: String) 
 func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
 	_client_start_match(world_seed, humans, net_ids)
 
-# CLIENT: enter a networked match. We keep the local backdrop world; the local
-# avatar is predicted from input and every other actor is an interpolated ghost.
+# CLIENT: enter a networked match. Rebuild the static world from the host's seed so
+# prediction collides against the same map, then render remote actors as ghosts.
 func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
-	seed(world_seed)
 	_client_clear()
+	_clear_actors()
+	_rebuild_world(world_seed)
 	var my_peer := net.my_id
 	# net_ids came over JSON, so its keys are strings (e.g. {"3": 5}); check both forms.
 	local_net_id = int(net_ids.get(str(my_peer), net_ids.get(my_peer, 0)))
 	local_el = "fire"
+	var spawn_idx := 0
 	for h in humans:
 		if int(h["peer"]) == my_peer:
 			local_el = String(h["el"])
+			spawn_idx = _human_spawn_index(humans, my_peer, local_el)
+			break
 	# local predicted avatar (drives the camera + sends input)
 	player = make_character("element", local_el, true)
 	player.is_human = true
 	player.net_id = local_net_id
-	var c: Dictionary = cave_by_owner[local_el]
-	var a: float = c["openAngle"]
-	player.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	player.pos = _element_spawn_pos(local_el, spawn_idx)
 	_render_pos = player.pos
 	if player.group:
 		player.group.position = player.pos
@@ -2346,7 +2390,7 @@ func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) ->
 	ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
 	ui.show_task_buttons(false)
 	ui.show_hud()
-	running = true   # CLIENT: the match is live — this is what gates the on-screen touch controls
+	_run_countdown()
 
 func _client_clear() -> void:
 	running = false
@@ -2483,11 +2527,7 @@ func _on_connection_lost() -> void:
 # match (humans + NPC fillers, with visuals), plays as its own avatar, and streams
 # snapshots to the guests. net.gd calls this, then broadcasts "start" to the guests.
 func host_start_match(world_seed: int, humans: Array) -> void:
-	seed(world_seed)
-	if world_root == null:
-		world_root = Node3D.new()
-		add_child(world_root)
-		WorldBuilder.build(self)
+	_rebuild_world(world_seed)
 	var hs: Array = []
 	var my_el := "fire"
 	for h in humans:
@@ -2815,8 +2855,8 @@ func _client_process(delta: float) -> void:
 	if cd >= 0.0:
 		for fn in deco_anims:
 			fn.call(time_ms)
-	if local_net_id == 0 or player == null:
-		_update_camera(dt)   # lobby backdrop
+	if local_net_id == 0 or player == null or not running:
+		_update_camera(dt)   # lobby/countdown backdrop; no prediction until GO
 		return
 	_client_predict_local(dt)
 	_client_render_remote(dt)
