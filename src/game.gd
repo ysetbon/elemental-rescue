@@ -117,7 +117,7 @@ var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bo
 # ---- replication (P3) ----
 const SNAP_HZ := 30.0             # server snapshot rate (raised from 20 now that online mode
                                   # drops the O₂/CO₂ molecules → far fewer actors per snapshot)
-const SNAP_FLOATS := 7            # per-actor: net_id, x, z, yaw, spd, flags, hp
+const SNAP_FLOATS := 8            # per-actor: net_id, x, z, yaw, spd, flags, hp, last_input_seq
 # Remote actors are rendered this far in the past so there are always two snapshots to
 # interpolate between. The buffer is ADAPTIVE: client_on_snapshot measures the real
 # snapshot arrival cadence + jitter and keeps the delay just big enough — small (snappy)
@@ -138,6 +138,16 @@ var local_net_id := 0             # this client's own actor net_id (0 = not in a
 var local_el := ""                # this client's element this match
 var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we render)
 var snap_buf: Array = []          # recent snapshots [{ t, by_id:{net_id->Dictionary} }]
+# CLIENT prediction reconciliation (guest's own avatar). _pred_hist records where we
+# predicted ourselves at each input seq; on a snapshot we compare the server's position
+# to our prediction AT THAT SAME SEQ (latency-free) instead of to our current (ahead-of-
+# server) prediction — so the steady-state latency lead is never corrected and the
+# rubber-band is gone. The mesh + camera follow _render_pos, a bounded smoothing position
+# that chases the corrected player.pos (~60ms), so the small per-snapshot reconcile steps
+# and any real correction glide in instead of popping the view.
+const REND_SMOOTH := 0.0000001    # render-chase base (~60ms time constant)
+var _pred_hist: Array = []        # [{ seq:int, pos:Vector3 }] newest-last
+var _render_pos := Vector3.ZERO   # smoothed render position (CLIENT only; chases player.pos)
 var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
 var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
@@ -621,11 +631,14 @@ func _update_camera(dt: float) -> void:
 			var max_d: float = 7.5 if in_cave else CAM_DIST
 			var look_y: float = 1.2 if in_cave else 1.9
 			var snap: float = 0.00002 if in_cave else 0.0001
-			var d := _cam_obstruction(player.pos.x, player.pos.z, sin(cam_yaw), cos(cam_yaw), max_d)
-			var tx := player.pos.x + sin(cam_yaw) * d
-			var tz := player.pos.z + cos(cam_yaw) * d
+			# Follow the smoothed render position on a guest (so reconcile steps don't punch the
+			# frame); the host/single player is authoritative and follows its real pos directly.
+			var cp: Vector3 = _render_pos if mode == Mode.CLIENT else player.pos
+			var d := _cam_obstruction(cp.x, cp.z, sin(cam_yaw), cos(cam_yaw), max_d)
+			var tx := cp.x + sin(cam_yaw) * d
+			var tz := cp.z + cos(cam_yaw) * d
 			camera.position = camera.position.lerp(Vector3(tx, cam_h, tz), 1.0 - pow(snap, dt))
-			camera.look_at(Vector3(player.pos.x, look_y, player.pos.z), Vector3.UP)
+			camera.look_at(Vector3(cp.x, look_y, cp.z), Vector3.UP)
 		var blips: Array = []
 		for ch in all_chars():
 			if not ch.alive or ch == player:
@@ -2299,6 +2312,7 @@ func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) ->
 	var c: Dictionary = cave_by_owner[local_el]
 	var a: float = c["openAngle"]
 	player.pos = Vector3(c["x"] + cos(a) * (c["r"] + 16.0), 0, c["z"] + sin(a) * (c["r"] + 16.0))
+	_render_pos = player.pos
 	if player.group:
 		player.group.position = player.pos
 	cam_yaw = atan2(player.pos.x, player.pos.z)
@@ -2322,6 +2336,8 @@ func _client_clear() -> void:
 			key_nodes[el].queue_free()
 	key_nodes.clear()
 	snap_buf.clear()
+	_pred_hist.clear()
+	_render_pos = Vector3.ZERO
 	if player and player.group and is_instance_valid(player.group):
 		player.group.queue_free()
 	player = null
@@ -2342,6 +2358,7 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 		by_id[int(adata[b])] = {
 			"x": adata[b + 1], "z": adata[b + 2], "yaw": adata[b + 3],
 			"spd": adata[b + 4], "flags": int(adata[b + 5]), "hp": int(adata[b + 6]),
+			"seq": int(adata[b + 7]),
 		}
 	# Measure real arrival cadence + jitter and size the interpolation buffer to match.
 	var arr_t := _now()
@@ -2365,15 +2382,40 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 		_client_sync_keys(meta["kp"])
 	if player and by_id.has(local_net_id):
 		var srv: Dictionary = by_id[local_net_id]
-		# Prediction-dominant reconciliation: trust local prediction for small errors
-		# (smooth, no rubber-banding), only correct on real divergence (respawn / hitting
-		# a wall the server saw but we didn't).
+		# Latency-free reconciliation. The server's position for us reflects the input it
+		# had applied (srv.seq), which is ~1 round-trip old — our live prediction is always
+		# ahead of it during movement. Comparing the two directly (the old err>0.8 nudge)
+		# fought that latency lead and yanked us back every snapshot → 30Hz rubber-band.
+		# Instead we compare the server pos to where WE predicted we were AT srv.seq, so the
+		# error is the genuine divergence (wall the server saw, respawn) with the latency
+		# lead removed: ~0 during correct steady motion, so no correction, no judder.
 		var spos := Vector3(srv["x"], 0, srv["z"])
-		var err := player.pos.distance_to(spos)
-		if err > 4.0:
-			player.pos = spos                          # big jump (respawn/teleport) → snap
-		elif err > 0.8:
-			player.pos = player.pos.lerp(spos, 0.2)    # gentle nudge back
+		var ack := int(srv.get("seq", 0))
+		var pred_then := player.pos
+		var matched := false
+		for h in _pred_hist:                           # newest-last → keep the latest sample at/under the ack
+			if int(h["seq"]) <= ack:
+				pred_then = h["pos"]
+				matched = true
+			else:
+				break
+		if matched:
+			# Latency-free error: server pos vs OUR prediction at that same input. Re-anchors
+			# the prediction to the authoritative position while KEEPING the legitimate lead
+			# (pos += err moves pos only by the prediction error, not by the latency lead) —
+			# so there's no backward yank. _render_pos smooths the small residual steps.
+			var err: Vector3 = spos - pred_then
+			var emag := err.length()
+			if emag > 4.0:
+				player.pos = spos                      # respawn / teleport → hard snap
+				_render_pos = spos                     # snap the view too (no slow glide)
+			elif emag > 0.0001:
+				player.pos += err                      # re-anchor (latency-free → no steady yank)
+		elif player.pos.distance_to(spos) > 4.0:
+			# Acked input predates our (trimmed) history — only at multi-second latency. We
+			# can't time-match, so trust prediction and only fix an unmistakable jump.
+			player.pos = spos
+			_render_pos = spos
 		player.hp = int(srv["hp"])
 		# Mirror the host's "slowed" state so local prediction runs at the same speed
 		# (otherwise we'd over-predict while slowed and get yanked back every snapshot).
@@ -2533,8 +2575,8 @@ func _update_human_net(ch: GameChar, dt: float) -> void:
 	resolve_collisions(ch)
 
 # SERVER: stash a peer's latest input (consumed by _update_human_net).
-func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float) -> void:
-	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw }
+func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float, seq: int = 0) -> void:
+	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw, "seq": seq }
 
 # ---- snapshot encoding (shared layout, server packs / client unpacks) ----
 const _KIND_CODE := { "element": 0, "o2": 1, "co2": 2 }
@@ -2569,6 +2611,9 @@ func _broadcast_snapshot() -> void:
 		data[i + 4] = ch.vel.length()
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
+		# Echo the last input seq we applied for this actor so its owning guest can do
+		# latency-free reconciliation (0 for AI/NPCs and the host's own avatar).
+		data[i + 7] = float(int(net_input.get(ch.peer_id, {}).get("seq", 0)))
 		i += SNAP_FLOATS
 	# Per-element rescue state + key positions, so each client can show its objective
 	# and render the (un-held) keys. This changes slowly, so we only attach it every
@@ -2728,8 +2773,16 @@ func _client_predict_local(dt: float) -> void:
 	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
 	player.pos += player.vel * dt
 	resolve_collisions(player)
+	# Record this predicted position against the input seq currently in flight, so the next
+	# snapshot can reconcile against the matching past prediction (see client_on_snapshot).
+	_pred_hist.append({ "seq": net.last_input_seq, "pos": player.pos })
+	while _pred_hist.size() > 256:
+		_pred_hist.pop_front()
+	# Bounded smoothing: the rendered position chases the corrected player.pos, so reconcile
+	# steps and real corrections glide in (and it can never run away from the true position).
+	_render_pos = _render_pos.lerp(player.pos, 1.0 - pow(REND_SMOOTH, dt))
 	if player.group:
-		player.group.position = player.pos
+		player.group.position = _render_pos
 		if player.vel.length_squared() > 0.5:
 			player.group.rotation.y = lerp_angle(player.group.rotation.y, atan2(player.vel.x, player.vel.z), 1.0 - pow(0.001, dt))
 		player.group.animate(time_ms, player.vel.length())

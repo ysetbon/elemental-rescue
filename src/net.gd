@@ -48,6 +48,9 @@ var _li_mz := 0.0
 var _li_sp := false
 var _li_yaw := 0.0
 var _li_t := 0
+var _in_seq := 0                  # monotonic id stamped on each input we actually send
+var last_input_seq := 0           # the seq of our most recently sent input (read by game.gd
+                                  # prediction history for latency-free reconciliation)
 
 # --- host-side room state ---
 var admin_id := 0                 # the host's id (== my_id on the host)
@@ -191,7 +194,7 @@ func _on_guest_el(m: Dictionary) -> void:
 func _on_guest_input(m: Dictionary) -> void:
 	if role != "host" or game == null:
 		return
-	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)))
+	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)), int(m.get("seq", 0)))
 
 # ---- guest: receive host broadcasts ----
 func _on_lobby(m: Dictionary) -> void:
@@ -260,7 +263,9 @@ func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> void:
 	if not changed and (now - _li_t) < INPUT_MIN_MS:
 		return
 	_li_mx = mx; _li_mz = mz; _li_sp = sprint; _li_yaw = yaw; _li_t = now
-	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw })
+	_in_seq += 1
+	last_input_seq = _in_seq
+	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "seq": _in_seq })
 
 # Host -> guests: world snapshot.
 func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
