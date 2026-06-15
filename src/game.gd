@@ -122,7 +122,16 @@ var mode: int = Mode.SINGLE       # SINGLE = local; HOST = this browser is the a
                                   # SERVER (old headless authority) is retired — kept in
                                   # the enum only so CLIENT keeps its value.
 var net: NetManager = null        # /root/Game/Net — present in every mode
-var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float, seq:int }
+var net_input: Dictionary = {}    # SERVER: peer_id -> { move:Vector2, sprint:bool, yaw:float, seq:int } (host's OWN avatar)
+# SERVER: per-guest input-command queues. The host advances each guest avatar ONLY by
+# replaying these queued (input, dt) commands in seq order, reproducing the guest's exact
+# predicted path (→ ~0 reconcile error). See server_queue_input / _update_human_net.
+var _cmd_queue: Dictionary = {}   # peer_id -> Array[{ seq, mx, mz, sp, yaw, dt }] (ordered)
+var _cmd_last_seq: Dictionary = {}# peer_id -> last enqueued seq (dedup; seeded on first cmd)
+const CMD_DT_MAX := 0.05          # clamp each command's dt (matches host/client frame cap; anti-teleport)
+const CMD_REPLAY_DT_MAX := 0.10   # max guest-time replayed per host frame (rest stays queued)
+const CMD_QUEUE_MAX := 64         # per-peer backlog cap (drop oldest beyond this)
+const CMD_BATCH_IN_MAX := 32      # ignore inbound batches larger than this (truncate to newest)
 
 # ---- replication (P3) ----
 const SNAP_HZ := 30.0             # server snapshot rate (raised from 20 now that online mode
@@ -146,7 +155,7 @@ var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we rende
 var _net_actors := {}             # CLIENT: net_id -> { buf:Array, last_t:float, flags:int, hp:int }
                                   # buf entries: { t:float, pos:Vector3, yaw:float, spd:float } (per-actor keyframes)
 const LOCAL_TRUST_SNAP_DIST := 10.0 # CLIENT: emergency snap distance when reconciliation history is unavailable
-const PRED_HIST_MAX := 96
+const PRED_HIST_MAX := 192        # ≈1.3s of per-frame history @144fps — must outlast RTT+jitter+snap so the ack always finds its frame
 const RECONCILE_EPS := 0.25
 var _pred_hist: Array = []        # CLIENT: recent predicted frames keyed by latest sent input seq
 # ---- guest own-avatar render smoothing (never-glitch) ----
@@ -2579,6 +2588,8 @@ func host_start_match(world_seed: int, humans: Array) -> void:
 		if is_local:
 			my_el = String(h["el"])
 	net_input.clear()
+	_cmd_queue.clear()
+	_cmd_last_seq.clear()
 	local_el = my_el
 	_spawn_match(hs, my_el)        # creates visuals + the host's own avatar; running flips true after the countdown
 
@@ -2586,6 +2597,8 @@ func host_start_match(world_seed: int, humans: Array) -> void:
 # suddenly a player short, and stop reading their (now absent) input.
 func host_remove_peer(peer: int) -> void:
 	net_input.erase(peer)
+	_cmd_queue.erase(peer)
+	_cmd_last_seq.erase(peer)
 	if peer_actor.has(peer):
 		var ch: GameChar = peer_actor[peer]
 		ch.is_human = false
@@ -2685,11 +2698,30 @@ func _host_sync_hud() -> void:
 func _update_human_net(ch: GameChar, dt: float) -> void:
 	if not ch.alive:
 		return
-	var inp: Dictionary = net_input.get(ch.peer_id, {})
-	var mv: Vector2 = inp.get("move", Vector2.ZERO)
-	var sprint: bool = inp.get("sprint", false)
-	var yaw: float = inp.get("yaw", 0.0)
-	_apply_human_move(ch, mv.x, mv.y, sprint, yaw, dt)
+	# The host's OWN avatar has zero self-latency: apply its latest input directly at the
+	# host frame dt (no prediction/reconcile for it).
+	if net != null and ch.peer_id == net.my_id:
+		var inp: Dictionary = net_input.get(ch.peer_id, {})
+		var mv: Vector2 = inp.get("move", Vector2.ZERO)
+		_apply_human_move(ch, mv.x, mv.y, bool(inp.get("sprint", false)), float(inp.get("yaw", 0.0)), dt)
+		return
+	# A guest avatar advances ONLY by replaying its queued (input, dt) commands in seq order,
+	# reproducing the exact path the guest predicted → reconcile error ~0. Empty queue → HOLD
+	# (do NOT coast/apply host-dt: that adds un-acked movement and reintroduces error). Cap the
+	# guest-time replayed per host frame so a buffered burst can't teleport; leave the rest queued.
+	var q = _cmd_queue.get(ch.peer_id, null)
+	if q == null or q.is_empty():
+		return
+	var budget := CMD_REPLAY_DT_MAX
+	while not q.is_empty():
+		var cmd: Dictionary = q[0]
+		var cdt: float = float(cmd["dt"])     # already clamped 0..CMD_DT_MAX at enqueue
+		if cdt > budget:
+			break
+		q.pop_front()
+		_apply_human_move(ch, float(cmd["mx"]), float(cmd["mz"]), bool(cmd["sp"]), float(cmd["yaw"]), cdt)
+		ch.last_input_seq = int(cmd["seq"])
+		budget -= cdt
 
 func _apply_human_move(ch: GameChar, mx: float, mz: float, sprint: bool, yaw: float, dt: float) -> void:
 	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
@@ -2705,9 +2737,35 @@ func _apply_human_move(ch: GameChar, mx: float, mz: float, sprint: bool, yaw: fl
 	ch.pos += ch.vel * dt
 	resolve_collisions(ch)
 
-# SERVER: stash a peer's latest input (consumed by _update_human_net).
-func server_set_input(peer: int, mx: float, mz: float, sprint: bool, yaw: float, seq: int = 0) -> void:
-	net_input[peer] = { "move": Vector2(mx, mz), "sprint": sprint, "yaw": yaw, "seq": seq }
+# SERVER: enqueue a guest's batch of input commands (replayed by _update_human_net in seq
+# order). Dedup by seq (seeded on the peer's first command so a fresh match's high seq is
+# accepted), clamp each dt (anti-teleport), and bound the backlog. Never trusts the client:
+# even a flood/inflated-dt can't teleport (dt clamp + per-frame replay cap + queue cap).
+func server_queue_input(peer: int, cmds: Array) -> void:
+	if cmds.is_empty():
+		return
+	if cmds.size() > CMD_BATCH_IN_MAX:
+		cmds = cmds.slice(cmds.size() - CMD_BATCH_IN_MAX)
+	var q: Array = _cmd_queue.get(peer, [])
+	var seeded: bool = _cmd_last_seq.has(peer)
+	var last: int = int(_cmd_last_seq.get(peer, 0))
+	for c in cmds:
+		var s := int(c.get("seq", 0))
+		if not seeded:
+			last = s - 1
+			seeded = true
+		if s <= last:
+			continue                      # duplicate / already-seen (overlap or resend)
+		q.append({
+			"seq": s, "mx": float(c.get("mx", 0.0)), "mz": float(c.get("mz", 0.0)),
+			"sp": bool(c.get("sp", false)), "yaw": float(c.get("yaw", 0.0)),
+			"dt": clampf(float(c.get("dt", 0.0)), 0.0, CMD_DT_MAX),
+		})
+		last = s
+	_cmd_last_seq[peer] = last
+	while q.size() > CMD_QUEUE_MAX:
+		q.pop_front()
+	_cmd_queue[peer] = q
 
 # ---- snapshot encoding (shared layout, server packs / client unpacks) ----
 const _KIND_CODE := { "element": 0, "o2": 1, "co2": 2 }
@@ -2746,7 +2804,7 @@ func _broadcast_snapshot() -> void:
 		data[i + 4] = spd
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
-		data[i + 7] = float(int(net_input.get(ch.peer_id, {}).get("seq", 0)) if ch.is_human else 0)
+		data[i + 7] = float(ch.last_input_seq if ch.is_human else 0)   # last guest cmd REPLAYED (the reconcile ack); host's own avatar = 0
 		i += SNAP_FLOATS
 	# Per-element rescue state + key positions, so each client can show its objective
 	# and render the (un-held) keys. This changes slowly, so we only attach it every
@@ -2895,7 +2953,7 @@ func _client_predict_local(dt: float) -> void:
 	else:
 		stamina = minf(100.0, stamina + dt * 13.0)
 	ui.set_stamina(stamina)
-	var seq := net.send_input(mx, mz, sprint, cam_yaw)   # authoritative movement happens on the server
+	var seq := net.send_input(mx, mz, sprint, cam_yaw, dt)   # send this frame's command (+dt) for host replay; authoritative movement is the server's
 	# local prediction so it feels instant
 	_apply_human_move(player, mx, mz, sprint, cam_yaw, dt)
 	_pred_hist.append({ "seq": seq, "pos": player.pos, "vel": player.vel, "mx": mx, "mz": mz, "sprint": sprint, "yaw": cam_yaw, "dt": dt, "t": _now() })
@@ -2919,6 +2977,11 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 		server_vel = Vector3(sin(server_yaw), 0, cos(server_yaw)) * server_spd
 	if ack_seq <= 0 or _pred_hist.is_empty():
 		_client_authority_fallback(server_pos, server_vel)
+		return
+	# Stale / repeated ack: the host re-sent a seq we've already reconciled and pruned past
+	# (it holds the same last_input_seq across snapshots whenever no new command was replayed
+	# between them). Our prediction is already ahead of it — nothing to correct, not a lost frame.
+	if ack_seq < int((_pred_hist[0] as Dictionary).get("seq", 0)):
 		return
 	var ack_idx := -1
 	for i in _pred_hist.size():
@@ -3188,7 +3251,7 @@ func _ready_testclient() -> void:
 		print("[%s] MATCH STARTING my_net_id=%d other_net_id=%d" % [label, local_net_id, st["other"]])
 		var tk := Timer.new(); tk.wait_time = 0.6; tk.autostart = true; add_child(tk)
 		tk.timeout.connect(func() -> void:
-			net.send_input(st["mx"], st["mz"], false, 0.0)
+			net.send_input(st["mx"], st["mz"], false, 0.0, 0.6)
 			if _net_actors.is_empty(): return
 			var me_a = _net_actors.get(local_net_id, null)
 			var ot_a = _net_actors.get(st["other"], null)

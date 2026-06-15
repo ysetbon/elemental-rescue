@@ -40,17 +40,25 @@ var current_code := ""            # the room code (for display / invite links)
 var _pending_action := ""         # "create" | "join", sent once the socket opens
 var _pending_code := ""
 
-# Guest input send-throttle. _client_predict_local calls send_input every rendered
-# frame (could be 60-144 Hz); the host only ever uses the latest input before each sim
-# step, so flooding the relay is wasted uplink. We cap steady-state sends to ~30 Hz but
-# fire instantly on any meaningful change, so key presses/releases are never delayed.
+# Guest input as a COMMAND STREAM. _client_predict_local calls send_input every rendered
+# frame (60-144 Hz) and predicts that exact frame; we stamp each frame with a per-frame
+# monotonic seq + its dt and keep it in a ring. The host REPLAYS this exact (input, dt)
+# stream so its authoritative path matches the guest's prediction (→ ~0 reconcile error).
+# We still throttle the SEND to ~30 Hz (fire instantly on change), but each packet carries
+# a BATCH of recent commands (new since last send + a small overlap) so a dropped packet
+# doesn't lose a frame. The host dedups by seq.
 const INPUT_MIN_MS := 33
+const CMD_OVERLAP := 8            # resend this many already-sent cmds each packet (loss tolerance)
+const CMD_BATCH_MAX := 16         # max cmds packed into one "in" message
+const CMD_RING_MAX := 48          # outbound recent-command ring the batch is drawn from
 var _li_mx := 0.0
 var _li_mz := 0.0
 var _li_sp := false
 var _li_yaw := 0.0
 var _li_t := 0
 var _out_seq := 0
+var _cmd_ring: Array = []         # recent outbound { seq, mx, mz, sp, yaw, dt }, newest last
+var _last_sent_seq := 0
 
 # --- host-side room state ---
 var admin_id := 0                 # the host's id (== my_id on the host)
@@ -88,6 +96,8 @@ func _reset_state() -> void:
 	_pending_action = ""
 	_pending_code = ""
 	_out_seq = 0
+	_cmd_ring.clear()
+	_last_sent_seq = 0
 
 func _process(_dt: float) -> void:
 	if _ws == null:
@@ -201,7 +211,9 @@ func _on_guest_el(m: Dictionary) -> void:
 func _on_guest_input(m: Dictionary) -> void:
 	if role != "host" or game == null:
 		return
-	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)), int(m.get("seq", 0)))
+	var cmds = m.get("cmds", null)
+	if typeof(cmds) == TYPE_ARRAY:
+		game.server_queue_input(int(m.get("from", 0)), cmds)
 
 # host: a guest reported its own smoothness telemetry (only when ?netlog=1). The relay
 # tagged it with `from`. The host prints a unified table so you watch one terminal.
@@ -273,18 +285,33 @@ func start_match() -> void:
 			mapping[pid] = game.peer_actor[pid].net_id
 	_send({ "t": "start", "seed": world_seed, "humans": humans, "netids": mapping })
 
-# Guest -> host: per-frame input. Returns the latest sequence id the host can ack.
-func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> int:
+# Guest -> host: one input COMMAND per rendered frame (the exact (input, dt) the client
+# predicted with), stamped with a per-frame monotonic seq. Every frame is recorded; sends
+# are throttled to ~30 Hz but batch all recent commands so the host can replay the exact
+# stream. Returns this frame's seq (the client tags _pred_hist with it for reconciliation).
+func send_input(mx: float, mz: float, sprint: bool, yaw: float, dt: float) -> int:
 	if role != "guest":
 		return _out_seq
+	_out_seq += 1
+	_cmd_ring.append({ "seq": _out_seq, "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "dt": dt })
+	while _cmd_ring.size() > CMD_RING_MAX:
+		_cmd_ring.pop_front()
 	var now := Time.get_ticks_msec()
 	var changed := absf(mx - _li_mx) > 0.04 or absf(mz - _li_mz) > 0.04 \
 		or sprint != _li_sp or absf(wrapf(yaw - _li_yaw, -PI, PI)) > 0.03
 	if not changed and (now - _li_t) < INPUT_MIN_MS:
-		return _out_seq
+		return _out_seq                                  # frame recorded; defer the send
 	_li_mx = mx; _li_mz = mz; _li_sp = sprint; _li_yaw = yaw; _li_t = now
-	_out_seq += 1
-	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "seq": _out_seq })
+	# Batch = commands newer than (last sent - overlap), capped to the newest CMD_BATCH_MAX.
+	var floor_seq := _last_sent_seq - CMD_OVERLAP
+	var batch: Array = []
+	for c in _cmd_ring:
+		if int(c["seq"]) > floor_seq:
+			batch.append(c)
+	while batch.size() > CMD_BATCH_MAX:
+		batch.pop_front()
+	_last_sent_seq = _out_seq
+	_send({ "t": "in", "cmds": batch })
 	return _out_seq
 
 # Guest -> host: QA telemetry (skew/jitter/RTT/buffer health). Only called when net
