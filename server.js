@@ -23,6 +23,18 @@ const { WebSocketServer } = require("ws");
 const PORT = parseInt(process.env.PORT || "8910", 10);
 const MAX_PLAYERS = 7;                         // host + up to 6 guests
 
+// QA only: inject one-way network latency + jitter so a local host+guest behaves like
+// a real internet link (see scripts/nettest.* ). Unset in production → forwards are
+// instant and this whole block is a no-op (LAT==0 && JIT==0 → synchronous send).
+const LAT = parseInt(process.env.RELAY_LATENCY_MS || "0", 10);   // one-way delay, ms
+const JIT = parseInt(process.env.RELAY_JITTER_MS || "0", 10);    // added 0..JIT ms, ms
+function deliver(ws, payload, isBinary) {
+  if (!ws || ws.readyState !== 1) return;
+  if (LAT <= 0 && JIT <= 0) { ws.send(payload, { binary: isBinary }); return; }
+  const d = LAT + (JIT > 0 ? Math.random() * JIT : 0);
+  setTimeout(() => { if (ws.readyState === 1) ws.send(payload, { binary: isBinary }); }, d);
+}
+
 const httpServer = http.createServer((req, res) => {
   // Anything that isn't a WebSocket upgrade (Render's port scan, /healthz) → 200.
   res.writeHead(200, { "Content-Type": "text/plain" });
@@ -39,7 +51,7 @@ const roomSize = (room) => 1 + room.guests.size;   // host + guests
 
 function bcGuests(room, obj) {
   const s = JSON.stringify(obj);
-  for (const g of room.guests.values()) if (g.readyState === 1) g.send(s);
+  for (const g of room.guests.values()) deliver(g, s, false);
 }
 
 wss.on("connection", (ws) => {
@@ -54,7 +66,7 @@ wss.on("connection", (ws) => {
       const room = rooms.get(ws.room);
       if (room && ws.isHost)
         for (const g of room.guests.values())
-          if (g.readyState === 1) g.send(data, { binary: true });
+          deliver(g, data, true);
       return;
     }
     let m;
@@ -93,7 +105,7 @@ wss.on("connection", (ws) => {
       bcGuests(room, m);                            // lobby / start / snap / end → all guests
     } else {
       m.from = ws.id;                               // host trusts the relay's id (no spoofing)
-      send(room.hostWs, m);                         // hello / el / in → the host
+      deliver(room.hostWs, JSON.stringify(m), false);  // hello / el / in / dbg → the host
     }
   });
 

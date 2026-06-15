@@ -7,6 +7,15 @@ extends Node3D
 # ------------------------------------------------------------------ constants
 const ARENA := 120.0
 const CATCH_DIST := 2.4
+# Online only: a guest is DRAWN ~(½RTT + INTERP_DELAY)·speed from where the host authoritatively
+# has it (guest prioritises its own smoothness over matching the host — see _render_off). So
+# when a networked human is the catcher or the prey, widen the catch by this pad so a catch
+# that LOOKS dead-on actually registers. Host-vs-AI and AI-vs-AI stay tight at CATCH_DIST.
+# Sized from the QA harness (scripts/nettest): the guest renders other actors ~2u beyond
+# their true position at ~140ms RTT, ~3–4u at ~300ms RTT + sprint. 1.6 → a 4.0u effective
+# catch, which cleared the typical gap in-test (note: own-avatar reconcile skew is a separate,
+# tiny ~0.1–0.5u — the input-seq reconciliation removes the latency lead).
+const NET_CATCH_PAD := 1.6
 const SIGHT_RANGE := 55.0
 const CO2_SIGHT := 28.0
 const PTS_O2 := 5
@@ -126,7 +135,6 @@ const EXTRAP_MAX := 0.20          # cap dead reckoning during a brief data gap
 const GHOST_STALE := 2.0          # drop a ghost not updated in this many host-time seconds
 const SNAP_BUFFER_MAX := 40       # ~1.3s of history @30Hz, enough to absorb TCP bursts
 var _host_t_latest := 0.0         # newest host snapshot timestamp received (s)
-var _host_t_local := 0.0          # local _now() when that snapshot arrived (s)
 const META_EVERY := 5             # SERVER: send the bulky status meta (scores/objective/keys)
                                   # only every Nth snapshot (30Hz / 5 = 6Hz); positions stay 30Hz
 var _snap_accum := 0.0            # SERVER: snapshot send throttle
@@ -141,6 +149,41 @@ const LOCAL_TRUST_SNAP_DIST := 10.0 # CLIENT: emergency snap distance when recon
 const PRED_HIST_MAX := 96
 const RECONCILE_EPS := 0.25
 var _pred_hist: Array = []        # CLIENT: recent predicted frames keyed by latest sent input seq
+# ---- guest own-avatar render smoothing (never-glitch) ----
+# The simulation (player.pos) stays authoritative-accurate via prediction + reconcile, but
+# what we DRAW (mesh + camera) is player.pos + _render_off, where _render_off absorbs a
+# reconcile snap and then decays to zero. Steady walking has no snap → _render_off stays 0
+# → no lag; a correction eases away over REND_SMOOTH instead of jolting the whole world.
+# This is the explicit trade: the guest is briefly drawn where it THINKS it is, not where
+# the host has it — which is exactly why catches use a forgiving radius (see _catch_dist).
+var _render_off := Vector3.ZERO
+const REND_SMOOTH := 0.07         # seconds to ease a correction away (≈ no visible snap)
+const REND_OFF_MAX := 2.5         # u — cap so frequent corrections can't pile into a drift
+const REND_SNAP_DIST := 6.0       # u — beyond this it's a teleport/respawn → snap, don't ease
+# Smoothed host-clock offset so render time advances steadily even when snapshots arrive
+# jittery (the raw per-snapshot anchor made ghosts micro-stutter under jitter).
+var _host_off := 0.0              # est_host_time() = _now() + _host_off
+var _host_off_init := false
+# ---- QA telemetry (only when net_log: ?netlog=1 / `-- nettest` / NET_LOG=1) ----
+var net_log := false
+var _nl_accum := 0.0              # 1 Hz report throttle (s)
+var _nl_last_arr := 0.0          # guest: previous snapshot arrival (s)
+var _nl_snap_ms := 33.0          # guest: EMA snapshot interval (ms)
+var _nl_snap_jit := 0.0          # guest: EMA snapshot interval jitter (ms)
+var _nl_skew := 0.0              # guest: EMA reconcile error (u) — host-auth vs my predicted self
+var _nl_skew_max := 0.0          # guest: worst reconcile error in the window (u)
+var _nl_snaps := 0               # guest: corrections over RECONCILE_EPS (the old code would jolt)
+var _nl_rtt := 0.0              # guest: EMA round-trip (ms)
+var _nl_render_frames := 0
+var _nl_extrap_frames := 0       # guest: ghost-render frames spent extrapolating (buffer underrun)
+var _nl_underruns := 0           # guest: frames the extrapolation hit EXTRAP_MAX (a real stall)
+var _nl_buf_sum := 0.0
+var _nl_seen_min := 1.0e9        # guest: closest I *rendered* myself to another ghost (u)
+var _nl_host_auth := {}          # host: net_id -> min authoritative dist to the host avatar (u)
+# headless host+guest harness (`-- nettest [join]`) scenario state
+var _nt_picked := false
+var _nt_started := false
+var _nt_run_t := 0.0             # seconds since this side's match actually went live
 var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
 var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
@@ -299,6 +342,9 @@ func _ready() -> void:
 	if OS.get_cmdline_user_args().has("testclient"):
 		_ready_testclient()   # dev hook: headless lobby smoke-test (see _ready_testclient)
 		return
+	if OS.get_cmdline_user_args().has("nettest"):
+		_ready_nettest()      # dev hook: REAL headless host+guest sim w/ telemetry (scripts/nettest)
+		return
 	_ready_visual()
 
 # Create the Net node — same path (/root/Game/Net) on host and guests so messages line up.
@@ -311,6 +357,7 @@ func _start_net() -> void:
 func _ready_visual() -> void:
 	var is_banner := OS.get_cmdline_user_args().has("banner")
 	randomize()
+	_read_net_log_flag()
 	mobile = TouchControls.is_touch_session()
 	lite = mobile   # phones get the lighter renderer (set before the world is built)
 	_apply_perf_scale()
@@ -656,7 +703,9 @@ func _update_camera(dt: float) -> void:
 			var max_d: float = 7.5 if in_cave else CAM_DIST
 			var look_y: float = 1.2 if in_cave else 1.9
 			var snap: float = 0.00002 if in_cave else 0.0001
-			var cp: Vector3 = player.pos
+			# On a guest follow the DRAWN position (player.pos + eased correction) so the
+			# world never jolts when the host nudges us; host/single follow the sim directly.
+			var cp: Vector3 = _client_render_pos() if mode == Mode.CLIENT else player.pos
 			var d := _cam_obstruction(cp.x, cp.z, sin(cam_yaw), cos(cam_yaw), max_d)
 			var tx := cp.x + sin(cam_yaw) * d
 			var tz := cp.z + cos(cam_yaw) * d
@@ -1397,7 +1446,7 @@ func _check_catches() -> void:
 			var d: float = a.pos.distance_to(p.pos)
 			if d < nd:
 				nd = d; prey = p
-		if prey and nd < CATCH_DIST:
+		if prey and nd < _catch_dist(a, prey):
 			_take_hit(prey, a)
 	# black-stone power-up (Pac-Man style): while disguised you can EAT your predator
 	if _is_disguised() and player and player.alive and not inside_own_cave(player):
@@ -1449,7 +1498,7 @@ func _check_catches() -> void:
 					break
 			continue
 		for v in _co2_targets():
-			if n.pos.distance_to(v.pos) < CATCH_DIST:
+			if n.pos.distance_to(v.pos) < _catch_dist(n, v):
 				var hit_player: bool = v.is_player
 				_take_hit(v, n)
 				if hit_player:
@@ -2391,7 +2440,9 @@ func _client_clear() -> void:
 	_net_actors.clear()
 	_pred_hist.clear()
 	_host_t_latest = 0.0
-	_host_t_local = 0.0
+	_host_off = 0.0
+	_host_off_init = false
+	_render_off = Vector3.ZERO
 	if player and player.group and is_instance_valid(player.group):
 		player.group.queue_free()
 	player = null
@@ -2401,7 +2452,24 @@ func _now() -> float:
 	return float(Time.get_ticks_msec()) / 1000.0
 
 func _est_host_time() -> float:
-	return _host_t_latest + (_now() - _host_t_local)
+	return _now() + _host_off
+
+# CLIENT: where the local avatar is DRAWN — the authoritative sim position plus a decaying
+# offset that swallowed the last reconcile correction. Equals player.pos in steady motion.
+func _client_render_pos() -> Vector3:
+	return (player.pos + _render_off) if player else Vector3.ZERO
+
+# A networked human (a guest) — its drawn position lags the host's authoritative one, so
+# catches involving it get the forgiving pad. The host's own avatar (== player) does not.
+func _is_remote_human(ch: GameChar) -> bool:
+	return ch != null and ch.is_human and ch != player
+
+# Effective catch distance for a predator/prey pair. Padded only on the host when a guest
+# is involved; single-player and host-vs-AI stay exactly at CATCH_DIST.
+func _catch_dist(a: GameChar, b: GameChar) -> float:
+	if mode == Mode.HOST and (_is_remote_human(a) or _is_remote_human(b)):
+		return CATCH_DIST + NET_CATCH_PAD
+	return CATCH_DIST
 
 # CLIENT: a snapshot arrived. Remote actors get keyframes for interpolation. The local
 # avatar stays locally predicted unless the host reports an unmistakable desync.
@@ -2410,7 +2478,23 @@ func client_on_snapshot(adata: PackedFloat32Array, _meta: Dictionary) -> void:
 		return
 	var host_t := float(adata[0])
 	_host_t_latest = host_t
-	_host_t_local = _now()
+	# Track the host-clock offset (host_t − local_now) with a slow EMA so render time
+	# advances steadily; hard-resync only on a big step (first snapshot, or after a stall).
+	var inst_off := host_t - _now()
+	if not _host_off_init:
+		_host_off = inst_off
+		_host_off_init = true
+	elif absf(inst_off - _host_off) > 0.25:
+		_host_off = inst_off
+	else:
+		_host_off = lerpf(_host_off, inst_off, 0.08)
+	if net_log:
+		var arr := _now()
+		if _nl_last_arr > 0.0:
+			var iv := (arr - _nl_last_arr) * 1000.0
+			_nl_snap_ms = lerpf(_nl_snap_ms, iv, 0.1)
+			_nl_snap_jit = lerpf(_nl_snap_jit, absf(iv - _nl_snap_ms), 0.1)
+		_nl_last_arr = arr
 	# Per-actor keyframe ingest on the host timeline.
 	var local_seen := false
 	var local_pos := Vector3.ZERO
@@ -2554,6 +2638,8 @@ func _host_process(delta: float) -> void:
 			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
 		ch.group.animate(time_ms, ch.vel.length())
 	_update_camera(dt)
+	if net_log:
+		_nl_host_tick(dt)
 
 # HOST: read this player's own input (keyboard + on-screen joystick/sprint) and stash
 # it as net_input so _update_human_net moves the host's avatar like any other human.
@@ -2790,6 +2876,8 @@ func _client_process(delta: float) -> void:
 		_update_wind_leaves(minf(0.08, cd), time_ms)
 	_update_camera(dt)
 	_client_update_hud()
+	if net_log:
+		_nl_guest_tick(dt)
 
 func _client_predict_local(dt: float) -> void:
 	var mx := 0.0
@@ -2810,11 +2898,13 @@ func _client_predict_local(dt: float) -> void:
 	var seq := net.send_input(mx, mz, sprint, cam_yaw)   # authoritative movement happens on the server
 	# local prediction so it feels instant
 	_apply_human_move(player, mx, mz, sprint, cam_yaw, dt)
-	_pred_hist.append({ "seq": seq, "pos": player.pos, "vel": player.vel, "mx": mx, "mz": mz, "sprint": sprint, "yaw": cam_yaw, "dt": dt })
+	_pred_hist.append({ "seq": seq, "pos": player.pos, "vel": player.vel, "mx": mx, "mz": mz, "sprint": sprint, "yaw": cam_yaw, "dt": dt, "t": _now() })
 	while _pred_hist.size() > PRED_HIST_MAX:
 		_pred_hist.pop_front()
+	# Ease the last correction away (see _render_off); steady walking keeps it ~0 (no lag).
+	_render_off = _render_off.lerp(Vector3.ZERO, clampf(dt / REND_SMOOTH, 0.0, 1.0))
 	if player.group:
-		player.group.position = player.pos
+		player.group.position = _client_render_pos()
 		if player.vel.length_squared() > 0.5:
 			player.group.rotation.y = lerp_angle(player.group.rotation.y, atan2(player.vel.x, player.vel.z), 1.0 - pow(0.001, dt))
 		player.group.animate(time_ms, player.vel.length())
@@ -2840,12 +2930,23 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 	var ack_frame: Dictionary = _pred_hist[ack_idx]
 	var predicted_pos: Vector3 = ack_frame.get("pos", player.pos)
 	var error := server_pos - predicted_pos
+	if net_log:
+		var em := error.length()
+		_nl_skew = lerpf(_nl_skew, em, 0.1)
+		_nl_skew_max = maxf(_nl_skew_max, em)
+		_nl_rtt = lerpf(_nl_rtt, (_now() - float(ack_frame.get("t", _now()))) * 1000.0, 0.1)
+		if em > RECONCILE_EPS:
+			_nl_snaps += 1
 	if error.length() <= RECONCILE_EPS:
 		var pending_small: Array = []
 		for j in range(ack_idx + 1, _pred_hist.size()):
 			pending_small.append(_pred_hist[j])
 		_pred_hist = pending_small
 		return
+	# Re-anchor the SIM to the host, but keep the DRAWN position continuous: stash where we
+	# were drawing, snap the sim + replay pending inputs, then make _render_off the leftover
+	# so mesh/camera ease over instead of jolting. A big correction (respawn) just snaps.
+	var vis_before := _client_render_pos()
 	player.pos = server_pos
 	player.vel = server_vel
 	var pending: Array = []
@@ -2856,8 +2957,14 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 		st["vel"] = player.vel
 		pending.append(st)
 	_pred_hist = pending
+	if error.length() > REND_SNAP_DIST:
+		_render_off = Vector3.ZERO                       # teleport/respawn — let it snap
+	else:
+		_render_off = vis_before - player.pos
+		if _render_off.length() > REND_OFF_MAX:
+			_render_off = _render_off.normalized() * REND_OFF_MAX
 	if player.group:
-		player.group.position = player.pos
+		player.group.position = _client_render_pos()
 		if player.vel.length_squared() > 0.5:
 			player.group.rotation.y = atan2(player.vel.x, player.vel.z)
 
@@ -2868,6 +2975,7 @@ func _client_authority_fallback(server_pos: Vector3, server_vel: Vector3) -> voi
 		return
 	player.pos = server_pos
 	player.vel = server_vel
+	_render_off = Vector3.ZERO     # emergency snap (lost history) — no easing
 	_pred_hist.clear()
 	if player.group:
 		player.group.position = player.pos
@@ -2893,12 +3001,19 @@ func _client_render_remote(dt: float) -> void:
 		var buf: Array = a["buf"]
 		if buf.is_empty():
 			continue
+		if net_log:
+			_nl_render_frames += 1
+			_nl_buf_sum += buf.size()
 		var pos: Vector3
 		var yaw: float
 		var spd: float
 		var newest: Dictionary = buf[buf.size() - 1]
 		if render_t >= float(newest["t"]):
 			var age: float = minf(render_t - float(newest["t"]), EXTRAP_MAX)
+			if net_log:
+				_nl_extrap_frames += 1
+				if render_t - float(newest["t"]) >= EXTRAP_MAX:
+					_nl_underruns += 1
 			yaw = float(newest["yaw"])
 			spd = float(newest["spd"])
 			pos = (newest["pos"] as Vector3) + Vector3(sin(yaw), 0, cos(yaw)) * spd * age
@@ -2916,6 +3031,8 @@ func _client_render_remote(dt: float) -> void:
 			pos = (k0["pos"] as Vector3).lerp(k1["pos"], alpha)
 			yaw = lerp_angle(float(k0["yaw"]), float(k1["yaw"]), alpha)
 			spd = lerpf(float(k0["spd"]), float(k1["spd"]), alpha)
+		if net_log and player:
+			_nl_seen_min = minf(_nl_seen_min, _client_render_pos().distance_to(pos))
 		var g := _client_get_ghost(nid, int(a["flags"]))
 		g.visible = (int(a["flags"]) & (1 << 4)) != 0
 		g.position = pos
@@ -2935,6 +3052,61 @@ func _client_update_hud() -> void:
 	for el in ["fire", "water", "grass"]:
 		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
 	ui.set_board(entries)
+
+# ---- QA telemetry reporting (no-op unless net_log) -------------------------------------
+# GUEST: once a second, summarise own-avatar smoothness + ghost health and ship it to the
+# host (and print locally). `skew` is the headline number: how far the host's authoritative
+# position of me sits from where I predicted myself — i.e. how forgiving the catch must be.
+func _nl_guest_tick(dt: float) -> void:
+	_nl_accum += dt
+	if _nl_accum < 1.0:
+		return
+	_nl_accum = 0.0
+	var rf: int = maxi(1, _nl_render_frames)
+	var ex := 100.0 * float(_nl_extrap_frames) / float(rf)
+	var buf := _nl_buf_sum / float(rf)
+	var seen := _nl_seen_min if _nl_seen_min < 1.0e8 else -1.0
+	print("[netlog g#%d] skew %.2f/%.2f u  rtt %dms  extrap %.0f%%  underrun %d  buf %.1f  snaps %d  seen-min %.2f  snap %d±%dms" % [
+		local_net_id, _nl_skew, _nl_skew_max, int(_nl_rtt), ex, _nl_underruns, buf, _nl_snaps, seen, int(_nl_snap_ms), int(_nl_snap_jit)])
+	if net:
+		net.send_dbg({
+			"skew": snappedf(_nl_skew, 0.01), "smax": snappedf(_nl_skew_max, 0.01),
+			"rtt": int(_nl_rtt), "ex": snappedf(ex, 0.1), "ur": _nl_underruns,
+			"buf": snappedf(buf, 0.1), "seen": snappedf(seen, 0.01), "snaps": _nl_snaps,
+			"sdt": int(_nl_snap_ms), "sjit": int(_nl_snap_jit),
+		})
+	_nl_skew_max = 0.0; _nl_snaps = 0; _nl_render_frames = 0; _nl_extrap_frames = 0
+	_nl_underruns = 0; _nl_buf_sum = 0.0; _nl_seen_min = 1.0e9
+
+# HOST: track how close the host avatar authoritatively got to each guest (the truth that
+# the forgiving catch radius is measured against), and a slow alive-heartbeat.
+func _nl_host_tick(dt: float) -> void:
+	if player != null:
+		for ch in actors:
+			if not _is_remote_human(ch) or not ch.alive:
+				continue
+			var d: float = player.pos.distance_to(ch.pos)
+			var cur := float(_nl_host_auth.get(ch.net_id, -1.0))
+			if cur < 0.0 or d < cur:
+				_nl_host_auth[ch.net_id] = d
+	_nl_accum += dt
+	if _nl_accum >= 5.0:
+		_nl_accum = 0.0
+		print("[netlog] host alive — actors=%d snap=%.0fHz (waiting for guest reports…)" % [actors.size(), SNAP_HZ])
+
+# HOST: a guest's per-second report arrived (relayed). Print one unified line, annotated
+# with the host's own authoritative closest-approach so the visual-vs-real gap is visible.
+func host_on_dbg(from: int, m: Dictionary) -> void:
+	var nid := 0
+	if peer_actor.has(from):
+		nid = peer_actor[from].net_id
+	var auth := float(_nl_host_auth.get(nid, -1.0))
+	var auth_s := ("%.2f" % auth) if auth >= 0.0 else "n/a"
+	print("[netlog] guest#%d  skew %.2f/%.2f u  rtt %dms  extrap %s%%  underrun %s  buf %s  snaps %s  seen-min %s u | host-auth-min %s u  snap %s±%sms" % [
+		from, float(m.get("skew", 0.0)), float(m.get("smax", 0.0)), int(m.get("rtt", 0)),
+		str(m.get("ex", 0)), str(m.get("ur", 0)), str(m.get("buf", 0)), str(m.get("snaps", 0)),
+		str(m.get("seen", 0)), auth_s, str(m.get("sdt", 0)), str(m.get("sjit", 0))])
+	_nl_host_auth[nid] = -1.0   # fresh window for the next second
 
 # CLIENT: build/position/hide the team keys from snapshot meta (kp = un-held keys).
 func _client_sync_keys(kp: Dictionary) -> void:
@@ -3032,6 +3204,88 @@ func _ready_testclient() -> void:
 		turl = OS.get_environment("TEST_URL")
 	print("[%s] connecting (%s, code=%s, el=%s) url=%s…" % [label, action, code, my_el, turl])
 	net.connect_to(turl, label, action, code)
+
+# Turn on QA telemetry from a flag: ?netlog=1 (web), or NET_LOG / `-- nettest` (native).
+# Off by default → production play prints nothing and sends no dbg messages.
+func _read_net_log_flag() -> void:
+	if OS.get_cmdline_user_args().has("nettest") or OS.has_environment("NET_LOG"):
+		net_log = true
+		return
+	if OS.has_feature("web"):
+		var v: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('netlog')", true)
+		if v != null and str(v) == "1":
+			net_log = true
+
+# Dev/QA hook: a REAL authoritative host + guest, headless, over a local relay (drive two
+# processes — see scripts/nettest.ps1). Unlike `testclient` (lobby smoke-test, both CLIENT),
+# the host here is mode=HOST → _host_process simulates + broadcasts, and the guest is
+# mode=CLIENT → predict/reconcile/interp. Movement is injected through touch_move/cam_yaw
+# (the same fields real avatars read); telemetry streams to the host terminal.
+#   godot --headless --path . -- nettest         (the host/authority, element water)
+#   godot --headless --path . -- nettest join    (a guest, element fire — water's prey)
+func _ready_nettest() -> void:
+	var args := OS.get_cmdline_user_args()
+	var is_host := not args.has("join")
+	net_log = true
+	mode = Mode.HOST if is_host else Mode.CLIENT
+	Engine.max_fps = 60                 # don't free-run headless at 1000s of fps
+	var label := "HOST" if is_host else "GUEST"
+	var my_el := "water" if is_host else "fire"   # water preys fire → catches actually fire
+	_ready_visual()                     # build world/camera/ui/net + wire online signals
+	var run_s := 24.0
+	if OS.has_environment("NETTEST_SECS"):
+		run_s = float(OS.get_environment("NETTEST_SECS"))
+	get_tree().create_timer(run_s).timeout.connect(func() -> void:
+		print("[%s] done after %.0fs — quitting" % [label, run_s]); get_tree().quit())
+	net.join_failed.connect(func(r: String) -> void:
+		print("[%s] JOIN FAILED: %s" % [label, r]); get_tree().quit())
+	net.connection_lost.connect(func() -> void:
+		print("[%s] connection lost — quitting" % label); get_tree().quit())
+	net.lobby_changed.connect(func(players: Array, _mi: int, _ai: int, _c: String) -> void:
+		if not _nt_picked:
+			_nt_picked = true
+			net.choose_element(my_el)
+		if is_host and not _nt_started and players.size() >= 2:
+			_nt_started = true
+			print("[HOST] 2 players in lobby — starting match")
+			net.start_match())
+	net.match_starting.connect(func(_s: int, _h: Array, _ids: Dictionary) -> void:
+		print("[GUEST] match starting (my_net_id=%d)" % local_net_id))
+	var drive := Timer.new()
+	drive.wait_time = 1.0 / 30.0
+	drive.autostart = true
+	add_child(drive)
+	drive.timeout.connect(_nt_drive.bind(is_host))
+	var port := NetManager.DEFAULT_PORT
+	if OS.has_environment("TEST_PORT"):
+		port = int(OS.get_environment("TEST_PORT"))
+	var url := "ws://127.0.0.1:%d" % port
+	print("[%s] connecting el=%s url=%s …" % [label, my_el, url])
+	net.connect_to(url, label, ("create" if is_host else "join"), "TEST")
+
+# Inject scripted movement each tick (30Hz). GUEST walks a continuous circle (forward + slow
+# turn) so prediction/interp run hard; HOST idles briefly (measure pure skew), then chases
+# the guest so catches fire and we see the visual-vs-authoritative closing distance.
+func _nt_drive(is_host: bool) -> void:
+	if not running:
+		return
+	_nt_run_t += 1.0 / 30.0
+	if is_host:
+		var tgt: GameChar = null
+		for ch in actors:
+			if _is_remote_human(ch) and ch.alive:
+				tgt = ch
+				break
+		if _nt_run_t > 6.0 and tgt != null and player != null:
+			var to := tgt.pos - player.pos
+			cam_yaw = atan2(-to.x, -to.z)     # face the target (fwd = (-sin,-cos) in _apply_human_move)
+			touch_move = Vector2(0, 1)
+		else:
+			touch_move = Vector2.ZERO
+	else:
+		cam_yaw = _nt_run_t * 1.0             # slow turn → walk a circle
+		touch_move = Vector2(0, 1)
+		touch_sprint = OS.has_environment("NETTEST_SPRINT")   # stress the worst-case gap
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60
