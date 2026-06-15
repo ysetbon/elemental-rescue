@@ -47,7 +47,16 @@ wss.on("connection", (ws) => {
   ws.room = null;       // CODE once in a room
   ws.isHost = false;
 
-  ws.on("message", (data) => {
+  ws.on("message", (data, isBinary) => {
+    // Hot path: the HOST streams world snapshots as raw binary frames. Forward them to
+    // every guest untouched (no JSON parse) — the relay never inspects snapshot bytes.
+    if (isBinary) {
+      const room = rooms.get(ws.room);
+      if (room && ws.isHost)
+        for (const g of room.guests.values())
+          if (g.readyState === 1) g.send(data, { binary: true });
+      return;
+    }
     let m;
     try { m = JSON.parse(data); } catch (_e) { return; }
 

@@ -124,7 +124,6 @@ const SNAP_FLOATS := 8            # per-actor: net_id, x, z, yaw, spd, flags, hp
 # on clean links, larger (no stutter) on jittery ones.
 const INTERP_MIN := 0.08
 const INTERP_MAX := 0.22
-const EXTRAP_MAX := 0.12          # if snapshots stall, coast remotes this long before freezing
 var _interp_delay := 0.10         # current adaptive interpolation delay (s)
 var _snap_last_arr := 0.0         # arrival time of the previous snapshot (s)
 var _snap_ema_int := 0.0333       # smoothed snapshot interval (s)
@@ -133,11 +132,25 @@ const META_EVERY := 5             # SERVER: send the bulky status meta (scores/o
                                   # only every Nth snapshot (20Hz / 5 = 4Hz); positions stay 20Hz
 var _snap_accum := 0.0            # SERVER: snapshot send throttle
 var _snap_tick := 0               # SERVER: snapshot counter (gates the meta payload)
+# ---- dead reckoning / event-driven snapshots ----
+# An actor is packed into the snapshot only when it actually changes — turns, crosses a
+# speed class (start/stop/slow/sprint), or drifts past where a receiver's straight-line
+# guess would put it — plus a slow heartbeat so nothing goes stale. Bandwidth then tracks
+# how much is happening, not the wall clock. Toggle live on web with ?dr=0 (full-rate).
+const DR_YAW_EPS := 0.06          # rad — resend if heading turns more than ~3.4°
+const DR_SPD_EPS := 1.2           # u/s — resend if speed crosses a class
+const DR_POS_EPS := 0.9           # u   — resend if the receiver's straight-line guess drifts past this
+const DR_HEARTBEAT := 0.5         # s   — every in-play actor sends at least this often
+const DR_STALE := 1.6             # s   — receiver drops a ghost not heard from in this long (~3× heartbeat)
+const DR_HUMANS_FULLRATE := true  # humans always send every tick (crisp reconcile + most-watched)
+var dr_enabled := true            # event-driven sends (HOST); ?dr=0 falls back to full-rate
+var _dr_last := {}                # HOST: net_id -> { yaw, spd, pos, t } last keyframe we sent
 # CLIENT match state
 var local_net_id := 0             # this client's own actor net_id (0 = not in a match)
 var local_el := ""                # this client's element this match
 var ghosts: Dictionary = {}       # net_id -> CharVisual (remote actors we render)
-var snap_buf: Array = []          # recent snapshots [{ t, by_id:{net_id->Dictionary} }]
+var _net_actors := {}             # CLIENT: net_id -> { buf:Array, last_t:float, flags:int, hp:int }
+                                  # buf entries: { t:float, pos:Vector3, yaw:float, spd:float } (per-actor keyframes)
 # CLIENT prediction reconciliation (guest's own avatar). _pred_hist records where we
 # predicted ourselves at each input seq; on a snapshot we compare the server's position
 # to our prediction AT THAT SAME SEQ (latency-free) instead of to our current (ahead-of-
@@ -320,6 +333,7 @@ func _ready_visual() -> void:
 	mobile = TouchControls.is_touch_session()
 	lite = mobile   # phones get the lighter renderer (set before the world is built)
 	_apply_perf_scale()
+	_apply_net_flags()
 	_build_environment()
 	world_root = Node3D.new()
 	add_child(world_root)
@@ -370,6 +384,14 @@ func _apply_perf_scale() -> void:
 			"balanced": scale = 0.75
 			"max": scale = 0.6
 	get_viewport().scaling_3d_scale = clampf(scale, 0.4, 1.0)
+
+# Net feature flags (mirror _apply_perf_scale's ?q= reading) so we can A/B live on web
+# without a redeploy. ?dr=0 falls back to full-rate snapshots.
+func _apply_net_flags() -> void:
+	if OS.has_feature("web"):
+		var d: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('dr')", true)
+		if d != null and str(d) != "":
+			dr_enabled = str(d) != "0"
 
 # How many seconds of decorative animation to advance this frame. On lite devices we
 # batch it to ~20Hz (it's purely cosmetic), returning -1.0 on the frames we skip so the
@@ -2042,6 +2064,7 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	clan_cooldown = 0.0
 	disguise_timer = 0.0
 	_next_net_id = 1
+	_dr_last.clear()   # fresh match: forget last-sent keyframes so the first sends aren't suppressed
 	WorldBuilder.reset_cages(self)
 	var human_count := { "fire": 0, "water": 0, "grass": 0 }
 	for h in humans:
@@ -2335,7 +2358,7 @@ func _client_clear() -> void:
 		if is_instance_valid(key_nodes[el]):
 			key_nodes[el].queue_free()
 	key_nodes.clear()
-	snap_buf.clear()
+	_net_actors.clear()
 	_pred_hist.clear()
 	_render_pos = Vector3.ZERO
 	if player and player.group and is_instance_valid(player.group):
@@ -2346,9 +2369,10 @@ func _client_clear() -> void:
 func _now() -> float:
 	return float(Time.get_ticks_msec()) / 1000.0
 
-# CLIENT: a snapshot arrived — buffer it for interpolation and nudge the local
-# predicted avatar toward the server's authoritative position.
-func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
+# CLIENT: a snapshot arrived — ingest each actor's keyframe (an actor absent from this
+# frame simply isn't updated; it coasts via extrapolation and is removed by the staleness
+# timeout in _client_render_remote) and nudge the local avatar toward the server's pos.
+func client_on_snapshot(adata: PackedFloat32Array, _meta: Dictionary) -> void:
 	if local_net_id == 0:
 		return
 	var by_id: Dictionary = {}
@@ -2361,25 +2385,29 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 			"seq": int(adata[b + 7]),
 		}
 	# Measure real arrival cadence + jitter and size the interpolation buffer to match.
+	# Only learn from closely-spaced arrivals (skip idle/heartbeat gaps so a quiet lull
+	# doesn't inflate the buffer); humans stay full-rate so the stream is well-fed.
 	var arr_t := _now()
 	if _snap_last_arr > 0.0:
 		var iv := arr_t - _snap_last_arr
-		if iv > 0.0 and iv < 1.0:
+		if iv > 0.0 and iv < DR_HEARTBEAT * 0.8:
 			_snap_ema_int = lerpf(_snap_ema_int, iv, 0.1)
 			_snap_ema_jit = lerpf(_snap_ema_jit, absf(iv - _snap_ema_int), 0.1)
 			_interp_delay = clampf(_snap_ema_int + _snap_ema_jit * 2.0 + 0.015, INTERP_MIN, INTERP_MAX)
 	_snap_last_arr = arr_t
-	snap_buf.append({ "t": arr_t, "by_id": by_id })
-	while snap_buf.size() > 10:
-		snap_buf.pop_front()
-	_net_time_left = float(meta.get("tl", _net_time_left))
-	var sc: Dictionary = meta.get("sc", {})
-	for el in ["fire", "water", "grass"]:
-		_scores[el] = int(sc.get(el, _scores[el]))
-	_net_rk = meta.get("rk", _net_rk)
-	_net_rt = meta.get("rt", _net_rt)
-	if meta.has("kp"):   # omitted on the in-between snapshots — keep the keys we have
-		_client_sync_keys(meta["kp"])
+	# Per-actor keyframe ingest (replaces the whole-world snap_buf).
+	for nid in by_id:
+		var r: Dictionary = by_id[nid]
+		var a = _net_actors.get(nid, null)
+		if a == null:
+			a = { "buf": [], "last_t": arr_t, "flags": int(r["flags"]), "hp": int(r["hp"]) }
+			_net_actors[nid] = a
+		a["last_t"] = arr_t
+		a["flags"] = int(r["flags"])
+		a["hp"] = int(r["hp"])
+		a["buf"].append({ "t": arr_t, "pos": Vector3(r["x"], 0, r["z"]), "yaw": float(r["yaw"]), "spd": float(r["spd"]) })
+		while a["buf"].size() > 8:
+			a["buf"].pop_front()
 	if player and by_id.has(local_net_id):
 		var srv: Dictionary = by_id[local_net_id]
 		# Latency-free reconciliation. The server's position for us reflects the input it
@@ -2420,6 +2448,21 @@ func client_on_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 		# Mirror the host's "slowed" state so local prediction runs at the same speed
 		# (otherwise we'd over-predict while slowed and get yanked back every snapshot).
 		player.slow_timer = SLOW_TIME if (int(srv["flags"]) & (1 << 6)) != 0 else 0.0
+
+# CLIENT: slow status payload (scores / objective / key positions). Arrives as its own
+# JSON message (~6Hz) now that positions ride a separate binary frame. Omitted fields
+# keep their previous values (the host only attaches the full meta every META_EVERY-th tick).
+func client_on_meta(meta: Dictionary) -> void:
+	if local_net_id == 0:
+		return
+	_net_time_left = float(meta.get("tl", _net_time_left))
+	var sc: Dictionary = meta.get("sc", {})
+	for el in ["fire", "water", "grass"]:
+		_scores[el] = int(sc.get(el, _scores[el]))
+	_net_rk = meta.get("rk", _net_rk)
+	_net_rt = meta.get("rt", _net_rt)
+	if meta.has("kp"):
+		_client_sync_keys(meta["kp"])
 
 func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	if ghosts.has(nid):
@@ -2593,27 +2636,36 @@ func _pack_flags(ch: GameChar) -> int:
 	return f
 
 func _broadcast_snapshot() -> void:
+	var now := _now()
 	var list: Array = []
 	list.append_array(actors)
 	list.append_array(npcs)
 	for el in twin_by_el:
 		if twin_by_el[el] != null:
 			list.append(twin_by_el[el])
-	var data := PackedFloat32Array()
-	data.resize(list.size() * SNAP_FLOATS)
-	var i := 0
+	# Event-driven: keep only the actors that changed (or are due a heartbeat). With
+	# dr_enabled off (?dr=0) _dr_should_send always returns true → old full-rate behavior.
+	var send_list: Array = []
 	for ch in list:
+		if _dr_should_send(ch, now):
+			send_list.append(ch)
+	var data := PackedFloat32Array()
+	data.resize(send_list.size() * SNAP_FLOATS)
+	var i := 0
+	for ch in send_list:
 		var yaw := atan2(ch.vel.x, ch.vel.z) if ch.vel.length_squared() > 0.04 else 0.0
+		var spd: float = ch.vel.length()
 		data[i] = float(ch.net_id)
 		data[i + 1] = ch.pos.x
 		data[i + 2] = ch.pos.z
 		data[i + 3] = yaw
-		data[i + 4] = ch.vel.length()
+		data[i + 4] = spd
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
 		# Echo the last input seq we applied for this actor so its owning guest can do
 		# latency-free reconciliation (0 for AI/NPCs and the host's own avatar).
 		data[i + 7] = float(int(net_input.get(ch.peer_id, {}).get("seq", 0)))
+		_dr_last[ch.net_id] = { "yaw": yaw, "spd": spd, "pos": ch.pos, "t": now }
 		i += SNAP_FLOATS
 	# Per-element rescue state + key positions, so each client can show its objective
 	# and render the (un-held) keys. This changes slowly, so we only attach it every
@@ -2637,8 +2689,37 @@ func _broadcast_snapshot() -> void:
 			"rt": rt,                          # el -> bool (twin freed)
 			"kp": kp,                          # el -> [x,z] (un-held key positions)
 		}
-	if net:
+	if net and (data.size() > 0 or not meta.is_empty()):
 		net.broadcast_snapshot(data, meta)
+
+# HOST: should this actor go into the snapshot right now? Yes if it turned, changed speed
+# class, drifted past where a receiver's straight-line guess would put it, or is due a
+# heartbeat. Humans always go (few of them, most-watched, and the owning guest reconciles
+# its own avatar against the host's echo every tick).
+func _dr_should_send(ch: GameChar, now: float) -> bool:
+	if not dr_enabled:
+		return true
+	if DR_HUMANS_FULLRATE and ch.is_human:
+		return true
+	var last = _dr_last.get(ch.net_id, null)
+	if last == null:
+		return true                                   # never sent → seed it
+	if now - last["t"] >= DR_HEARTBEAT:
+		return true                                   # heartbeat: bounds drift, keeps the ghost alive
+	var cur_yaw: float = atan2(ch.vel.x, ch.vel.z) if ch.vel.length_squared() > 0.04 else float(last["yaw"])
+	var cur_spd: float = ch.vel.length()
+	if _ang_diff(cur_yaw, float(last["yaw"])) > DR_YAW_EPS:
+		return true                                   # turned
+	if absf(cur_spd - float(last["spd"])) > DR_SPD_EPS:
+		return true                                   # sped up / stopped / slowed / sprinted
+	# drift guard: has the receiver's straight-line guess fallen behind reality (collision)?
+	var dt: float = now - float(last["t"])
+	var pred: Vector3 = (last["pos"] as Vector3) + Vector3(sin(last["yaw"]), 0, cos(last["yaw"])) * float(last["spd"]) * dt
+	return ch.pos.distance_to(pred) > DR_POS_EPS
+
+# smallest absolute angle between two headings (radians)
+func _ang_diff(a: float, b: float) -> float:
+	return absf(wrapf(a - b, -PI, PI))
 
 func _team_score(el: String) -> int:
 	var s := 0
@@ -2787,55 +2868,57 @@ func _client_predict_local(dt: float) -> void:
 			player.group.rotation.y = lerp_angle(player.group.rotation.y, atan2(player.vel.x, player.vel.z), 1.0 - pow(0.001, dt))
 		player.group.animate(time_ms, player.vel.length())
 
+# CLIENT: render each known remote actor from its own keyframe buffer. Interpolate when
+# two keyframes bracket render time (a turn → this IS the smoothing); extrapolate straight
+# from the latest otherwise (exact while heading holds). A ghost is removed only when its
+# stream goes stale — which covers disconnect, despawn, and (later) AOI-exit identically.
 func _client_render_remote(dt: float) -> void:
-	if snap_buf.is_empty():
-		return
-	var render_t := _now() - _interp_delay
-	var s0: Dictionary = snap_buf[0]
-	var s1: Dictionary = {}
-	for s in snap_buf:
-		if s["t"] <= render_t:
-			s0 = s
-		elif s1.is_empty():
-			s1 = s
-			break
-	var alpha := 0.0
-	if not s1.is_empty():
-		var span: float = s1["t"] - s0["t"]
-		if span > 0.0001:
-			alpha = clampf((render_t - s0["t"]) / span, 0.0, 1.0)
-	# No newer snapshot to interpolate toward → the stream stalled. Coast each remote
-	# along its last heading for a short while instead of freezing it dead in place.
-	var extrap := 0.0
-	if s1.is_empty():
-		extrap = clampf(render_t - snap_buf[snap_buf.size() - 1]["t"], 0.0, EXTRAP_MAX)
-	var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
-	for nid in latest:
+	var now := _now()
+	var render_t := now - _interp_delay
+	for nid in _net_actors.keys():
 		if nid == local_net_id:
 			continue
-		var flags: int = latest[nid]["flags"]
-		var a0: Dictionary = s0["by_id"].get(nid, latest[nid])
-		var pos := Vector3(a0["x"], 0, a0["z"])
-		var yaw: float = a0["yaw"]
-		var spd: float = a0["spd"]
-		if not s1.is_empty() and s1["by_id"].has(nid) and s0["by_id"].has(nid):
-			var a1: Dictionary = s1["by_id"][nid]
-			pos = pos.lerp(Vector3(a1["x"], 0, a1["z"]), alpha)
-			yaw = lerp_angle(yaw, a1["yaw"], alpha)
-			spd = lerpf(spd, a1["spd"], alpha)
-		elif extrap > 0.0 and spd > 0.5:
-			pos += Vector3(sin(yaw), 0, cos(yaw)) * spd * extrap   # coast on last velocity
-		var g := _client_get_ghost(nid, flags)
-		g.visible = (flags & (1 << 4)) != 0
+		var a = _net_actors[nid]
+		if now - float(a["last_t"]) > DR_STALE:
+			if ghosts.has(nid) and is_instance_valid(ghosts[nid]):
+				ghosts[nid].queue_free()
+			ghosts.erase(nid)
+			_net_actors.erase(nid)
+			continue
+		var buf: Array = a["buf"]
+		if buf.is_empty():
+			continue
+		# bracket render_t: k0 = latest keyframe at/under it, k1 = the next one (if any)
+		var k0: Dictionary = buf[0]
+		var k1: Dictionary = {}
+		for k in buf:
+			if k["t"] <= render_t:
+				k0 = k
+			elif k1.is_empty():
+				k1 = k
+				break
+		var pos: Vector3
+		var yaw: float
+		var spd: float
+		if not k1.is_empty():
+			# interpolate — mid-turn between two keyframes (the interpolation is the smoothing)
+			var span: float = float(k1["t"]) - float(k0["t"])
+			var alpha: float = clampf((render_t - float(k0["t"])) / span, 0.0, 1.0) if span > 0.0001 else 0.0
+			pos = (k0["pos"] as Vector3).lerp(k1["pos"], alpha)
+			yaw = lerp_angle(float(k0["yaw"]), float(k1["yaw"]), alpha)
+			spd = lerpf(float(k0["spd"]), float(k1["spd"]), alpha)
+		else:
+			# extrapolate — straight-line dead reckoning from the latest keyframe
+			var age: float = maxf(0.0, render_t - float(k0["t"]))
+			yaw = float(k0["yaw"])
+			spd = float(k0["spd"])
+			pos = (k0["pos"] as Vector3) + Vector3(sin(yaw), 0, cos(yaw)) * spd * age
+		var g := _client_get_ghost(nid, int(a["flags"]))
+		g.visible = (int(a["flags"]) & (1 << 4)) != 0
 		g.position = pos
 		if spd > 0.5:
 			g.rotation.y = lerp_angle(g.rotation.y, yaw, 1.0 - pow(0.001, dt))
 		g.animate(time_ms, spd)
-	for nid in ghosts.keys():
-		if not latest.has(nid):
-			if is_instance_valid(ghosts[nid]):
-				ghosts[nid].queue_free()
-			ghosts.erase(nid)
 
 func _client_update_hud() -> void:
 	ui.set_hearts(player.hp, maxi(BASE_HP, player.hp))
@@ -2931,13 +3014,13 @@ func _ready_testclient() -> void:
 		var tk := Timer.new(); tk.wait_time = 0.6; tk.autostart = true; add_child(tk)
 		tk.timeout.connect(func() -> void:
 			net.send_input(st["mx"], st["mz"], false, 0.0)
-			if snap_buf.is_empty(): return
-			var latest: Dictionary = snap_buf[snap_buf.size() - 1]["by_id"]
-			var me: Dictionary = latest.get(local_net_id, {})
-			var ot: Dictionary = latest.get(st["other"], {})
-			print("[%s] me=(%.1f,%.1f) OTHER#%d=(%.1f,%.1f) actors=%d" % [label,
-				float(me.get("x", 0.0)), float(me.get("z", 0.0)), st["other"],
-				float(ot.get("x", 0.0)), float(ot.get("z", 0.0)), latest.size()])))
+			if _net_actors.is_empty(): return
+			var me_a = _net_actors.get(local_net_id, null)
+			var ot_a = _net_actors.get(st["other"], null)
+			var mp: Vector3 = (me_a["buf"][me_a["buf"].size() - 1]["pos"]) if me_a and not me_a["buf"].is_empty() else Vector3.ZERO
+			var op: Vector3 = (ot_a["buf"][ot_a["buf"].size() - 1]["pos"]) if ot_a and not ot_a["buf"].is_empty() else Vector3.ZERO
+			print("[%s] me=(%.1f,%.1f) OTHER#%d=(%.1f,%.1f) tracked=%d" % [label,
+				mp.x, mp.z, st["other"], op.x, op.z, _net_actors.size()])))
 	var tport := NetManager.DEFAULT_PORT
 	if OS.has_environment("TEST_PORT"):
 		tport = int(OS.get_environment("TEST_PORT"))
