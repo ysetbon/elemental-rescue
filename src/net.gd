@@ -26,6 +26,7 @@ const MAX_PLAYERS := 7
 const DEFAULT_PORT := 8910        # local relay port (used to build the editor/native URL)
 const CODE_LEN := 4
 const MSG_SNAP := 1               # binary WebSocket frame tag (byte 0): world-position snapshot
+const MAX_PACKETS_PER_FRAME := 8   # keep relay bursts from monopolizing a rendered frame
 
 var game: Node = null
 
@@ -40,7 +41,7 @@ var _pending_action := ""         # "create" | "join", sent once the socket open
 var _pending_code := ""
 
 # Guest input send-throttle. _client_predict_local calls send_input every rendered
-# frame (could be 60–144 Hz); the host only ever uses the latest input before each sim
+# frame (could be 60-144 Hz); the host only ever uses the latest input before each sim
 # step, so flooding the relay is wasted uplink. We cap steady-state sends to ~30 Hz but
 # fire instantly on any meaningful change, so key presses/releases are never delayed.
 const INPUT_MIN_MS := 33
@@ -49,9 +50,6 @@ var _li_mz := 0.0
 var _li_sp := false
 var _li_yaw := 0.0
 var _li_t := 0
-var _in_seq := 0                  # monotonic id stamped on each input we actually send
-var last_input_seq := 0           # the seq of our most recently sent input (read by game.gd
-                                  # prediction history for latency-free reconciliation)
 
 # --- host-side room state ---
 var admin_id := 0                 # the host's id (== my_id on the host)
@@ -98,7 +96,9 @@ func _process(_dt: float) -> void:
 		if not _open:
 			_open = true
 			_on_open()
-		while _ws.get_available_packet_count() > 0:
+		var processed := 0
+		while _ws.get_available_packet_count() > 0 and processed < MAX_PACKETS_PER_FRAME:
+			processed += 1
 			var pkt := _ws.get_packet()
 			if _ws.was_string_packet():
 				_on_text(pkt.get_string_from_utf8())   # control + meta stay JSON
@@ -198,7 +198,7 @@ func _on_guest_el(m: Dictionary) -> void:
 func _on_guest_input(m: Dictionary) -> void:
 	if role != "host" or game == null:
 		return
-	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)), int(m.get("seq", 0)))
+	game.server_set_input(int(m.get("from", 0)), float(m.get("mx", 0.0)), float(m.get("mz", 0.0)), bool(m.get("sp", false)), float(m.get("yaw", 0.0)))
 
 # ---- guest: receive host broadcasts ----
 func _on_lobby(m: Dictionary) -> void:
@@ -273,9 +273,7 @@ func send_input(mx: float, mz: float, sprint: bool, yaw: float) -> void:
 	if not changed and (now - _li_t) < INPUT_MIN_MS:
 		return
 	_li_mx = mx; _li_mz = mz; _li_sp = sprint; _li_yaw = yaw; _li_t = now
-	_in_seq += 1
-	last_input_seq = _in_seq
-	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw, "seq": _in_seq })
+	_send({ "t": "in", "mx": mx, "mz": mz, "sp": sprint, "yaw": yaw })
 
 # Host -> guests: positions as a compact BINARY frame (raw float32, no JSON ~2.5× smaller);
 # the bulky-but-slow meta (scores/objective/keys) rides its own JSON message when present.

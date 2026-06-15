@@ -44,6 +44,11 @@ static func _add(n: Node3D) -> void:
 static func _pick_house() -> Color:
 	return MeshLib.rgb(HOUSE_COLORS[randi() % HOUSE_COLORS.size()])
 
+static func _glass_or_lit(c: Color, alpha: float) -> Material:
+	if _game.lite:
+		return MeshLib.lit_mat(c)
+	return MeshLib.glass_stone_mat(c, alpha)
+
 # ------------------------------------------------------- ground / boundary
 static func _ground_and_walls() -> void:
 	var A: float = _game.ARENA
@@ -169,7 +174,7 @@ static func add_cave(cx: float, cz: float, owner: String) -> void:
 		_obstacle(x, z, 1.25)
 	# semi-glass / semi-stone roof so a character sheltering inside stays visible from above
 	var roof_col: Color = MeshLib.rgb(CAVE_TINTS[owner]) if owner != "" else MeshLib.rgb(0xbcc0cc)
-	var roof := MeshLib.cyl(r + 1.4, r + 0.5, 1.2, MeshLib.glass_stone_mat(roof_col, 0.42), 14)
+	var roof := MeshLib.cyl(r + 1.4, r + 0.5, 1.2, _glass_or_lit(roof_col, 0.42), 14)
 	roof.position = Vector3(cx, 3.6, cz)
 	_add(roof)
 	var glow_color: Color = MeshLib.rgb(_game.ELEMENTS[owner]["color"]) if owner != "" else MeshLib.rgb(0xf0c060)
@@ -274,9 +279,10 @@ static func _build_playground() -> void:
 		seats.append(pivot)
 	sw.position = Vector3(px - 8, 0, pz - 6)
 	_add(sw)
-	_game.deco_anims.append(func(t: float) -> void:
-		seats[0].rotation.x = sin(t * 0.0022) * 0.45
-		seats[1].rotation.x = sin(t * 0.0022 + 1.6) * 0.45)
+	if not _game.lite:
+		_game.deco_anims.append(func(t: float) -> void:
+			seats[0].rotation.x = sin(t * 0.0022) * 0.45
+			seats[1].rotation.x = sin(t * 0.0022 + 1.6) * 0.45)
 	_obstacle(px - 8 - 3.4, pz - 6, 0.9)
 	_obstacle(px - 8 + 3.4, pz - 6, 0.9)
 
@@ -304,7 +310,8 @@ static func _build_playground() -> void:
 		mg.add_child(bar)
 	mg.position = Vector3(px, 0, pz + 7)
 	_add(mg)
-	_game.deco_anims.append(func(t: float) -> void: mg.rotation.y = t * 0.0009)
+	if not _game.lite:
+		_game.deco_anims.append(func(t: float) -> void: mg.rotation.y = t * 0.0009)
 	_obstacle(px, pz + 7, 2.6)
 
 	# seesaw
@@ -315,7 +322,8 @@ static func _build_playground() -> void:
 	ss.add_child(ful); ss.add_child(plank)
 	ss.position = Vector3(px - 3, 0, pz + 1)
 	_add(ss)
-	_game.deco_anims.append(func(t: float) -> void: plank.rotation.z = sin(t * 0.0016) * 0.22)
+	if not _game.lite:
+		_game.deco_anims.append(func(t: float) -> void: plank.rotation.z = sin(t * 0.0016) * 0.22)
 	_obstacle(px - 3, pz + 1, 0.9)
 
 static func _cone(r: float, h: float, seg: int) -> CylinderMesh:
@@ -349,7 +357,7 @@ static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Materia
 	# bars + ring + captive live in one group so releasing the twin can hide them.
 	# semi-glass / semi-stone bars + a translucent domed lid so the captive stays
 	# visible even when the camera looks straight down from the ceiling.
-	var gs := MeshLib.glass_stone_mat(MeshLib.rgb(0xa6b0c4), 0.5)
+	var gs := _glass_or_lit(MeshLib.rgb(0xa6b0c4), 0.5)
 	var content := Node3D.new()
 	_root.add_child(content)
 	for i in 10:
@@ -373,9 +381,10 @@ static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Materia
 	mini.scale = Vector3.ONE * 0.55
 	mini.position = Vector3(cx, 0.15, cz)
 	content.add_child(mini)
-	_game.deco_anims.append(func(t: float) -> void:
-		mini.animate(t, 0.0)
-		mini.rotation.y = sin(t * 0.0007 + cx) * 0.6)
+	if not _game.lite:
+		_game.deco_anims.append(func(t: float) -> void:
+			mini.animate(t, 0.0)
+			mini.rotation.y = sin(t * 0.0007 + cx) * 0.6)
 	_obstacle(cx, cz, r + 0.2)
 	var cage := { "x": cx, "z": cz, "r": r, "ident": ident, "node": content }
 	_game.cages.append(cage)
@@ -426,7 +435,7 @@ static func _build_clan_hall(x: float, z: float, col: Color) -> void:
 		var post := MeshLib.cyl(0.12, 0.12, 3.0, post_mat, 6)
 		post.position = Vector3(x + cos(a) * 2.6, 1.5, z + sin(a) * 2.6); _add(post)
 	# translucent canopy so the top-down command view can see the members beneath it
-	var roof := MeshLib.cyl(3.1, 3.4, 0.4, MeshLib.glass_stone_mat(col, 0.5), 16)
+	var roof := MeshLib.cyl(3.1, 3.4, 0.4, _glass_or_lit(col, 0.5), 16)
 	roof.position = Vector3(x, 3.1, z); _add(roof)
 	var pole := MeshLib.cyl(0.1, 0.1, 4.4, post_mat, 6); pole.position = Vector3(x, 2.2, z); _add(pole)
 	var flag := MeshLib.box(1.4, 0.9, 0.08, MeshLib.unlit_mat(col)); flag.position = Vector3(x + 0.8, 3.9, z); _add(flag)
@@ -502,8 +511,8 @@ static func _scatter() -> void:
 
 # ------------------------------------------------------------- wind leaves
 static func _build_wind_leaves() -> void:
-	if _game.mode == Game.Mode.SERVER:
-		return   # headless authority renders nothing — wind-leaves are pure decoration
+	if _game.mode == Game.Mode.SERVER or _game.lite:
+		return   # pure decoration; skip it for headless and lite worlds
 	var A: float = _game.ARENA
 	var mesh := _make_windleaf_mesh()
 	var tones := [0x7cb46c, 0x8fc27e, 0x6aa55e, 0x9acb86]
