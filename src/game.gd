@@ -23,6 +23,8 @@ const PTS_PREY := 15
 const ROUND_TIME := 240.0
 const N_O2 := 8
 const N_CO2 := 3
+const N_O2_ONLINE := 6        # lighter molecule set online (snapshot bandwidth + host load)
+const N_CO2_ONLINE := 2
 const RIVER_X1 := 2.0
 const RIVER_X2 := 14.0
 const RADAR_RANGE := 70.0
@@ -1587,7 +1589,7 @@ func _check_catches() -> void:
 			continue
 		for v in _co2_targets():
 			if n.pos.distance_to(v.pos) < _catch_dist(n, v):
-				var hit_player: bool = v.is_player
+				var hit_player: bool = v.is_player or v.is_human   # any human hit → CO₂ spends its oxygen, drops to CO
 				_take_hit(v, n)
 				if hit_player:
 					_co2_to_co(n)
@@ -1613,6 +1615,25 @@ func _gain_o2_charge() -> void:
 	o2_charges = mini(O2_CHARGE_CAP, o2_charges + 1)
 	stamina = minf(100.0, stamina + 22.0)   # a refreshing gulp right away, too
 	ui.toast("O₂! Sprint tank boosted (%d/%d)" % [o2_charges, O2_CHARGE_CAP])
+
+# CLIENT: the host says a player sipped an O₂ — boost MY sprint tank if it was me.
+func client_o2_charge(nid: int) -> void:
+	if nid == local_net_id:
+		_gain_o2_charge()
+
+# HOST: let GUEST players sip a nearby O₂ for sprint too (the local player's sip is handled in
+# _check_catches). The host consumes it authoritatively and tells that player to boost.
+func _host_o2_sip() -> void:
+	if net == null:
+		return
+	for h in actors:
+		if not h.is_human or h.is_player or not h.alive:
+			continue
+		for n in npcs:
+			if n.kind == "o2" and n.alive and n.pos.distance_to(h.pos) < CATCH_DIST + 0.4:
+				_consume_o2(n)
+				net.broadcast_o2_charge(h.net_id)
+				break
 
 func _is_disguised() -> bool:
 	return disguise_timer > 0.0
@@ -2335,8 +2356,8 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	# snapshot, and no client renders them as moving ghosts. This is the cheapest
 	# multiplayer lag win: fewer moving actors to sim, encode, send, and draw.
 	# (single-player keeps the full set.)
-	var n_o2 := 0 if mode != Mode.SINGLE else N_O2
-	var n_co2 := 0 if mode != Mode.SINGLE else N_CO2
+	var n_o2 := N_O2 if mode == Mode.SINGLE else (0 if mode == Mode.SERVER else N_O2_ONLINE)
+	var n_co2 := N_CO2 if mode == Mode.SINGLE else (0 if mode == Mode.SERVER else N_CO2_ONLINE)
 	for i in n_o2:
 		var o := make_character("o2")
 		o.pos = random_spot()
@@ -2849,6 +2870,7 @@ func _host_process(delta: float) -> void:
 			_update_ally(a, dt)              # host moves every player's clan (owner-relative)
 		_update_cave_timers(dt)
 		_check_catches()
+		_host_o2_sip()                       # guests sip O₂ for sprint too (host-authoritative)
 		_server_rescue(dt)
 		_host_update_keys(dt)                # show the carried key above its rescuer on the host too
 		_host_sync_hud()
@@ -3442,7 +3464,7 @@ func _nl_host_tick(dt: float) -> void:
 			counts[a.owner_peer] = int(counts.get(a.owner_peer, 0)) + 1
 			var rk := "%d:%s" % [a.owner_peer, (a.role if a.role != "" else "idle")]
 			roles[rk] = int(roles.get(rk, 0)) + 1
-		print("[netlog] host alive — actors=%d allies=%d byOwner=%s roles=%s keys=%s snap=%.0fHz" % [actors.size(), allies.size(), str(counts), str(roles), str(has_key_by_el), SNAP_HZ])
+		print("[netlog] host alive — actors=%d npcs=%d allies=%d byOwner=%s roles=%s keys=%s snap=%.0fHz" % [actors.size(), npcs.size(), allies.size(), str(counts), str(roles), str(has_key_by_el), SNAP_HZ])
 
 # HOST: a guest's per-second report arrived (relayed). Print one unified line, annotated
 # with the host's own authoritative closest-approach so the visual-vs-real gap is visible.
