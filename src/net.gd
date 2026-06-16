@@ -153,6 +153,7 @@ func _on_text(text: String) -> void:
 		"lobby":    _on_lobby(m)            # guest
 		"start":    _on_start(m)            # guest
 		"meta":     _on_meta(m)             # guest: slow status (scores/objective/keys)
+		"o2":       _on_o2(m)               # guest: I sipped an O₂ → sprint charge
 		"end":      _on_end(m)              # guest
 		"host_gone": _on_host_gone()        # guest
 
@@ -256,6 +257,11 @@ func _on_meta(m: Dictionary) -> void:
 	if game:
 		game.client_on_meta(m.get("meta", {}))
 
+# guest: the host says a player sipped an O₂ — boost MY sprint if it was me.
+func _on_o2(m: Dictionary) -> void:
+	if game and game.has_method("client_o2_charge"):
+		game.client_o2_charge(int(m.get("id", 0)))
+
 func _on_end(m: Dictionary) -> void:
 	started = false
 	match_ended.emit(String(m.get("reason", "")), String(m.get("win", "")), m.get("standings", []))
@@ -355,6 +361,12 @@ func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 func _send_bin(bytes: PackedByteArray) -> void:
 	if _ws != null and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		_ws.send(bytes)                                  # PackedByteArray -> WRITE_MODE_BINARY frame
+
+# Host -> guests: a player (by net_id) sipped an O₂ — that guest boosts its sprint tank.
+func broadcast_o2_charge(net_id: int) -> void:
+	if role != "host":
+		return
+	_send({ "t": "o2", "id": net_id })
 
 # Host -> guests: round over.
 func broadcast_end(reason: String, winner_el: String, standings: Array) -> void:
