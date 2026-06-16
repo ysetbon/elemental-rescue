@@ -10,6 +10,7 @@ var is_human: bool = false        # controlled by a person (online: any peer) vs
 var peer_id: int = 0              # owning network peer (0 = AI filler / single-player NPC)
 var net_id: int = 0               # stable per-match id used in network snapshots
 var last_input_seq: int = 0       # SERVER: last guest input-command seq replayed onto this actor (snapshot ack)
+var owner_peer: int = 0           # CLAN: the peer whose clan this ally belongs to (follows/obeys that player); 0 = not a clan ally
 var group: CharVisual = null      # null on the headless server (no visuals)
 
 var pos := Vector3.ZERO
