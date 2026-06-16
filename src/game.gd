@@ -1656,10 +1656,32 @@ func _take_hit(victim: GameChar, attacker: GameChar) -> void:
 	if attacker.kind == "element" and victim.kind == "element":
 		attacker.score += PTS_PREY
 	if victim.hp <= 0:
+		_drop_key_on_death(victim)    # drop the key (and so the prisoner) where you fell, before respawn
 		_respawn(victim)
 	elif victim.is_player:
 		ui.toast("Hit!  %d hearts left" % victim.hp)
 		_update_hud_hearts()
+
+# A caught key-holder DROPS the key exactly where they fell — it sits there, re-grabbable, so
+# the holder (or a teammate, online) can pick it back up and resume the rescue. The freed twin
+# stops following (no holder) and waits in place until someone holds the key again.
+func _drop_key_on_death(victim: GameChar) -> void:
+	if not (victim.is_human or victim.is_player):
+		return
+	var el := victim.el
+	if not keys.has(el):
+		return
+	if mode == Mode.SINGLE:
+		if victim.is_player and has_key:
+			has_key = false
+			key_carrier = null
+			keys[el]["pos"] = victim.pos
+			_update_objective()
+			_update_hud_status()
+	elif bool(has_key_by_el.get(el, false)) and int(key_holder_by_el.get(el, 0)) == victim.net_id:
+		has_key_by_el[el] = false
+		key_holder_by_el.erase(el)
+		keys[el]["pos"] = victim.pos
 
 func _respawn(ch: GameChar) -> void:
 	ch.hp = ch.max_hp
@@ -1862,7 +1884,7 @@ func _nearest_threat_to_player(a: GameChar) -> GameChar:
 
 # The rescued twin trails the player while in leash range, otherwise waits.
 func _update_twin(t: GameChar, dt: float) -> void:
-	if not player:
+	if not player or not has_key:    # the twin only escorts while YOU hold the key; drop it (death) → it waits in place
 		_steer(t, Vector3.ZERO, dt)
 		return
 	var d := t.pos.distance_to(player.pos)
@@ -3074,22 +3096,22 @@ func _server_rescue(dt: float) -> void:
 				if h.is_human and h.alive and h.pos.distance_to(cgp) < CAGE_RELEASE_DIST:
 					_server_release_twin(el)
 					break
-		# escort: the twin trails the HOLDER (else nearest teammate); reaching home wins the round
+		# escort: the twin trails the HOLDER (the key-carrier). No holder — i.e. nobody holds
+		# the key (dropped on death) — and it WAITS in place until someone grabs the key again.
 		var twin: GameChar = twin_by_el.get(el)
 		if twin != null and twin.alive:
-			var lead := holder
-			if lead == null or not lead.alive:
-				lead = _nearest_human_of(el, twin.pos)
-			if lead != null:
-				var d := twin.pos.distance_to(lead.pos)
+			if holder != null and holder.alive:
+				var d := twin.pos.distance_to(holder.pos)
 				if d <= TWIN_LEASH and d > 2.6:
-					var dir := lead.pos - twin.pos
+					var dir := holder.pos - twin.pos
 					dir.y = 0
 					twin.vel = twin.vel.lerp(dir.normalized() * twin.speed * 1.05, 1.0 - pow(0.0006, dt))
 					twin.pos += twin.vel * dt
 					resolve_collisions(twin)
 				else:
 					twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))
+			else:
+				twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))   # dropped key → wait where freed
 			if cave_by_owner.has(el):
 				var hc: Dictionary = cave_by_owner[el]
 				if twin.pos.distance_to(Vector3(hc["x"], 0, hc["z"])) < RESCUE_WIN_DIST:
