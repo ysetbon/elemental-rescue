@@ -200,10 +200,12 @@ var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
 var _net_clan := {}               # CLIENT: ally net_id(str) -> owner peer (from meta; JSON int keys arrive as strings)
 var _sel_clan: Dictionary = {}    # CLIENT/guest: selected own-ally net_id(int) -> true (host/single use a.selected instead)
+var _net_keyhold := {}            # CLIENT: el -> holder net_id (from meta; the carried key trails that actor)
 var _scores := { "fire": 0, "water": 0, "grass": 0 }
 var _net_time_left := ROUND_TIME
 # SERVER rescue state, shared per element (one key/twin per team)
-var has_key_by_el := {}            # el -> bool
+var has_key_by_el := {}            # el -> bool (team holds its key)
+var key_holder_by_el := {}         # el -> net_id of the human who grabbed it (the rescuer the key + twin follow)
 var twin_by_el := {}               # el -> GameChar (freed twin) or absent
 # Production server (set once the Render service is deployed). Override on web
 # with ?server=ws://host:port for local testing.
@@ -643,11 +645,11 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # Clan member nearest to a screen position (within the pick radius), or null.
 func _ally_at(screen_pos: Vector2) -> GameChar:
-	if not player or allies.is_empty():
+	if not player:
 		return null
 	var picked: GameChar = null
 	var best := 150.0 if mobile else 64.0   # pixels; much bigger tap target on phones
-	for a in allies:
+	for a in _my_clan():                     # only MY own clan (online: not other players')
 		var wp: Vector3 = a.pos + Vector3(0, 1.4, 0)
 		if camera.is_position_behind(wp):
 			continue
@@ -727,13 +729,13 @@ func _clear_selection() -> void:
 			_guest_show_sel(nid, false)
 		_sel_clan.clear()
 		return
-	for a in allies:
+	for a in _my_clan():
 		_set_selected(a, false)
 
 func _has_selection() -> bool:
 	if mode == Mode.CLIENT:
 		return not _sel_clan.is_empty()
-	return allies.any(func(a): return a.selected)
+	return _my_clan().any(func(a): return a.selected)
 
 func _assign_task(task: String) -> void:
 	# GUEST: my clan lives on the host — send the picked ally net_ids; the host validates + applies.
@@ -744,9 +746,9 @@ func _assign_task(task: String) -> void:
 		_clear_selection()
 		ui.show_task_buttons(false)
 		return
-	# SINGLE / HOST: allies are local — apply directly.
+	# SINGLE / HOST: my own clan is local — apply directly (only MY allies, not other players').
 	var n := 0
-	for a in allies:
+	for a in _my_clan():
 		if a.selected:
 			a.role = task
 			_set_selected(a, false)
@@ -1834,9 +1836,10 @@ func _all_clan_assigned() -> bool:
 # hall — so you can look down through the roof and hand out tasks. It ends when every
 # member has a task (or you walk away from the hall).
 func _clan_assign_active() -> bool:
-	if not player or allies.is_empty():
+	if not player:
 		return false
-	if not allies.any(func(a): return a.role == ""):
+	var mine := _my_clan()
+	if mine.is_empty() or not mine.any(func(a): return a.role == ""):
 		return false
 	var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
 	if hall.is_empty():
@@ -1973,6 +1976,16 @@ func _summon_clan(hall: Dictionary, owner_peer: int, el: String) -> void:
 # Clan helpers (owner-aware). Single-player keeps one clan under owner_peer 0.
 func _clan_of(peer: int) -> Array:
 	return allies.filter(func(a): return a.owner_peer == peer)
+
+# The LOCAL player's own clan (for HUD + host's local select/command). Single-player owns
+# owner_peer 0 (the whole array); the host owns its my_id slice — NOT other players' allies.
+func _my_owner_peer() -> int:
+	if mode == Mode.SINGLE:
+		return 0
+	return net.my_id if net else 0
+
+func _my_clan() -> Array:
+	return _clan_of(_my_owner_peer())
 
 func _clan_cap() -> int:
 	return CLAN_SIZE if mode == Mode.SINGLE else CLAN_ONLINE_SIZE
@@ -2235,7 +2248,8 @@ func _update_hud_hearts() -> void:
 		ui.set_hearts(player.hp, player.max_hp)
 
 func _update_hud_status() -> void:
-	var s := "Clan %d/%d   ·   Key: %s" % [allies.size(), CLAN_SIZE, ("yes" if has_key else "no")]
+	var have_key: bool = has_key if mode == Mode.SINGLE else bool(has_key_by_el.get(player.el if player else "", false))
+	var s := "Clan %d/%d   ·   Key: %s" % [_my_clan().size(), _clan_cap(), ("yes" if have_key else "no")]
 	if o2_charges > 0:
 		s += "   ·   O₂ %d/%d" % [o2_charges, O2_CHARGE_CAP]
 	if _is_disguised():
@@ -2603,6 +2617,9 @@ func _client_clear() -> void:
 		if is_instance_valid(key_nodes[el]):
 			key_nodes[el].queue_free()
 	key_nodes.clear()
+	_net_keyhold.clear()
+	_sel_clan.clear()
+	_net_clan.clear()
 	_net_actors.clear()
 	_pred_hist.clear()
 	_host_t_latest = 0.0
@@ -2716,6 +2733,8 @@ func client_on_meta(meta: Dictionary) -> void:
 	_net_rt = meta.get("rt", _net_rt)
 	if meta.has("clan"):
 		_net_clan = meta["clan"]           # ally net_id -> owner peer (for own-clan selection)
+	if meta.has("kh"):
+		_net_keyhold = meta["kh"]          # el -> holder net_id (carried key trails this rescuer)
 	if meta.has("kp"):
 		_client_sync_keys(meta["kp"])
 
@@ -2756,6 +2775,8 @@ func host_start_match(world_seed: int, humans: Array) -> void:
 	net_input.clear()
 	_cmd_queue.clear()
 	_cmd_last_seq.clear()
+	has_key_by_el.clear()
+	key_holder_by_el.clear()
 	local_el = my_el
 	_spawn_match(hs, my_el)        # creates visuals + the host's own avatar; running flips true after the countdown
 
@@ -2807,6 +2828,7 @@ func _host_process(delta: float) -> void:
 		_update_cave_timers(dt)
 		_check_catches()
 		_server_rescue(dt)
+		_host_update_keys(dt)                # show the carried key above its rescuer on the host too
 		_host_sync_hud()
 		_snap_accum += dt
 		if _snap_accum >= 1.0 / SNAP_HZ:
@@ -2998,12 +3020,17 @@ func _broadcast_snapshot() -> void:
 		var clan := {}                         # ally net_id -> owner peer, so each guest can pick out its OWN clan
 		for a in allies:
 			clan[a.net_id] = a.owner_peer
+		var kh := {}                           # held key -> holder net_id (the rescuer the carried key trails)
+		for el in ["fire", "water", "grass"]:
+			if bool(has_key_by_el.get(el, false)):
+				kh[el] = int(key_holder_by_el.get(el, 0))
 		meta = {
 			"tl": time_left,
 			"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
 			"rk": has_key_by_el.duplicate(),   # el -> bool (key held)
 			"rt": rt,                          # el -> bool (twin freed)
 			"kp": kp,                          # el -> [x,z] (un-held key positions)
+			"kh": kh,                          # el -> holder net_id (carried key follows this rescuer)
 			"clan": clan,                      # ally net_id -> owner peer
 		}
 	if net:
@@ -3021,19 +3048,25 @@ func _team_score(el: String) -> int:
 func _server_rescue(dt: float) -> void:
 	for el in ["fire", "water", "grass"]:
 		var grp: Array = by_el.get(el, [])
-		# pick up the team key — by a human teammate, OR a "fetch" clan ally of that element
+		# pick up the team key — and record the HOLDER: the human who grabbed it (or, for a
+		# fetch clan ally, the player it fetched for). The key + twin then follow that rescuer.
 		if not bool(has_key_by_el.get(el, false)) and keys.has(el):
 			var kp: Vector3 = keys[el]["pos"]
 			for h in grp:
 				if h.is_human and h.alive and h.pos.distance_to(kp) < KEY_PICK_DIST:
 					has_key_by_el[el] = true
+					key_holder_by_el[el] = h.net_id
 					break
 			if not bool(has_key_by_el.get(el, false)):
 				for a in allies:
 					if a.role == "fetch" and a.el == el and a.alive and a.pos.distance_to(kp) < KEY_PICK_DIST:
 						has_key_by_el[el] = true
+						var ow := _clan_owner(a)
+						key_holder_by_el[el] = ow.net_id if ow != null else 0
 						break
-		# free the caged twin once a teammate carrying the key reaches the cage
+		# the rescuer (key holder) leads the rescue; fall back to nearest teammate if they're gone
+		var holder: GameChar = _holder_avatar(el)
+		# free the caged twin once the holder (or any teammate with the key) reaches the cage
 		if bool(has_key_by_el.get(el, false)) and twin_by_el.get(el) == null and cage_by_el.has(el):
 			var cg: Dictionary = cage_by_el[el]
 			var cgp := Vector3(cg["x"], 0, cg["z"])
@@ -3041,10 +3074,12 @@ func _server_rescue(dt: float) -> void:
 				if h.is_human and h.alive and h.pos.distance_to(cgp) < CAGE_RELEASE_DIST:
 					_server_release_twin(el)
 					break
-		# escort: the twin trails the nearest teammate; reaching home wins the round
+		# escort: the twin trails the HOLDER (else nearest teammate); reaching home wins the round
 		var twin: GameChar = twin_by_el.get(el)
 		if twin != null and twin.alive:
-			var lead := _nearest_human_of(el, twin.pos)
+			var lead := holder
+			if lead == null or not lead.alive:
+				lead = _nearest_human_of(el, twin.pos)
 			if lead != null:
 				var d := twin.pos.distance_to(lead.pos)
 				if d <= TWIN_LEASH and d > 2.6:
@@ -3060,6 +3095,38 @@ func _server_rescue(dt: float) -> void:
 				if twin.pos.distance_to(Vector3(hc["x"], 0, hc["z"])) < RESCUE_WIN_DIST:
 					_server_end_match("rescued", el)
 					return
+
+# SERVER: the human actor currently holding `el`'s key (the rescuer), or null.
+func _holder_avatar(el: String) -> GameChar:
+	var nid := int(key_holder_by_el.get(el, 0))
+	if nid == 0:
+		return null
+	for h in by_el.get(el, []):
+		if h.net_id == nid and h.is_human:
+			return h
+	return null
+
+# HOST: position the key meshes on the host's own screen — un-held keys sit at their world
+# spot (beam on); a held key floats above its rescuer (beam off), mirroring what guests see.
+func _host_update_keys(dt: float) -> void:
+	for el in keys:
+		var node: Node3D = keys[el]["node"]
+		if node == null or not is_instance_valid(node):
+			continue
+		var beam = node.get_meta("beam", null)
+		node.rotation.y += dt * 1.6
+		if bool(has_key_by_el.get(el, false)):
+			var holder := _holder_avatar(el)
+			if holder != null and holder.alive:
+				node.position = node.position.lerp(holder.pos + Vector3(0, 2.0, 0), 0.35)
+				node.visible = true
+				if beam: beam.visible = false
+			else:
+				node.visible = false
+		else:
+			node.position = Vector3(keys[el]["pos"].x, 1.1, keys[el]["pos"].z)
+			node.visible = true
+			if beam: beam.visible = true
 
 func _server_release_twin(el: String) -> void:
 	var t := make_character("element", el)   # group null on server
@@ -3113,6 +3180,7 @@ func _client_process(delta: float) -> void:
 		return
 	_client_predict_local(dt)
 	_client_render_remote(dt)
+	_client_update_carried_keys()        # float carried keys above their rescuer
 	if cd >= 0.0:
 		_update_wind_leaves(minf(0.08, cd), time_ms)
 	_update_camera(dt)
@@ -3371,18 +3439,42 @@ func host_on_dbg(from: int, m: Dictionary) -> void:
 # CLIENT: build/position/hide the team keys from snapshot meta (kp = un-held keys).
 func _client_sync_keys(kp: Dictionary) -> void:
 	for el in ["fire", "water", "grass"]:
-		var present: bool = kp.has(el)
-		if present and not key_nodes.has(el):
+		var unheld: bool = kp.has(el)
+		var held: bool = _net_keyhold.has(el)
+		if (unheld or held) and not key_nodes.has(el):
 			var node := _make_key_node(el)
 			add_child(node)
 			key_nodes[el] = node
 		if key_nodes.has(el):
 			var node: Node3D = key_nodes[el]
-			if present:
-				node.position = Vector3(kp[el][0], 1.0, kp[el][1])
-				node.visible = true
-			else:
-				node.visible = false   # picked up → hide
+			var beam = node.get_meta("beam", null)
+			node.visible = unheld or held
+			if unheld:
+				node.position = Vector3(kp[el][0], 1.0, kp[el][1])   # sitting in the world
+				if beam: beam.visible = true
+			elif held:
+				if beam: beam.visible = false                        # carried → drop the pillar (placed per-frame)
+			# else: not present anywhere → stays hidden
+
+# CLIENT, per-frame: float each carried key above its rescuer (smooth — tracks the holder's
+# rendered avatar, mine or a ghost). Lets you SEE who's carrying the key home.
+func _client_update_carried_keys() -> void:
+	for el in _net_keyhold:
+		if not key_nodes.has(el):
+			continue
+		var nid := int(_net_keyhold[el])
+		var hp: Vector3
+		if nid == local_net_id and player != null:
+			hp = _client_render_pos()
+		elif ghosts.has(nid) and is_instance_valid(ghosts[nid]):
+			hp = ghosts[nid].position
+		else:
+			continue
+		var node: Node3D = key_nodes[el]
+		var goal := hp + Vector3(0, 2.0, 0)                          # float above the rescuer's head
+		node.position = node.position.lerp(goal, 0.35) if node.visible else goal
+		node.visible = true
+		node.rotation.y += 0.06
 
 # GUEST: the host told us the round is over. Tear down the networked view, then show
 # the end screen.
