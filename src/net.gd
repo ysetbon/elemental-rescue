@@ -148,6 +148,7 @@ func _on_text(text: String) -> void:
 		"guest_leave": _on_guest_leave(m)   # host
 		"el":       _on_guest_el(m)         # host
 		"in":       _on_guest_input(m)      # host
+		"clan":     _on_guest_clan(m)       # host: a guest assigns a task to its clan
 		"dbg":      _on_guest_dbg(m)        # host: QA telemetry from a guest (?netlog=1)
 		"lobby":    _on_lobby(m)            # guest
 		"start":    _on_start(m)            # guest
@@ -214,6 +215,15 @@ func _on_guest_input(m: Dictionary) -> void:
 	var cmds = m.get("cmds", null)
 	if typeof(cmds) == TYPE_ARRAY:
 		game.server_queue_input(int(m.get("from", 0)), cmds)
+
+# host: a guest assigned a task to (some of) its clan. The relay tagged `from`; the host
+# applies it only to allies that guest actually owns (anti-spoof in server_assign_clan_task).
+func _on_guest_clan(m: Dictionary) -> void:
+	if role != "host" or game == null or not game.has_method("server_assign_clan_task"):
+		return
+	var ids = m.get("ids", [])
+	if typeof(ids) == TYPE_ARRAY:
+		game.server_assign_clan_task(int(m.get("from", 0)), ids, String(m.get("role", "")))
 
 # host: a guest reported its own smoothness telemetry (only when ?netlog=1). The relay
 # tagged it with `from`. The host prints a unified table so you watch one terminal.
@@ -284,6 +294,12 @@ func start_match() -> void:
 		for pid in game.peer_actor:
 			mapping[pid] = game.peer_actor[pid].net_id
 	_send({ "t": "start", "seed": world_seed, "humans": humans, "netids": mapping })
+
+# Guest -> host: assign a task to my own clan (by ally net_id). The host validates ownership.
+func send_clan_task(role_: String, ids: Array) -> void:
+	if role != "guest":
+		return
+	_send({ "t": "clan", "role": role_, "ids": ids })
 
 # Guest -> host: one input COMMAND per rendered frame (the exact (input, dt) the client
 # predicted with), stamped with a per-frame monotonic seq. Every frame is recorded; sends

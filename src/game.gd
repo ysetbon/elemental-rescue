@@ -42,7 +42,8 @@ const SLOW_TIME := 5.0        # how long a predator stays sluggish after hitting
 const SLOW_FACTOR := 0.5      # speed multiplier while slowed
 const TRAIN_TIME := 5.33      # seconds of self-training for +1 max heart (3x faster)
 const TEACH_TIME := 4.0       # seconds in the clan hall to summon your clan (5x faster)
-const CLAN_SIZE := 10         # full clan size (teaching tops you back up to this)
+const CLAN_SIZE := 10         # full clan size single-player (teaching tops you back up to this)
+const CLAN_ONLINE_SIZE := 5   # smaller cap online: up to 7 players × clans → snapshot bandwidth (AoI culling deferred)
 const CLAN_REFILL_AT := 3     # you may re-teach a fresh batch once down to this many
 const CLAN_SCALE := 0.77      # ~40% bigger than the caged twin (0.55), smaller than you (1.0)
 const CLAN_COOLDOWN := 8.0    # delay before you can re-teach after losing allies
@@ -193,9 +194,12 @@ var _nl_host_auth := {}          # host: net_id -> min authoritative dist to the
 var _nt_picked := false
 var _nt_started := false
 var _nt_run_t := 0.0             # seconds since this side's match actually went live
+var _nt_cmd_sent := false        # NETTEST_CLAN: guest has issued its scripted task command
 var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
 var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
+var _net_clan := {}               # CLIENT: ally net_id(str) -> owner peer (from meta; JSON int keys arrive as strings)
+var _sel_clan: Dictionary = {}    # CLIENT/guest: selected own-ally net_id(int) -> true (host/single use a.selected instead)
 var _scores := { "fire": 0, "water": 0, "grass": 0 }
 var _net_time_left := ROUND_TIME
 # SERVER rescue state, shared per element (one key/twin per team)
@@ -220,10 +224,11 @@ var _press_pos := Vector2.ZERO
 var _press_moved := false
 
 # --------------------------------------------------------- rescue-mode state
-var allies: Array = []           # [GameChar] recruited clan members
+var allies: Array = []           # [GameChar] recruited clan members (every player's, tagged by owner_peer online)
 var freed_twin: GameChar = null  # the rescued caged twin (escort target)
 var train_progress := 0.0        # 0..1 self-training channel
-var teach_progress := 0.0        # 0..1 clan-hall channel
+var teach_progress := 0.0        # 0..1 clan-hall channel (single-player / host's own)
+var teach_progress_by_peer: Dictionary = {}  # HOST: peer_id -> 0..1 clan-hall channel (per recruiting player)
 var clan_cooldown := 0.0
 var has_key := false
 var keys: Dictionary = {}        # el -> { "node": Node3D, "pos": Vector3, "hinted": bool }
@@ -652,7 +657,45 @@ func _ally_at(screen_pos: Vector2) -> GameChar:
 			best = d; picked = a
 	return picked
 
+# GUEST: my own ally ghost nearest a screen position (within the pick radius), or 0.
+func _guest_ally_at(screen_pos: Vector2) -> int:
+	if net == null or camera == null:
+		return 0
+	var best := 150.0 if mobile else 64.0
+	var picked := 0
+	for nid in ghosts:
+		if int(_net_clan.get(str(nid), -1)) != net.my_id:
+			continue
+		var node = ghosts[nid]
+		if not is_instance_valid(node):
+			continue
+		var wp: Vector3 = node.position + Vector3(0, 1.4, 0)
+		if camera.is_position_behind(wp):
+			continue
+		var d := camera.unproject_position(wp).distance_to(screen_pos)
+		if d < best:
+			best = d; picked = int(nid)
+	return picked
+
+func _guest_show_sel(nid: int, on: bool) -> void:
+	if ghosts.has(nid):
+		var sel = ghosts[nid].get_meta("sel", null)
+		if sel and is_instance_valid(sel):
+			sel.visible = on
+
 func _click_select(screen_pos: Vector2) -> void:
+	# GUEST: select among my own ally GHOSTS (the clan lives on the host); toggle into _sel_clan.
+	if mode == Mode.CLIENT:
+		var nid := _guest_ally_at(screen_pos)
+		if nid != 0:
+			if _sel_clan.has(nid):
+				_sel_clan.erase(nid); _guest_show_sel(nid, false)
+			else:
+				_sel_clan[nid] = true; _guest_show_sel(nid, true)
+		else:
+			_clear_selection()
+		ui.show_task_buttons(not _sel_clan.is_empty())
+		return
 	if not player or allies.is_empty():
 		return
 	var picked := _ally_at(screen_pos)
@@ -668,6 +711,8 @@ func _click_select(screen_pos: Vector2) -> void:
 # on a left-side member (drawn under the joystick) selects it, while taps on empty
 # ground still drive movement so you can walk away / flee.
 func touch_selects_clan(screen_pos: Vector2) -> bool:
+	if mode == Mode.CLIENT:
+		return _guest_ally_at(screen_pos) != 0
 	return _clan_assign_active() and _ally_at(screen_pos) != null
 
 func _set_selected(a: GameChar, on: bool) -> void:
@@ -677,13 +722,29 @@ func _set_selected(a: GameChar, on: bool) -> void:
 		sel.visible = on
 
 func _clear_selection() -> void:
+	if mode == Mode.CLIENT:
+		for nid in _sel_clan.keys():
+			_guest_show_sel(nid, false)
+		_sel_clan.clear()
+		return
 	for a in allies:
 		_set_selected(a, false)
 
 func _has_selection() -> bool:
+	if mode == Mode.CLIENT:
+		return not _sel_clan.is_empty()
 	return allies.any(func(a): return a.selected)
 
 func _assign_task(task: String) -> void:
+	# GUEST: my clan lives on the host — send the picked ally net_ids; the host validates + applies.
+	if mode == Mode.CLIENT:
+		if not _sel_clan.is_empty() and net:
+			net.send_clan_task(task, _sel_clan.keys())
+			ui.toast("%d clan → %s" % [_sel_clan.size(), task])
+		_clear_selection()
+		ui.show_task_buttons(false)
+		return
+	# SINGLE / HOST: allies are local — apply directly.
 	var n := 0
 	for a in allies:
 		if a.selected:
@@ -694,6 +755,18 @@ func _assign_task(task: String) -> void:
 		var names := { "protect": "protect you", "attack": "attack %s" % ELEMENTS[ELEMENTS[player.el]["prey"]]["label"], "fetch": "fetch your key" }
 		ui.toast("%d clan → %s" % [n, names.get(task, task)])
 	ui.show_task_buttons(false)
+
+# HOST: a guest assigned `task` to ally net_ids. Apply ONLY to allies that guest owns
+# (anti-spoof) — a guest can't command another player's clan. Called via net._on_guest_clan.
+func server_assign_clan_task(peer: int, ids: Array, task: String) -> void:
+	if not (task in ["", "protect", "attack", "fetch"]):
+		return
+	var want := {}
+	for x in ids:
+		want[int(x)] = true
+	for a in allies:
+		if a.owner_peer == peer and want.has(a.net_id):
+			a.role = task
 
 # ------------------------------------------------------------------ camera
 func _update_camera(dt: float) -> void:
@@ -1463,34 +1536,38 @@ func _check_catches() -> void:
 		if pred and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST:
 			ui.toast("Gotcha! You caught your predator %s!" % ELEMENTS[pred.el]["label"])
 			_take_hit(pred, player)
-	# ATTACK clan smack the element you hunt
-	if player and player.alive and not allies.is_empty():
-		var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["prey"], []), player.pos)
-		if prey != null and not inside_own_cave(prey) and not inside_own_room(prey):
-			for a in allies:
-				if a.role == "attack" and a.pos.distance_to(prey.pos) < CATCH_DIST:
-					_take_hit(prey, a)
-					break
-	# PROTECT clan defend you. They always neutralise the threat (briefly SLOW your
-	# predator, or spend a black CO₂'s oxygen so it becomes harmless CO). But they only
-	# DIE doing it once the whole clan is assigned — while you're still organising, the
-	# predator/CO₂ can't actually catch your defenders. (מתאבדים, once you're committed.)
-	var clan_live := _all_clan_assigned()
-	var ppred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos) if player else null
+	# ATTACK clan smack the element their OWNER hunts (each attacker hits its nearest such prey)
+	for a in allies:
+		if a.role != "attack":
+			continue
+		var oa := _clan_owner(a)
+		if oa == null:
+			continue
+		var apr: GameChar = _nearest_in(by_el.get(ELEMENTS[oa.el]["prey"], []), a.pos)
+		if apr != null and apr.alive and not inside_own_cave(apr) and not inside_own_room(apr) and a.pos.distance_to(apr.pos) < CATCH_DIST:
+			_take_hit(apr, a)
+	# PROTECT clan defend their OWNER: briefly SLOW the owner's predator, or spend a black
+	# CO₂'s oxygen. They only DIE doing it once THAT owner's whole clan is assigned — while
+	# still organising, the predator/CO₂ can't catch the defenders. (מתאבדים, once committed.)
 	for a in allies.duplicate():
 		if a.role != "protect":
 			continue
-		var pred: GameChar = ppred
-		if pred and not inside_own_cave(pred) and pred.slow_timer <= 0.0 and a.pos.distance_to(pred.pos) < CATCH_DIST:
-			pred.slow_timer = SLOW_TIME    # brief slow-down, not a trip home
-			if clan_live:
-				ui.toast("A clan member sacrificed itself to slow %s!" % ELEMENTS[pred.el]["label"])
-				_disperse_ally(a)          # mortal only once the clan is fully assigned
+		var op := _clan_owner(a)
+		if op == null:
+			continue
+		var lv := _clan_live(a.owner_peer)
+		var apd: GameChar = _nearest_in(by_el.get(ELEMENTS[op.el]["predator"], []), a.pos)
+		if apd and not inside_own_cave(apd) and apd.slow_timer <= 0.0 and a.pos.distance_to(apd.pos) < CATCH_DIST:
+			apd.slow_timer = SLOW_TIME     # brief slow-down, not a trip home
+			if lv:
+				if _is_local_owner(a.owner_peer):
+					ui.toast("A clan member sacrificed itself to slow %s!" % ELEMENTS[apd.el]["label"])
+				_disperse_ally(a)          # mortal only once that owner's clan is fully assigned
 			continue
 		for n in npcs:
 			if n.kind == "co2" and n.co_timer <= 0.0 and a.pos.distance_to(n.pos) < CATCH_DIST:
 				_co2_to_co(n)              # spend the CO₂'s oxygen → it becomes CO
-				if clan_live:
+				if lv:
 					_disperse_ally(a)      # ...and the defender dies
 				break
 	# CO₂ hits any exposed element or clan member. Tagging YOU spends an oxygen, so it
@@ -1635,11 +1712,20 @@ func _tick_timers(dt: float) -> void:
 					n.group.position = n.pos
 					n.group.visible = true
 
+# The avatar an ally serves: in single-player it's always the local player; online it's
+# the recruiting peer's avatar (null if that player has left). Lets the whole clan AI be
+# written against `owner` instead of the hardcoded local `player`.
+func _clan_owner(a: GameChar) -> GameChar:
+	if mode == Mode.SINGLE:
+		return player
+	return peer_actor.get(a.owner_peer, null)
+
 # Clan members don't follow you — they help. Fetchers go get the key and bring it
 # back; everyone else hunts the element you eat across the whole map.
 func _update_ally(a: GameChar, dt: float) -> void:
-	if not player or not player.alive:
-		_steer(a, Vector3.ZERO, dt)
+	var owner := _clan_owner(a)
+	if owner == null or not owner.alive:
+		_steer(a, Vector3.ZERO, dt)   # owner gone/dead — idle in place (online: their player left)
 		return
 	var attracts: Array = []
 	var repels: Array = []
@@ -1654,68 +1740,95 @@ func _update_ally(a: GameChar, dt: float) -> void:
 
 	match a.role:
 		"fetch":
-			# bolt straight for your key the moment you're tasked, then carry it back
-			if not has_key and keys.has(player.el):
+			# bolt straight for the owner's key the moment you're tasked, then carry it back
+			if not _owner_has_key(owner) and keys.has(owner.el):
 				var target: Vector3
 				if key_carrier == a:
-					target = player.pos
+					target = owner.pos
 				elif key_carrier == null:
-					target = keys[player.el]["pos"]
+					target = keys[owner.el]["pos"]
 				else:
 					target = key_carrier.pos
 				attracts.append({ "pos": target, "weight": 3.4, "range": 280.0 })
 			else:
-				# key delivered — follow you, and stand still once you stop and I'm in place
-				var slot := player.pos + ring * 4.0
-				if player.vel.length() < 0.6 and a.pos.distance_to(slot) < 1.8:
+				# key delivered — follow the owner, stand still once they stop and I'm in place
+				var slot := owner.pos + ring * 4.0
+				if owner.vel.length() < 0.6 and a.pos.distance_to(slot) < 1.8:
 					_steer(a, Vector3.ZERO, dt)
 					return
 				attracts.append({ "pos": slot, "weight": 1.4, "range": 40.0 })
 		"attack":
-			# ALWAYS hunt the element you eat — chase it down, and if it ducks into its
-			# cave just camp at the entrance. Never trot back to you (that yo-yo looked silly).
-			var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["prey"], []), a.pos)
+			# ALWAYS hunt the element the OWNER eats — chase it down, camp the cave entrance.
+			var prey: GameChar = _nearest_in(by_el.get(ELEMENTS[owner.el]["prey"], []), a.pos)
 			if prey and prey.alive:
 				attracts.append({ "pos": _lead_point(a.pos, prey, a.speed), "weight": 3.6, "range": 320.0 })
 		"protect":
-			# stand guard inside the clan house until you head out
-			if _player_in_clan_hall():
+			# stand guard inside the clan house until the owner heads out
+			if _owner_in_clan_hall(owner):
 				_steer(a, Vector3.ZERO, dt)
 				return
-			# once you're out, shadow you — and charge anyone coming to catch you
-			var threat: GameChar = _nearest_threat_to_player(a)
-			if threat and player.pos.distance_to(threat.pos) < 30.0:
+			# once the owner is out, shadow them — and charge anyone coming to catch them
+			var threat: GameChar = _nearest_threat_to(owner)
+			if threat and owner.pos.distance_to(threat.pos) < 30.0:
 				attracts.append({ "pos": _lead_point(a.pos, threat, a.speed), "weight": 3.8, "range": 280.0 })
 				mult = 1.35
 			else:
-				# no threat — guard you, and stand at ease once you stop and I'm in place
-				var slot := player.pos + ring * 2.6
-				if player.vel.length() < 0.6 and a.pos.distance_to(slot) < 1.6:
+				# no threat — guard the owner, stand at ease once they stop and I'm in place
+				var slot := owner.pos + ring * 2.6
+				if owner.vel.length() < 0.6 and a.pos.distance_to(slot) < 1.6:
 					_steer(a, Vector3.ZERO, dt)
 					return
 				attracts.append({ "pos": slot, "weight": 2.6, "range": 40.0 })
 				mult = 1.1
 		_:
-			# idle: gather in a ring around the clan hall but OUTSIDE its roof (radius
-			# ~3.4), spread out so the top-down view shows every member clearly
-			var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
-			var c: Vector3 = Vector3(hall["x"], 0, hall["z"]) if not hall.is_empty() else player.pos
+			# idle: gather in a ring around the OWNER's clan hall, spread out evenly
+			var hall: Dictionary = clan_hall_by_owner.get(owner.el, {})
+			var c: Vector3 = Vector3(hall["x"], 0, hall["z"]) if not hall.is_empty() else owner.pos
 			var slot := c + ring * 5.0
 			var d := slot - a.pos; d.y = 0
 			_steer(a, d.normalized() if d.length() > 0.9 else Vector3.ZERO, dt, 0.9)
 			return
 	_smart_move(a, attracts, repels, dt, mult)
 
-func _player_in_clan_hall() -> bool:
-	if not player:
-		return false
-	var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
-	return not hall.is_empty() and Vector2(player.pos.x - hall["x"], player.pos.z - hall["z"]).length() < hall["r"]
+# Does this player team hold its element key? Single-player tracks the per-player `has_key`;
+# online uses the host-authoritative per-team `has_key_by_el`.
+func _owner_has_key(owner: GameChar) -> bool:
+	if mode == Mode.SINGLE:
+		return has_key
+	return bool(has_key_by_el.get(owner.el, false))
 
-# True once every clan member has a task — only then is the clan fully "live" (defenders
-# become mortal). While anyone is still unassigned the clan is in a protected setup state.
+func _owner_in_clan_hall(owner: GameChar) -> bool:
+	if owner == null:
+		return false
+	var hall: Dictionary = clan_hall_by_owner.get(owner.el, {})
+	return not hall.is_empty() and Vector2(owner.pos.x - hall["x"], owner.pos.z - hall["z"]).length() < hall["r"]
+
+func _player_in_clan_hall() -> bool:
+	return _owner_in_clan_hall(player)
+
+# the nearest thing menacing an owner: their predator, or a still-dangerous CO₂
+func _nearest_threat_to(owner: GameChar) -> GameChar:
+	var best: GameChar = null
+	var bd := 1.0e20
+	var pred: GameChar = _nearest_in(by_el.get(ELEMENTS[owner.el]["predator"], []), owner.pos)
+	if pred and pred.alive and not inside_own_cave(pred):
+		bd = owner.pos.distance_to(pred.pos); best = pred
+	for n in npcs:
+		if n.kind == "co2" and n.alive and n.co_timer <= 0.0:
+			var d := owner.pos.distance_to(n.pos)
+			if d < bd and d < 45.0:
+				bd = d; best = n
+	return best
+
+# True once every member of ONE owner's clan has a task — only then is that clan fully
+# "live" (defenders become mortal). While anyone is still unassigned it's a protected setup.
+func _clan_live(peer: int) -> bool:
+	var c := _clan_of(peer)
+	return not c.is_empty() and not c.any(func(a): return a.role == "")
+
+# Single-player / host's-own convenience (the local clan is owner_peer 0 single, my_id host).
 func _all_clan_assigned() -> bool:
-	return not allies.is_empty() and not allies.any(func(a): return a.role == "")
+	return _clan_live(0) if mode == Mode.SINGLE else _clan_live(net.my_id if net else 0)
 
 # Top-down command view is on while you still have unassigned clan and you're at the
 # hall — so you can look down through the roof and hand out tasks. It ends when every
@@ -1794,37 +1907,81 @@ func _update_teaching(dt: float) -> void:
 		teach_progress += dt / TEACH_TIME
 		if teach_progress >= 1.0:
 			teach_progress = 0.0
-			_summon_clan(hall)
+			_summon_clan(hall, 0, player.el)
 	else:
 		teach_progress = maxf(0.0, teach_progress - dt / TEACH_TIME)
 
-# Bring the clan back up to full strength: spawn fresh idle members for the empty slots,
-# then re-spread everyone's formation angle evenly.
-func _summon_clan(hall: Dictionary) -> void:
-	var need := CLAN_SIZE - allies.size()
+# HOST: run clan teaching for EVERY human player — each standing in its element's clan hall
+# accrues its own teach channel and summons its own (owner-tagged) clan. Host-authoritative;
+# guests never spawn allies locally (they receive them via snapshots).
+func _host_update_teaching(dt: float) -> void:
+	for ch in actors:
+		if not ch.is_human or not ch.alive:
+			continue
+		var peer: int = ch.peer_id
+		var hall: Dictionary = clan_hall_by_owner.get(ch.el, {})
+		if hall.is_empty() or _clan_of(peer).size() > CLAN_REFILL_AT:
+			teach_progress_by_peer[peer] = 0.0
+			continue
+		var inside: bool = Vector2(ch.pos.x - hall["x"], ch.pos.z - hall["z"]).length() < hall["r"]
+		var p: float = float(teach_progress_by_peer.get(peer, 0.0))
+		if inside:
+			p += dt / TEACH_TIME
+			if p >= 1.0:
+				p = 0.0
+				_summon_clan(hall, peer, ch.el)
+		else:
+			p = maxf(0.0, p - dt / TEACH_TIME)
+		teach_progress_by_peer[peer] = p
+
+# Bring ONE owner's clan back up to strength: spawn fresh idle members owned by `owner_peer`
+# (element `el`) for the empty slots, then re-spread that owner's formation evenly. Online the
+# host summons for every player; single-player calls it for the local player (owner_peer 0).
+func _summon_clan(hall: Dictionary, owner_peer: int, el: String) -> void:
+	var cap := _clan_cap()
+	var have := _clan_of(owner_peer).size()
+	var need := cap - have
 	for i in need:
-		var a := make_character("element", player.el)
+		var a := make_character("element", el)
 		a.ally = true
-		a.role = ""                 # idle — waiting for you to give them a task
+		a.owner_peer = owner_peer
+		a.role = ""                 # idle — waiting for a task
 		a.max_hp = 1; a.hp = 1
-		a.group.scale = Vector3.ONE * CLAN_SCALE
-		var ang := TAU * float(allies.size()) / float(CLAN_SIZE)
+		if a.group:                 # host/single have visuals; guard anyway
+			a.group.scale = Vector3.ONE * CLAN_SCALE
+			# a translucent gray shroud that shows when this member is selected
+			var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
+			sel.position.y = 1.4
+			sel.visible = false
+			a.group.add_child(sel)
+			a.group.set_meta("sel", sel)
+		var ang := TAU * float(have + i) / float(cap)
 		a.pos = Vector3(hall["x"] + cos(ang) * 2.8, 0, hall["z"] + sin(ang) * 2.8)
-		a.group.position = a.pos
-		# a translucent gray shroud that shows when this member is selected
-		var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
-		sel.position.y = 1.4
-		sel.visible = false
-		a.group.add_child(sel)
-		a.group.set_meta("sel", sel)
+		if a.group:
+			a.group.position = a.pos
 		allies.append(a)
-	for i in allies.size():
-		allies[i].follow_angle = TAU * float(i) / float(allies.size())
-	if need >= CLAN_SIZE:
-		ui.toast("Clan of %d is waiting! Click them (multi-select) and pick a task." % need)
-	else:
-		ui.toast("Reinforcements! %d fresh clan members — click to assign." % need)
+	var clan := _clan_of(owner_peer)
+	for i in clan.size():
+		clan[i].follow_angle = TAU * float(i) / float(maxi(1, clan.size()))
+	if _is_local_owner(owner_peer):
+		if have == 0:
+			ui.toast("Clan of %d is waiting! Click them (multi-select) and pick a task." % need)
+		else:
+			ui.toast("Reinforcements! %d fresh clan members — click to assign." % need)
 	_update_hud_status()
+
+# Clan helpers (owner-aware). Single-player keeps one clan under owner_peer 0.
+func _clan_of(peer: int) -> Array:
+	return allies.filter(func(a): return a.owner_peer == peer)
+
+func _clan_cap() -> int:
+	return CLAN_SIZE if mode == Mode.SINGLE else CLAN_ONLINE_SIZE
+
+# Whose toasts/HUD this client should surface: single = always; online = my own peer.
+func _is_local_owner(peer: int) -> bool:
+	if mode == Mode.SINGLE:
+		return true
+	return net != null and peer == net.my_id
 
 func _refresh_channel() -> void:
 	if train_progress > 0.0:
@@ -2557,6 +2714,8 @@ func client_on_meta(meta: Dictionary) -> void:
 		_scores[el] = int(sc.get(el, _scores[el]))
 	_net_rk = meta.get("rk", _net_rk)
 	_net_rt = meta.get("rt", _net_rt)
+	if meta.has("clan"):
+		_net_clan = meta["clan"]           # ally net_id -> owner peer (for own-clan selection)
 	if meta.has("kp"):
 		_client_sync_keys(meta["kp"])
 
@@ -2566,6 +2725,13 @@ func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	var kind: String = _KIND_NAME[flags & 3]
 	var el: String = _EL_NAME[(flags >> 2) & 3]
 	var cv := _build_char_visual(kind, el)
+	if (flags & (1 << 7)) != 0:            # clan ally → render at clan scale + a selection shroud
+		cv.scale = Vector3.ONE * CLAN_SCALE
+		var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
+		sel.position.y = 1.4
+		sel.visible = false
+		cv.add_child(sel)
+		cv.set_meta("sel", sel)
 	ghosts[nid] = cv
 	return cv
 
@@ -2599,6 +2765,9 @@ func host_remove_peer(peer: int) -> void:
 	net_input.erase(peer)
 	_cmd_queue.erase(peer)
 	_cmd_last_seq.erase(peer)
+	teach_progress_by_peer.erase(peer)
+	for a in _clan_of(peer):               # disband the leaver's clan (avoid orphaned owner_peer)
+		_disperse_ally(a)
 	if peer_actor.has(peer):
 		var ch: GameChar = peer_actor[peer]
 		ch.is_human = false
@@ -2632,6 +2801,9 @@ func _host_process(delta: float) -> void:
 					_update_co2(n, dt)
 				else:
 					_update_o2(n, dt)
+		_host_update_teaching(dt)            # per-player clan recruiting at their hall
+		for a in allies:
+			_update_ally(a, dt)              # host moves every player's clan (owner-relative)
 		_update_cave_timers(dt)
 		_check_catches()
 		_server_rescue(dt)
@@ -2779,12 +2951,14 @@ func _pack_flags(ch: GameChar) -> int:
 	if ch.alive: f |= 1 << 4
 	if ch.co_timer > 0.0: f |= 1 << 5            # CO (spent / grey)
 	if ch.slow_timer > 0.0: f |= 1 << 6          # slowed (predator hit) → clients predict at half speed too
+	if ch.ally: f |= 1 << 7                       # recruited clan ally → clients render it scaled-down
 	return f
 
 func _broadcast_snapshot() -> void:
 	var list: Array = []
 	list.append_array(actors)
 	list.append_array(npcs)
+	list.append_array(allies)            # recruited clan allies replicate as normal ghosts
 	for el in twin_by_el:
 		if twin_by_el[el] != null:
 			list.append(twin_by_el[el])
@@ -2821,12 +2995,16 @@ func _broadcast_snapshot() -> void:
 		var rt := {}
 		for el in ["fire", "water", "grass"]:
 			rt[el] = twin_by_el.get(el) != null
+		var clan := {}                         # ally net_id -> owner peer, so each guest can pick out its OWN clan
+		for a in allies:
+			clan[a.net_id] = a.owner_peer
 		meta = {
 			"tl": time_left,
 			"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
 			"rk": has_key_by_el.duplicate(),   # el -> bool (key held)
 			"rt": rt,                          # el -> bool (twin freed)
 			"kp": kp,                          # el -> [x,z] (un-held key positions)
+			"clan": clan,                      # ally net_id -> owner peer
 		}
 	if net:
 		net.broadcast_snapshot(data, meta)
@@ -2843,13 +3021,18 @@ func _team_score(el: String) -> int:
 func _server_rescue(dt: float) -> void:
 	for el in ["fire", "water", "grass"]:
 		var grp: Array = by_el.get(el, [])
-		# pick up the team key
+		# pick up the team key — by a human teammate, OR a "fetch" clan ally of that element
 		if not bool(has_key_by_el.get(el, false)) and keys.has(el):
 			var kp: Vector3 = keys[el]["pos"]
 			for h in grp:
 				if h.is_human and h.alive and h.pos.distance_to(kp) < KEY_PICK_DIST:
 					has_key_by_el[el] = true
 					break
+			if not bool(has_key_by_el.get(el, false)):
+				for a in allies:
+					if a.role == "fetch" and a.el == el and a.alive and a.pos.distance_to(kp) < KEY_PICK_DIST:
+						has_key_by_el[el] = true
+						break
 		# free the caged twin once a teammate carrying the key reaches the cage
 		if bool(has_key_by_el.get(el, false)) and twin_by_el.get(el) == null and cage_by_el.has(el):
 			var cg: Dictionary = cage_by_el[el]
@@ -3131,6 +3314,14 @@ func _nl_guest_tick(dt: float) -> void:
 	var seen := _nl_seen_min if _nl_seen_min < 1.0e8 else -1.0
 	print("[netlog g#%d] skew %.2f/%.2f u  rtt %dms  extrap %.0f%%  underrun %d  buf %.1f  snaps %d  seen-min %.2f  snap %d±%dms" % [
 		local_net_id, _nl_skew, _nl_skew_max, int(_nl_rtt), ex, _nl_underruns, buf, _nl_snaps, seen, int(_nl_snap_ms), int(_nl_snap_jit)])
+	if OS.has_environment("NETTEST_CLAN"):   # TEMP(verify): count replicated ally ghosts + my own
+		var seen_a := 0; var mine := 0
+		for nid in _net_actors:
+			if (int(_net_actors[nid].get("flags", 0)) & (1 << 7)) != 0:
+				seen_a += 1
+				if int(_net_clan.get(str(nid), -1)) == net.my_id:
+					mine += 1
+		print("[GUEST clan] ally-ghosts=%d mine=%d (my_id=%d, clanmap=%d)" % [seen_a, mine, net.my_id, _net_clan.size()])
 	if net:
 		net.send_dbg({
 			"skew": snappedf(_nl_skew, 0.01), "smax": snappedf(_nl_skew_max, 0.01),
@@ -3155,7 +3346,13 @@ func _nl_host_tick(dt: float) -> void:
 	_nl_accum += dt
 	if _nl_accum >= 5.0:
 		_nl_accum = 0.0
-		print("[netlog] host alive — actors=%d snap=%.0fHz (waiting for guest reports…)" % [actors.size(), SNAP_HZ])
+		var counts := {}
+		var roles := {}
+		for a in allies:
+			counts[a.owner_peer] = int(counts.get(a.owner_peer, 0)) + 1
+			var rk := "%d:%s" % [a.owner_peer, (a.role if a.role != "" else "idle")]
+			roles[rk] = int(roles.get(rk, 0)) + 1
+		print("[netlog] host alive — actors=%d allies=%d byOwner=%s roles=%s keys=%s snap=%.0fHz" % [actors.size(), allies.size(), str(counts), str(roles), str(has_key_by_el), SNAP_HZ])
 
 # HOST: a guest's per-second report arrived (relayed). Print one unified line, annotated
 # with the host's own authoritative closest-approach so the visual-vs-real gap is visible.
@@ -3333,6 +3530,28 @@ func _nt_drive(is_host: bool) -> void:
 	if not running:
 		return
 	_nt_run_t += 1.0 / 30.0
+	if OS.has_environment("NETTEST_CLAN"):
+		# verification mode: walk to my own clan hall and park there to recruit a clan
+		var hall: Dictionary = clan_hall_by_owner.get(player.el, {}) if player else {}
+		if not hall.is_empty() and player:
+			var to := Vector3(hall["x"], 0, hall["z"]) - player.pos
+			to.y = 0
+			if to.length() > 1.4:
+				cam_yaw = atan2(-to.x, -to.z)
+				touch_move = Vector2(0, 1)
+			else:
+				touch_move = Vector2.ZERO     # inside the hall → stand still → teach accrues
+		# once recruited, the GUEST issues a scripted "protect" command for its own clan
+		if not is_host and not _nt_cmd_sent and _nt_run_t > 14.0 and net:
+			var ids: Array = []
+			for nid in _net_clan:
+				if int(_net_clan[nid]) == net.my_id:
+					ids.append(int(nid))
+			if ids.size() > 0:
+				net.send_clan_task("fetch", ids)
+				_nt_cmd_sent = true
+				print("[GUEST] sent 'fetch' for %d own allies" % ids.size())
+		return
 	if is_host:
 		var tgt: GameChar = null
 		for ch in actors:
