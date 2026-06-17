@@ -93,16 +93,21 @@ func _process(delta: float) -> void:
 		_toast_timer -= delta
 		if _toast_timer <= 0.0:
 			toast_label.modulate.a = 0.0
-	# Mobile: lift the PLAY ONLINE panel above the on-screen keyboard so the code/name field
-	# you're typing into stays visible (the keyboard otherwise covers the lower fields).
+	# Mobile: lift the PLAY ONLINE panel above the on-screen keyboard so the code/name field you're
+	# typing into stays visible. On WEB the soft keyboard is the browser's (Godot's
+	# virtual_keyboard_get_height() returns 0), so we read window.visualViewport — it shrinks when
+	# the keyboard opens. We shift by the keyboard's FRACTION of the viewport (scale-independent).
 	if online_center and online_root and online_root.visible:
-		var kb := DisplayServer.virtual_keyboard_get_height()
-		var off := 0.0
-		if kb > 0:
-			var win_h := float(DisplayServer.window_get_size().y)   # keyboard height is physical px
-			var vp_h := get_viewport().get_visible_rect().size.y    # Control space may be scaled
-			off = float(kb) * (vp_h / win_h) if win_h > 0.0 else float(kb)
-		var want := -off
+		var frac := 0.0
+		if OS.has_feature("web"):
+			var v: Variant = JavaScriptBridge.eval("(function(){var vv=window.visualViewport;if(!vv)return 0.0;return Math.max(0.0,(window.innerHeight-vv.height)/Math.max(1,window.innerHeight));})()", true)
+			if typeof(v) == TYPE_FLOAT or typeof(v) == TYPE_INT:
+				frac = clampf(float(v), 0.0, 0.85)
+		else:
+			var win_h := float(DisplayServer.window_get_size().y)
+			if win_h > 0.0:
+				frac = clampf(float(DisplayServer.virtual_keyboard_get_height()) / win_h, 0.0, 0.85)
+		var want := -get_viewport().get_visible_rect().size.y * frac
 		if not is_equal_approx(online_center.offset_bottom, want):
 			online_center.offset_bottom = want
 
