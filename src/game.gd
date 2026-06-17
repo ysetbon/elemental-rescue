@@ -2838,6 +2838,26 @@ func host_remove_peer(peer: int) -> void:
 		ch.peer_id = 0
 		peer_actor.erase(peer)
 
+# HOST: a guest joined AFTER the match started. Spawn it into the running match (fresh actor +
+# net_id, replicates via snapshots) and top up NPC fillers so the teams stay balanced.
+func host_late_join(peer: int, el: String) -> void:
+	if mode != Mode.HOST or not running or peer_actor.has(peer):
+		return
+	_spawn_element_actor(el, peer, true, false)
+	_rebalance_fillers()
+
+# Add NPC fillers so every element team matches the biggest human team ("match the biggest").
+# Add-only — used after a mid-game join so the new player's team and the other two stay even.
+func _rebalance_fillers() -> void:
+	var human_count := { "fire": 0, "water": 0, "grass": 0 }
+	for a in actors:
+		if a.is_human:
+			human_count[a.el] += 1
+	var biggest := maxi(1, maxi(human_count["fire"], maxi(human_count["water"], human_count["grass"])))
+	for el in ["fire", "water", "grass"]:
+		for _i in (biggest - by_el.get(el, []).size()):
+			_spawn_element_actor(el, 0, false, false)
+
 # HOST authority tick: simulate everyone (the host's own avatar from local input, the
 # guests from their relayed input, plus AI + molecules), resolve catches/rescue, render
 # the world, and stream snapshots to the guests.

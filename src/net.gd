@@ -63,6 +63,7 @@ var _last_sent_seq := 0
 # --- host-side room state ---
 var admin_id := 0                 # the host's id (== my_id on the host)
 var started := false
+var _match_seed := 0              # world seed of the running match (re-sent to mid-game late joiners)
 var lobby: Dictionary = {}        # id -> { "name": String, "el": String }
 
 # ------------------------------------------------------------------ lifecycle
@@ -183,6 +184,11 @@ func _on_guest_join(m: Dictionary) -> void:
 	if id == 0:
 		return
 	lobby[id] = { "name": _unique_name(String(m.get("name", "Player"))), "el": "fire" }
+	if started:
+		# mid-game join: show the lobby/element-picker to JUST this joiner (a targeted lobby, so
+		# running guests aren't yanked back to a lobby screen). On their pick → _on_guest_el spawns.
+		_send({ "t": "lobby", "to": id, "players": _roster(), "admin": admin_id, "code": current_code })
+		return
 	_broadcast_lobby()
 	_emit_lobby_local()
 
@@ -195,6 +201,8 @@ func _on_guest_leave(m: Dictionary) -> void:
 	lobby.erase(id)
 	if game and game.has_method("host_remove_peer"):
 		game.host_remove_peer(id)
+	if started:
+		return   # mid-match: their avatar becomes an AI filler; don't yank running guests to a lobby
 	_broadcast_lobby()
 	_emit_lobby_local()
 
@@ -203,12 +211,28 @@ func _on_guest_el(m: Dictionary) -> void:
 		return
 	var id := int(m.get("from", 0))
 	var el := String(m.get("el", ""))
-	if started or not lobby.has(id):
+	if not (el in ["fire", "water", "grass"]):
 		return
-	if el in ["fire", "water", "grass"]:
-		lobby[id]["el"] = el
-		_broadcast_lobby()
-		_emit_lobby_local()
+	if started:
+		# MID-GAME JOIN: the late guest picked its element → spawn it into the running match
+		# (once) and send a start addressed to JUST that guest so it builds the same world.
+		if game != null and game.has_method("host_late_join") and not game.peer_actor.has(id):
+			var nm: String = String(lobby[id]["name"]) if lobby.has(id) else _unique_name("Player")
+			lobby[id] = { "name": nm, "el": el }
+			game.host_late_join(id, el)
+			var humans: Array = []
+			for pid in lobby:
+				humans.append({ "peer": pid, "el": lobby[pid]["el"], "name": lobby[pid]["name"], "local": false })
+			var mapping: Dictionary = {}
+			for pid in game.peer_actor:
+				mapping[pid] = game.peer_actor[pid].net_id
+			_send({ "t": "start", "to": id, "seed": _match_seed, "humans": humans, "netids": mapping })
+		return
+	if not lobby.has(id):
+		return
+	lobby[id]["el"] = el
+	_broadcast_lobby()
+	_emit_lobby_local()
 
 func _on_guest_input(m: Dictionary) -> void:
 	if role != "host" or game == null:
@@ -235,10 +259,23 @@ func _on_guest_dbg(m: Dictionary) -> void:
 
 # ---- guest: receive host broadcasts ----
 func _on_lobby(m: Dictionary) -> void:
+	var to := int(m.get("to", 0))
+	if to != 0 and to != my_id:
+		return                            # a targeted late-joiner lobby — not for me
+	if started:
+		return                            # already in the match — don't pop back to a lobby screen
 	current_code = String(m.get("code", current_code))
 	lobby_changed.emit(m.get("players", []), my_id, int(m.get("admin", 0)), current_code)
 
 func _on_start(m: Dictionary) -> void:
+	# A start may be addressed to one late joiner (`to`); everyone else ignores it. And once
+	# I'm already in the match, ignore any further start (a late-join broadcast isn't for me).
+	var to := int(m.get("to", 0))
+	if to != 0 and to != my_id:
+		return
+	if started:
+		return
+	started = true
 	match_starting.emit(int(m.get("seed", 0)), m.get("humans", []), m.get("netids", {}))
 
 # guest: a binary frame arrived (positions). Route by the 1-byte tag, decode the raw
@@ -290,6 +327,7 @@ func start_match() -> void:
 		return
 	started = true
 	var world_seed := randi()
+	_match_seed = world_seed
 	var humans: Array = []
 	for id in lobby:
 		humans.append({ "peer": id, "el": lobby[id]["el"], "name": lobby[id]["name"], "local": id == my_id })
