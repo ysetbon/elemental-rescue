@@ -89,7 +89,7 @@ to point a web build at your local relay.
 ## What's networked
 
 - **Networked:** lobby + room codes, element pick + NPC fill, every player moving in
-  sync, host-authoritative catches/respawns, and the full rescue (key → free twin →
-  escort home → team wins → end screen).
-- **Single-player only (not networked):** clan/training/disguise mechanics — online play
-  uses the core rescue loop.
+  sync, host-authoritative catches/respawns, CO₂/O₂ molecules, clan recruiting +
+  commands + key-fetch, self-training (stand on your totem for +1 max heart), and the
+  full rescue (key → free twin → escort home → team wins → end screen).
+- **Single-player only (not networked):** the black-stone disguise power-up.
