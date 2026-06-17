@@ -203,6 +203,8 @@ var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
 var _net_clan := {}               # CLIENT: ally net_id(str) -> owner peer (from meta; JSON int keys arrive as strings)
 var _sel_clan: Dictionary = {}    # CLIENT/guest: selected own-ally net_id(int) -> true (host/single use a.selected instead)
 var _net_keyhold := {}            # CLIENT: el -> holder net_id (from meta; the carried key trails that actor)
+var _sipped := {}                 # CLIENT: O₂ net_ids I've already sipped this alive-instance (dedup)
+var _hit_cooldown := 0.0          # CLIENT: brief cooldown after reporting I was caught (anti-spam)
 var _scores := { "fire": 0, "water": 0, "grass": 0 }
 var _net_time_left := ROUND_TIME
 # SERVER rescue state, shared per element (one key/twin per team)
@@ -1527,6 +1529,8 @@ func _check_catches() -> void:
 		for p in by_el.get(ELEMENTS[a.el]["prey"], []):
 			if not p.alive or inside_own_cave(p) or inside_own_room(p):
 				continue
+			if _is_remote_human(p):
+				continue        # a guest detects its OWN catches client-side (accurate to its view) → server_guest_caught
 			if p.is_player and _is_disguised():
 				continue        # energized: their predator can't catch them right now
 			var d: float = a.pos.distance_to(p.pos)
@@ -1588,6 +1592,8 @@ func _check_catches() -> void:
 					break
 			continue
 		for v in _co2_targets():
+			if _is_remote_human(v):
+				continue        # a guest detects its OWN CO₂ catch client-side → server_guest_caught (CO₂ reverts there)
 			if n.pos.distance_to(v.pos) < _catch_dist(n, v):
 				var hit_player: bool = v.is_player or v.is_human   # any human hit → CO₂ spends its oxygen, drops to CO
 				_take_hit(v, n)
@@ -1616,24 +1622,41 @@ func _gain_o2_charge() -> void:
 	stamina = minf(100.0, stamina + 22.0)   # a refreshing gulp right away, too
 	ui.toast("O₂! Sprint tank boosted (%d/%d)" % [o2_charges, O2_CHARGE_CAP])
 
-# CLIENT: the host says a player sipped an O₂ — boost MY sprint tank if it was me.
-func client_o2_charge(nid: int) -> void:
-	if nid == local_net_id:
-		_gain_o2_charge()
-
-# HOST: let GUEST players sip a nearby O₂ for sprint too (the local player's sip is handled in
-# _check_catches). The host consumes it authoritatively and tells that player to boost.
-func _host_o2_sip() -> void:
-	if net == null:
+# HOST: a guest reported sipping O₂ `nid` (it already charged itself locally). Validate the O₂
+# exists + the guest is roughly in range (anti-cheat), then consume it so it's gone for everyone.
+func server_guest_sip(peer: int, nid: int) -> void:
+	var who: GameChar = peer_actor.get(peer)
+	if who == null:
 		return
-	for h in actors:
-		if not h.is_human or h.is_player or not h.alive:
-			continue
-		for n in npcs:
-			if n.kind == "o2" and n.alive and n.pos.distance_to(h.pos) < CATCH_DIST + 0.4:
-				_consume_o2(n)
-				net.broadcast_o2_charge(h.net_id)
-				break
+	for n in npcs:
+		if n.kind == "o2" and n.alive and n.net_id == nid and n.pos.distance_to(who.pos) < CATCH_DIST + 4.0:
+			_consume_o2(n)
+			return
+
+# HOST: a guest reported being CAUGHT by `by_nid` (a predator element or a live CO₂), detected
+# against the ghost it saw. Validate the attacker is real, a genuine threat to that guest, and
+# roughly in range (anti-cheat), then apply the hit — so the catch lands when the GUEST sees it.
+func server_guest_caught(peer: int, by_nid: int) -> void:
+	var prey: GameChar = peer_actor.get(peer)
+	if prey == null or not prey.alive or prey.invuln_timer > 0.0 or inside_own_cave(prey) or inside_own_room(prey):
+		return
+	var attacker: GameChar = null
+	for c in all_chars():
+		if c.net_id == by_nid:
+			attacker = c
+			break
+	if attacker == null or not attacker.alive:
+		return
+	var ok := false
+	if attacker.kind == "element" and attacker.el == ELEMENTS[prey.el]["predator"]:
+		ok = true
+	elif attacker.kind == "co2" and attacker.co_timer <= 0.0:
+		ok = true
+	if not ok or attacker.pos.distance_to(prey.pos) > CATCH_DIST + 4.0:   # generous range guard (ghost was ~½RTT behind)
+		return
+	_take_hit(prey, attacker)
+	if attacker.kind == "co2":
+		_co2_to_co(attacker)   # spent its oxygen tagging a human
 
 func _is_disguised() -> bool:
 	return disguise_timer > 0.0
@@ -2661,6 +2684,8 @@ func _client_clear() -> void:
 			key_nodes[el].queue_free()
 	key_nodes.clear()
 	_net_keyhold.clear()
+	_sipped.clear()
+	_hit_cooldown = 0.0
 	_sel_clan.clear()
 	_net_clan.clear()
 	_net_actors.clear()
@@ -2890,7 +2915,6 @@ func _host_process(delta: float) -> void:
 			_update_ally(a, dt)              # host moves every player's clan (owner-relative)
 		_update_cave_timers(dt)
 		_check_catches()
-		_host_o2_sip()                       # guests sip O₂ for sprint too (host-authoritative)
 		_server_rescue(dt)
 		_host_update_keys(dt)                # show the carried key above its rescuer on the host too
 		_host_sync_hud()
@@ -3245,6 +3269,7 @@ func _client_process(delta: float) -> void:
 	_client_predict_local(dt)
 	_client_render_remote(dt)
 	_client_update_carried_keys()        # float carried keys above their rescuer
+	_client_threat_check(dt)             # report catches/O₂ sips against the ghosts I actually see
 	if cd >= 0.0:
 		_update_wind_leaves(minf(0.08, cd), time_ms)
 	_update_camera(dt)
@@ -3539,6 +3564,40 @@ func _client_update_carried_keys() -> void:
 		node.position = node.position.lerp(goal, 0.35) if node.visible else goal
 		node.visible = true
 		node.rotation.y += 0.06
+
+# CLIENT: against the ghosts I actually SEE, detect a predator (my eater) or live CO₂ touching
+# me → report it so the HOST applies the hit (catches match MY view, not its ~½RTT-lagged one);
+# and when I reach an O₂ → charge locally (instant) + tell the host to consume it. Host validates.
+# This is what makes catches/sips accurate + immediate for guests.
+func _client_threat_check(dt: float) -> void:
+	if player == null or not player.alive or net == null:
+		return
+	_hit_cooldown = maxf(0.0, _hit_cooldown - dt)
+	var me := _client_render_pos()
+	var pred_el: String = ELEMENTS[local_el]["predator"]
+	var caught_nid := 0
+	for nid in _net_actors:
+		var node = ghosts.get(nid)
+		if node == null or not is_instance_valid(node):
+			continue
+		var flags := int((_net_actors[nid] as Dictionary).get("flags", 0))
+		var kind: String = _KIND_NAME[flags & 3]
+		var d := me.distance_to(node.position)
+		if kind == "o2":
+			if (flags & (1 << 4)) == 0:            # consumed/respawning → reset so the next instance can be sipped
+				_sipped.erase(nid)
+			elif d < CATCH_DIST + 0.4 and not _sipped.has(nid):
+				_sipped[nid] = true
+				_gain_o2_charge()                  # instant local sprint boost
+				net.send_sip(nid)                  # tell the host to consume it for everyone
+		elif caught_nid == 0 and _hit_cooldown <= 0.0 and d < CATCH_DIST:
+			var spent := (flags & (1 << 5)) != 0
+			var el: String = _EL_NAME[(flags >> 2) & 3]
+			if (kind == "co2" and not spent) or (kind == "element" and el == pred_el):
+				caught_nid = int(nid)
+	if caught_nid != 0:
+		net.send_hit(caught_nid)
+		_hit_cooldown = HIT_INVULN
 
 # GUEST: the host told us the round is over. Tear down the networked view, then show
 # the end screen.

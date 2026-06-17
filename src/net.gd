@@ -150,11 +150,12 @@ func _on_text(text: String) -> void:
 		"el":       _on_guest_el(m)         # host
 		"in":       _on_guest_input(m)      # host
 		"clan":     _on_guest_clan(m)       # host: a guest assigns a task to its clan
+		"sip":      _on_guest_sip(m)        # host: a guest sipped an O₂ (it charged locally; consume it)
+		"hit":      _on_guest_hit(m)        # host: a guest reports it was caught (validate + apply)
 		"dbg":      _on_guest_dbg(m)        # host: QA telemetry from a guest (?netlog=1)
 		"lobby":    _on_lobby(m)            # guest
 		"start":    _on_start(m)            # guest
 		"meta":     _on_meta(m)             # guest: slow status (scores/objective/keys)
-		"o2":       _on_o2(m)               # guest: I sipped an O₂ → sprint charge
 		"end":      _on_end(m)              # guest
 		"host_gone": _on_host_gone()        # guest
 
@@ -250,6 +251,16 @@ func _on_guest_clan(m: Dictionary) -> void:
 	if typeof(ids) == TYPE_ARRAY:
 		game.server_assign_clan_task(int(m.get("from", 0)), ids, String(m.get("role", "")))
 
+# host: a guest sipped O₂ `id` (client-detected against the ghost it saw); consume it for all.
+func _on_guest_sip(m: Dictionary) -> void:
+	if role == "host" and game != null and game.has_method("server_guest_sip"):
+		game.server_guest_sip(int(m.get("from", 0)), int(m.get("id", 0)))
+
+# host: a guest reports it was caught by `by` (client-detected); validate + apply the hit.
+func _on_guest_hit(m: Dictionary) -> void:
+	if role == "host" and game != null and game.has_method("server_guest_caught"):
+		game.server_guest_caught(int(m.get("from", 0)), int(m.get("by", 0)))
+
 # host: a guest reported its own smoothness telemetry (only when ?netlog=1). The relay
 # tagged it with `from`. The host prints a unified table so you watch one terminal.
 func _on_guest_dbg(m: Dictionary) -> void:
@@ -293,11 +304,6 @@ func _on_bin(pkt: PackedByteArray) -> void:
 func _on_meta(m: Dictionary) -> void:
 	if game:
 		game.client_on_meta(m.get("meta", {}))
-
-# guest: the host says a player sipped an O₂ — boost MY sprint if it was me.
-func _on_o2(m: Dictionary) -> void:
-	if game and game.has_method("client_o2_charge"):
-		game.client_o2_charge(int(m.get("id", 0)))
 
 func _on_end(m: Dictionary) -> void:
 	started = false
@@ -344,6 +350,15 @@ func send_clan_task(role_: String, ids: Array) -> void:
 	if role != "guest":
 		return
 	_send({ "t": "clan", "role": role_, "ids": ids })
+
+# Guest -> host: I sipped O₂ `nid` / I was caught by `nid` (client-detected against what I see).
+func send_sip(nid: int) -> void:
+	if role == "guest":
+		_send({ "t": "sip", "id": nid })
+
+func send_hit(by_nid: int) -> void:
+	if role == "guest":
+		_send({ "t": "hit", "by": by_nid })
 
 # Guest -> host: one input COMMAND per rendered frame (the exact (input, dt) the client
 # predicted with), stamped with a per-frame monotonic seq. Every frame is recorded; sends
@@ -399,12 +414,6 @@ func broadcast_snapshot(adata: PackedFloat32Array, meta: Dictionary) -> void:
 func _send_bin(bytes: PackedByteArray) -> void:
 	if _ws != null and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		_ws.send(bytes)                                  # PackedByteArray -> WRITE_MODE_BINARY frame
-
-# Host -> guests: a player (by net_id) sipped an O₂ — that guest boosts its sprint tank.
-func broadcast_o2_charge(net_id: int) -> void:
-	if role != "host":
-		return
-	_send({ "t": "o2", "id": net_id })
 
 # Host -> guests: round over.
 func broadcast_end(reason: String, winner_el: String, standings: Array) -> void:
