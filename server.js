@@ -87,12 +87,13 @@ wss.on("connection", (ws) => {
       if (ws.room) return;
       const room = rooms.get(String(m.code || "").toUpperCase());
       if (!room)        return send(ws, { t: "err", m: "No game with that code. Check it with the host." });
-      if (room.started) return send(ws, { t: "err", m: "That game already started." });
       if (roomSize(room) >= MAX_PLAYERS) return send(ws, { t: "err", m: "Game is full (" + MAX_PLAYERS + " players)." });
+      // Late join allowed: a guest may enter a room even after it started — the host spawns
+      // them into the running match (and tells the host it's a mid-game join via `late`).
       room.guests.set(ws.id, ws);
       ws.room = room.code; ws.isHost = false;
       send(ws, { t: "room", you: ws.id, code: room.code, host: false });
-      send(room.hostWs, { t: "guest_join", id: ws.id, name: String(m.name || "Player").slice(0, 16) });
+      send(room.hostWs, { t: "guest_join", id: ws.id, name: String(m.name || "Player").slice(0, 16), late: !!room.started });
       return;
     }
 

@@ -50,6 +50,7 @@ var task_icons: Array = []        # [TextureRect] one per task button
 
 # --- online panel + lobby ---
 var online_root: Control
+var online_center: CenterContainer   # online panel wrapper — shifted up so the mobile keyboard doesn't hide the fields
 var lobby_root: Control
 var online_name: LineEdit
 var online_code: LineEdit
@@ -92,6 +93,18 @@ func _process(delta: float) -> void:
 		_toast_timer -= delta
 		if _toast_timer <= 0.0:
 			toast_label.modulate.a = 0.0
+	# Mobile: lift the PLAY ONLINE panel above the on-screen keyboard so the code/name field
+	# you're typing into stays visible (the keyboard otherwise covers the lower fields).
+	if online_center and online_root and online_root.visible:
+		var kb := DisplayServer.virtual_keyboard_get_height()
+		var off := 0.0
+		if kb > 0:
+			var win_h := float(DisplayServer.window_get_size().y)   # keyboard height is physical px
+			var vp_h := get_viewport().get_visible_rect().size.y    # Control space may be scaled
+			off = float(kb) * (vp_h / win_h) if win_h > 0.0 else float(kb)
+		var want := -off
+		if not is_equal_approx(online_center.offset_bottom, want):
+			online_center.offset_bottom = want
 
 # --------------------------------------------------------------- builders
 func _twilight_gradient() -> GradientTexture2D:
@@ -249,6 +262,7 @@ func _build_online() -> void:
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	online_root.add_child(center)
+	online_center = center
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 14)
 	v.alignment = BoxContainer.ALIGNMENT_CENTER
