@@ -2126,6 +2126,18 @@ func _my_owner_peer() -> int:
 func _my_clan() -> Array:
 	return _clan_of(_my_owner_peer())
 
+# How many clan members I own. On a GUEST the clan lives on the host (the local `allies`
+# array is empty), so count my own entries in the replicated clan-ownership map instead.
+func _my_clan_count() -> int:
+	if mode == Mode.CLIENT:
+		var mine := net.my_id if net else -1
+		var n := 0
+		for nid in _net_clan:
+			if int(_net_clan[nid]) == mine:
+				n += 1
+		return n
+	return _my_clan().size()
+
 func _clan_cap() -> int:
 	return CLAN_SIZE if mode == Mode.SINGLE else CLAN_ONLINE_SIZE
 
@@ -2767,6 +2779,7 @@ func _client_clear() -> void:
 	_net_actors.clear()
 	_pred_hist.clear()
 	train_progress = 0.0
+	teach_progress = 0.0
 	_guest_clan_seen = false
 	_host_t_latest = 0.0
 	_host_off = 0.0
@@ -3378,6 +3391,7 @@ func _client_process(delta: float) -> void:
 		return
 	_client_predict_local(dt)
 	_client_update_training(dt)          # cosmetic self-training bar (host awards the heart via meta)
+	_client_update_teaching(dt)          # cosmetic clan-hall teaching bar (host summons the clan)
 	_client_render_remote(dt)
 	_client_update_carried_keys()        # float carried keys above their rescuer
 	_client_threat_check(dt)             # report catches/O₂ sips against the ghosts I actually see
@@ -3587,6 +3601,32 @@ func _client_update_training(dt: float) -> void:
 	else:
 		train_progress = maxf(0.0, train_progress - dt / TRAIN_TIME)
 
+# GUEST: predict my clan-hall teaching bar locally (cosmetic, mirrors _update_teaching). The
+# host runs the authoritative channel and summons my clan; when my clan count crosses the
+# refill line the condition below fails and the bar clears. Clan count is read from meta.
+func _client_update_teaching(dt: float) -> void:
+	if player == null:
+		teach_progress = 0.0
+		return
+	var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
+	if hall.is_empty() or _my_clan_count() > CLAN_REFILL_AT:
+		teach_progress = 0.0
+		return
+	var inside: bool = Vector2(player.pos.x - hall["x"], player.pos.z - hall["z"]).length() < hall["r"]
+	if inside:
+		teach_progress = minf(1.0, teach_progress + dt / TEACH_TIME)
+	else:
+		teach_progress = maxf(0.0, teach_progress - dt / TEACH_TIME)
+
+# GUEST: the top-left status line (clan size, key, banked O₂). The host fills this on events
+# via _update_hud_status, but a guest never ran that path — so it had no clan count at all.
+func _client_update_status() -> void:
+	var have_key := bool(_net_rk.get(local_el, false))
+	var s := "Clan %d/%d   ·   Key: %s" % [_my_clan_count(), _clan_cap(), ("yes" if have_key else "no")]
+	if o2_charges > 0:
+		s += "   ·   O₂ %d/%d" % [o2_charges, O2_CHARGE_CAP]
+	ui.set_status(s)
+
 func _client_update_hud() -> void:
 	ui.set_hearts(player.hp, maxi(player.max_hp, player.hp))
 	if bool(_net_rt.get(local_el, false)):
@@ -3599,9 +3639,12 @@ func _client_update_hud() -> void:
 	for el in ["fire", "water", "grass"]:
 		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
 	ui.set_board(entries)
-	if mode == Mode.CLIENT:                  # host drives its own bar via _host_refresh_channel
+	if mode == Mode.CLIENT:                  # host drives its own status/bar via _host_* helpers
+		_client_update_status()
 		if train_progress > 0.0:
 			ui.set_channel("Self-training", train_progress)
+		elif teach_progress > 0.0:
+			ui.set_channel("Teaching clan", teach_progress)
 		else:
 			ui.set_channel("", -1.0)
 
