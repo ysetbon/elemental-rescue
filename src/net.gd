@@ -152,6 +152,7 @@ func _on_text(text: String) -> void:
 		"clan":     _on_guest_clan(m)       # host: a guest assigns a task to its clan
 		"sip":      _on_guest_sip(m)        # host: a guest sipped an O₂ (it charged locally; consume it)
 		"hit":      _on_guest_hit(m)        # host: a guest reports it was caught (validate + apply)
+		"catch":    _on_guest_catch(m)      # host: a guest reports it caught its prey (validate + apply)
 		"dbg":      _on_guest_dbg(m)        # host: QA telemetry from a guest (?netlog=1)
 		"lobby":    _on_lobby(m)            # guest
 		"start":    _on_start(m)            # guest
@@ -261,6 +262,11 @@ func _on_guest_hit(m: Dictionary) -> void:
 	if role == "host" and game != null and game.has_method("server_guest_caught"):
 		game.server_guest_caught(int(m.get("from", 0)), int(m.get("by", 0)))
 
+# host: a guest reports it caught prey `prey` (client-detected); validate + apply the hit.
+func _on_guest_catch(m: Dictionary) -> void:
+	if role == "host" and game != null and game.has_method("server_guest_catch"):
+		game.server_guest_catch(int(m.get("from", 0)), int(m.get("prey", 0)))
+
 # host: a guest reported its own smoothness telemetry (only when ?netlog=1). The relay
 # tagged it with `from`. The host prints a unified table so you watch one terminal.
 func _on_guest_dbg(m: Dictionary) -> void:
@@ -359,6 +365,10 @@ func send_sip(nid: int) -> void:
 func send_hit(by_nid: int) -> void:
 	if role == "guest":
 		_send({ "t": "hit", "by": by_nid })
+
+func send_catch(prey_nid: int) -> void:
+	if role == "guest":
+		_send({ "t": "catch", "prey": prey_nid })
 
 # Guest -> host: one input COMMAND per rendered frame (the exact (input, dt) the client
 # predicted with), stamped with a per-frame monotonic seq. Every frame is recorded; sends

@@ -202,9 +202,11 @@ var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
 var _net_clan := {}               # CLIENT: ally net_id(str) -> owner peer (from meta; JSON int keys arrive as strings)
 var _sel_clan: Dictionary = {}    # CLIENT/guest: selected own-ally net_id(int) -> true (host/single use a.selected instead)
+var _guest_clan_seen := false     # CLIENT: have I seen my own idle clan yet (one-shot "clan ready" toast)
 var _net_keyhold := {}            # CLIENT: el -> holder net_id (from meta; the carried key trails that actor)
 var _sipped := {}                 # CLIENT: O₂ net_ids I've already sipped this alive-instance (dedup)
 var _hit_cooldown := 0.0          # CLIENT: brief cooldown after reporting I was caught (anti-spam)
+var _catch_cooldown := 0.0        # CLIENT: brief cooldown after reporting I caught prey (anti-spam)
 var _scores := { "fire": 0, "water": 0, "grass": 0 }
 var _net_time_left := ROUND_TIME
 # SERVER rescue state, shared per element (one key/twin per team)
@@ -232,9 +234,10 @@ var _press_moved := false
 # --------------------------------------------------------- rescue-mode state
 var allies: Array = []           # [GameChar] recruited clan members (every player's, tagged by owner_peer online)
 var freed_twin: GameChar = null  # the rescued caged twin (escort target)
-var train_progress := 0.0        # 0..1 self-training channel
+var train_progress := 0.0        # 0..1 self-training channel (single-player / host's own / guest cosmetic)
 var teach_progress := 0.0        # 0..1 clan-hall channel (single-player / host's own)
 var teach_progress_by_peer: Dictionary = {}  # HOST: peer_id -> 0..1 clan-hall channel (per recruiting player)
+var train_progress_by_peer: Dictionary = {}  # HOST: peer_id -> 0..1 self-training channel (per training player)
 var clan_cooldown := 0.0
 var has_key := false
 var keys: Dictionary = {}        # el -> { "node": Node3D, "pos": Vector3, "hinted": bool }
@@ -1524,6 +1527,8 @@ func _check_catches() -> void:
 	for a in actors:
 		if not a.alive or inside_own_cave(a):
 			continue
+		if _is_remote_human(a):
+			continue        # a guest predator reports its OWN catches client-side (accurate to its view) → server_guest_catch
 		var prey: GameChar = null
 		var nd := 1.0e20
 		for p in by_el.get(ELEMENTS[a.el]["prey"], []):
@@ -1657,6 +1662,27 @@ func server_guest_caught(peer: int, by_nid: int) -> void:
 	_take_hit(prey, attacker)
 	if attacker.kind == "co2":
 		_co2_to_co(attacker)   # spent its oxygen tagging a human
+
+# HOST: a guest (predator `peer`) reported catching prey `prey_nid` — detected against the ghost
+# it saw. Validate the target really is its prey + roughly in range, then apply the hit (the host
+# stays authoritative; the catch just fires when the guest sees the overlap). _take_hit guards
+# the prey's alive/invuln so duplicate reports (incl. the prey's own being-caught report) no-op.
+func server_guest_catch(peer: int, prey_nid: int) -> void:
+	var pred: GameChar = peer_actor.get(peer)
+	if pred == null or not pred.alive:
+		return
+	var prey: GameChar = null
+	for c in actors:
+		if c.net_id == prey_nid:
+			prey = c
+			break
+	if prey == null or not prey.alive or inside_own_cave(prey) or inside_own_room(prey):
+		return
+	if prey.el != ELEMENTS[pred.el]["prey"]:
+		return
+	if pred.pos.distance_to(prey.pos) > CATCH_DIST + 4.0:   # generous (the prey ghost was ~½RTT behind)
+		return
+	_take_hit(prey, pred)
 
 func _is_disguised() -> bool:
 	return disguise_timer > 0.0
@@ -1904,13 +1930,30 @@ func _all_clan_assigned() -> bool:
 func _clan_assign_active() -> bool:
 	if not player:
 		return false
-	var mine := _my_clan()
-	if mine.is_empty() or not mine.any(func(a): return a.role == ""):
-		return false
 	var hall: Dictionary = clan_hall_by_owner.get(player.el, {})
 	if hall.is_empty():
 		return false
-	return Vector2(player.pos.x - hall["x"], player.pos.z - hall["z"]).length() < hall["r"] + 10.0
+	if Vector2(player.pos.x - hall["x"], player.pos.z - hall["z"]).length() >= hall["r"] + 10.0:
+		return false
+	# GUEST: my clan lives on the host as ghosts (the local `allies` array is empty), so the
+	# command view keys off my own idle ally GHOSTS instead — the bug where it never came up.
+	if mode == Mode.CLIENT:
+		return _guest_has_idle_clan()
+	var mine := _my_clan()
+	return not mine.is_empty() and mine.any(func(a): return a.role == "")
+
+# GUEST: do I have at least one of my own clan still unassigned? Reads the replicated ghost
+# flags (alive + the idle bit the host packs) and the clan-ownership map from meta.
+func _guest_has_idle_clan() -> bool:
+	if net == null:
+		return false
+	for nid in _net_actors:
+		if int(_net_clan.get(str(nid), -1)) != net.my_id:
+			continue
+		var fl := int((_net_actors[nid] as Dictionary).get("flags", 0))
+		if (fl & (1 << 4)) != 0 and (fl & (1 << 8)) != 0:   # alive + idle (unassigned) ally
+			return true
+	return false
 
 # the nearest thing menacing the player: their predator, or a still-dangerous CO₂
 func _nearest_threat_to_player(a: GameChar) -> GameChar:
@@ -2002,6 +2045,36 @@ func _host_update_teaching(dt: float) -> void:
 		else:
 			p = maxf(0.0, p - dt / TEACH_TIME)
 		teach_progress_by_peer[peer] = p
+
+# HOST: run self-training for EVERY human player — each standing on its element's training
+# totem (walled to enemies, so it's safe) accrues its own channel and earns +1 max heart.
+# Host-authoritative; guests show the bar locally (cosmetic) and learn the new max via meta.
+func _host_update_training(dt: float) -> void:
+	for ch in actors:
+		if not ch.is_human or not ch.alive:
+			continue
+		var peer: int = ch.peer_id
+		if ch.max_hp >= MAX_HP_CAP:
+			train_progress_by_peer[peer] = 0.0
+			continue
+		var pad: Dictionary = train_pad_by_owner.get(ch.el, {})
+		if pad.is_empty():
+			train_progress_by_peer[peer] = 0.0
+			continue
+		var on_pad: bool = Vector2(ch.pos.x - pad["x"], ch.pos.z - pad["z"]).length() < pad["r"]
+		var p: float = float(train_progress_by_peer.get(peer, 0.0))
+		if on_pad:
+			p += dt / TRAIN_TIME
+			if p >= 1.0:
+				p = 0.0
+				ch.max_hp = mini(MAX_HP_CAP, ch.max_hp + 1)
+				ch.hp = ch.max_hp
+				if _is_local_owner(peer):
+					ui.toast("Self-training complete — max hearts now %d!" % ch.max_hp)
+					_update_hud_hearts()
+		else:
+			p = maxf(0.0, p - dt / TRAIN_TIME)
+		train_progress_by_peer[peer] = p
 
 # Bring ONE owner's clan back up to strength: spawn fresh idle members owned by `owner_peer`
 # (element `el`) for the empty slots, then re-spread that owner's formation evenly. Online the
@@ -2357,6 +2430,8 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	key_carrier = null
 	train_progress = 0.0
 	teach_progress = 0.0
+	train_progress_by_peer.clear()
+	teach_progress_by_peer.clear()
 	clan_cooldown = 0.0
 	disguise_timer = 0.0
 	_next_net_id = 1
@@ -2686,10 +2761,13 @@ func _client_clear() -> void:
 	_net_keyhold.clear()
 	_sipped.clear()
 	_hit_cooldown = 0.0
+	_catch_cooldown = 0.0
 	_sel_clan.clear()
 	_net_clan.clear()
 	_net_actors.clear()
 	_pred_hist.clear()
+	train_progress = 0.0
+	_guest_clan_seen = false
 	_host_t_latest = 0.0
 	_host_off = 0.0
 	_host_off_init = false
@@ -2803,6 +2881,14 @@ func client_on_meta(meta: Dictionary) -> void:
 		_net_clan = meta["clan"]           # ally net_id -> owner peer (for own-clan selection)
 	if meta.has("kh"):
 		_net_keyhold = meta["kh"]          # el -> holder net_id (carried key trails this rescuer)
+	if meta.has("mhp") and player != null:
+		# my trained max hearts (host-authoritative). A rise = self-training just completed:
+		# clear my cosmetic bar and announce it (the host can't toast a guest directly).
+		var mh := int((meta["mhp"] as Dictionary).get(str(local_net_id), BASE_HP))
+		if mh > player.max_hp:
+			train_progress = 0.0
+			ui.toast("Self-training complete — max hearts now %d!" % mh)
+		player.max_hp = maxi(BASE_HP, mh)
 	if meta.has("kp"):
 		_client_sync_keys(meta["kp"])
 
@@ -2855,6 +2941,7 @@ func host_remove_peer(peer: int) -> void:
 	_cmd_queue.erase(peer)
 	_cmd_last_seq.erase(peer)
 	teach_progress_by_peer.erase(peer)
+	train_progress_by_peer.erase(peer)
 	for a in _clan_of(peer):               # disband the leaver's clan (avoid orphaned owner_peer)
 		_disperse_ally(a)
 	if peer_actor.has(peer):
@@ -2911,6 +2998,7 @@ func _host_process(delta: float) -> void:
 				else:
 					_update_o2(n, dt)
 		_host_update_teaching(dt)            # per-player clan recruiting at their hall
+		_host_update_training(dt)            # per-player self-training totem -> +1 max heart
 		for a in allies:
 			_update_ally(a, dt)              # host moves every player's clan (owner-relative)
 		_update_cave_timers(dt)
@@ -2918,6 +3006,7 @@ func _host_process(delta: float) -> void:
 		_server_rescue(dt)
 		_host_update_keys(dt)                # show the carried key above its rescuer on the host too
 		_host_sync_hud()
+		_host_refresh_channel()              # host's own training/teaching progress bar
 		_snap_accum += dt
 		if _snap_accum >= 1.0 / SNAP_HZ:
 			_snap_accum = 0.0
@@ -2974,6 +3063,21 @@ func _host_sync_hud() -> void:
 	has_key = bool(has_key_by_el.get(player.el, false))   # radar objective marker
 	freed_twin = twin_by_el.get(player.el)
 	_client_update_hud()
+
+# HOST: surface the host's OWN training / teaching channel bar (its avatar runs through the
+# same per-peer host updates as any player). Guests drive their own training bar locally.
+func _host_refresh_channel() -> void:
+	if ui == null:
+		return
+	var hid: int = net.my_id if net else 0
+	var tp := float(train_progress_by_peer.get(hid, 0.0))
+	var teach := float(teach_progress_by_peer.get(hid, 0.0))
+	if tp > 0.0:
+		ui.set_channel("Self-training", tp)
+	elif teach > 0.0:
+		ui.set_channel("Teaching clan", teach)
+	else:
+		ui.set_channel("", -1.0)
 
 # Move a human actor from its latest networked input (server-authoritative). Mirror
 # of _update_player's movement math, minus local-only stamina/o2/disguise/UI.
@@ -3062,6 +3166,7 @@ func _pack_flags(ch: GameChar) -> int:
 	if ch.co_timer > 0.0: f |= 1 << 5            # CO (spent / grey)
 	if ch.slow_timer > 0.0: f |= 1 << 6          # slowed (predator hit) → clients predict at half speed too
 	if ch.ally: f |= 1 << 7                       # recruited clan ally → clients render it scaled-down
+	if ch.ally and ch.role == "": f |= 1 << 8     # idle (unassigned) ally → guest raises the command view
 	return f
 
 func _broadcast_snapshot() -> void:
@@ -3112,6 +3217,10 @@ func _broadcast_snapshot() -> void:
 		for el in ["fire", "water", "grass"]:
 			if bool(has_key_by_el.get(el, false)):
 				kh[el] = int(key_holder_by_el.get(el, 0))
+		var mhp := {}                          # human net_id -> trained max hearts (only when above base)
+		for ch in actors:
+			if ch.is_human and ch.max_hp != BASE_HP:
+				mhp[ch.net_id] = ch.max_hp
 		meta = {
 			"tl": time_left,
 			"sc": { "fire": _team_score("fire"), "water": _team_score("water"), "grass": _team_score("grass") },
@@ -3120,6 +3229,7 @@ func _broadcast_snapshot() -> void:
 			"kp": kp,                          # el -> [x,z] (un-held key positions)
 			"kh": kh,                          # el -> holder net_id (carried key follows this rescuer)
 			"clan": clan,                      # ally net_id -> owner peer
+			"mhp": mhp,                        # human net_id -> trained max hearts (self-training)
 		}
 	if net:
 		net.broadcast_snapshot(data, meta)
@@ -3267,6 +3377,7 @@ func _client_process(delta: float) -> void:
 		_update_camera(dt)   # lobby/countdown backdrop; no prediction until GO
 		return
 	_client_predict_local(dt)
+	_client_update_training(dt)          # cosmetic self-training bar (host awards the heart via meta)
 	_client_render_remote(dt)
 	_client_update_carried_keys()        # float carried keys above their rescuer
 	_client_threat_check(dt)             # report catches/O₂ sips against the ghosts I actually see
@@ -3274,8 +3385,24 @@ func _client_process(delta: float) -> void:
 		_update_wind_leaves(minf(0.08, cd), time_ms)
 	_update_camera(dt)
 	_client_update_hud()
+	_client_clan_nudge()
 	if net_log:
 		_nl_guest_tick(dt)
+
+# GUEST: one-shot "your clan is ready" toast the first time my own clan appears (the host
+# can't toast a guest directly). The top-down command view then leads the assigning. Resets
+# when my clan is gone, so a fresh re-teach nudges again.
+func _client_clan_nudge() -> void:
+	var has_clan := false
+	for nid in _net_clan:
+		if int(_net_clan[nid]) == net.my_id:
+			has_clan = true
+			break
+	if has_clan and not _guest_clan_seen:
+		_guest_clan_seen = true
+		ui.toast("Your clan is ready! Stand by your clan hall, tap them and pick a task.")
+	elif not has_clan:
+		_guest_clan_seen = false
 
 func _client_predict_local(dt: float) -> void:
 	var mx := 0.0
@@ -3437,14 +3564,31 @@ func _client_render_remote(dt: float) -> void:
 		if net_log and player:
 			_nl_seen_min = minf(_nl_seen_min, _client_render_pos().distance_to(pos))
 		var g := _client_get_ghost(nid, int(a["flags"]))
-		g.visible = (int(a["flags"]) & (1 << 4)) != 0
+		g.visible = ((int(a["flags"]) & (1 << 4)) != 0) and not _sipped.has(nid)   # I sipped this O₂ → keep it hidden until the host confirms
 		g.position = pos
 		if spd > 0.5:
 			g.rotation.y = lerp_angle(g.rotation.y, yaw, 1.0 - pow(0.001, dt))
 		g.animate(time_ms, spd)
 
+# GUEST: predict my self-training bar locally so it fills smoothly while I stand on my
+# totem. Purely cosmetic — the host runs the authoritative channel and awards the heart
+# (which arrives as a higher max_hp in meta, clearing this bar). Mirrors _update_training.
+func _client_update_training(dt: float) -> void:
+	if player == null or player.max_hp >= MAX_HP_CAP:
+		train_progress = 0.0
+		return
+	var pad: Dictionary = train_pad_by_owner.get(player.el, {})
+	if pad.is_empty():
+		train_progress = 0.0
+		return
+	var on_pad: bool = Vector2(player.pos.x - pad["x"], player.pos.z - pad["z"]).length() < pad["r"]
+	if on_pad:
+		train_progress = minf(1.0, train_progress + dt / TRAIN_TIME)
+	else:
+		train_progress = maxf(0.0, train_progress - dt / TRAIN_TIME)
+
 func _client_update_hud() -> void:
-	ui.set_hearts(player.hp, maxi(BASE_HP, player.hp))
+	ui.set_hearts(player.hp, maxi(player.max_hp, player.hp))
 	if bool(_net_rt.get(local_el, false)):
 		ui.set_objective("Escort your twin home to your cave!")
 	elif bool(_net_rk.get(local_el, false)):
@@ -3455,6 +3599,11 @@ func _client_update_hud() -> void:
 	for el in ["fire", "water", "grass"]:
 		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
 	ui.set_board(entries)
+	if mode == Mode.CLIENT:                  # host drives its own bar via _host_refresh_channel
+		if train_progress > 0.0:
+			ui.set_channel("Self-training", train_progress)
+		else:
+			ui.set_channel("", -1.0)
 
 # ---- QA telemetry reporting (no-op unless net_log) -------------------------------------
 # GUEST: once a second, summarise own-avatar smoothness + ghost health and ship it to the
@@ -3573,31 +3722,41 @@ func _client_threat_check(dt: float) -> void:
 	if player == null or not player.alive or net == null:
 		return
 	_hit_cooldown = maxf(0.0, _hit_cooldown - dt)
+	_catch_cooldown = maxf(0.0, _catch_cooldown - dt)
 	var me := _client_render_pos()
 	var pred_el: String = ELEMENTS[local_el]["predator"]
-	var caught_nid := 0
+	var prey_el: String = ELEMENTS[local_el]["prey"]
+	var caught_nid := 0   # a predator/CO₂ touched me → I report being caught
+	var catch_nid := 0    # I touched my prey → I report the catch
 	for nid in _net_actors:
 		var node = ghosts.get(nid)
 		if node == null or not is_instance_valid(node):
 			continue
 		var flags := int((_net_actors[nid] as Dictionary).get("flags", 0))
 		var kind: String = _KIND_NAME[flags & 3]
+		var alive := (flags & (1 << 4)) != 0
 		var d := me.distance_to(node.position)
 		if kind == "o2":
-			if (flags & (1 << 4)) == 0:            # consumed/respawning → reset so the next instance can be sipped
+			if not alive:                          # consumed/respawning → reset so the next instance can be sipped
 				_sipped.erase(nid)
 			elif d < CATCH_DIST + 0.4 and not _sipped.has(nid):
 				_sipped[nid] = true
 				_gain_o2_charge()                  # instant local sprint boost
+				node.visible = false               # hide the molecule NOW (don't wait for the host)
 				net.send_sip(nid)                  # tell the host to consume it for everyone
-		elif caught_nid == 0 and _hit_cooldown <= 0.0 and d < CATCH_DIST:
-			var spent := (flags & (1 << 5)) != 0
+		elif alive and d < CATCH_DIST:
 			var el: String = _EL_NAME[(flags >> 2) & 3]
-			if (kind == "co2" and not spent) or (kind == "element" and el == pred_el):
-				caught_nid = int(nid)
+			var spent := (flags & (1 << 5)) != 0
+			if caught_nid == 0 and _hit_cooldown <= 0.0 and ((kind == "co2" and not spent) or (kind == "element" and el == pred_el)):
+				caught_nid = int(nid)            # something that eats me touched me
+			elif catch_nid == 0 and _catch_cooldown <= 0.0 and kind == "element" and el == prey_el:
+				catch_nid = int(nid)             # my prey — I caught it
 	if caught_nid != 0:
 		net.send_hit(caught_nid)
 		_hit_cooldown = HIT_INVULN
+	if catch_nid != 0:
+		net.send_catch(catch_nid)
+		_catch_cooldown = HIT_INVULN
 
 # GUEST: the host told us the round is over. Tear down the networked view, then show
 # the end screen.
