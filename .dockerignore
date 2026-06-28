@@ -1,0 +1,49 @@
+# .dockerignore — the Docker counterpart to .gitignore.
+#
+# When you run `docker build .`, Docker first sends the WHOLE folder (the "build
+# context") to the builder. Anything listed here is excluded from that upload, so
+# it never lands in the image. This keeps the image small, the build fast, and
+# secrets/junk out of the layers.
+#
+# For THIS relay we only need: server.js, package.json, package-lock.json.
+# The huge Godot game (web/, models/, scenes/, src/) is irrelevant to the Node
+# relay, so we exclude the heavy stuff explicitly.
+
+# Dependencies — these get reinstalled INSIDE the image by `npm ci`. Never copy a
+# host node_modules in: it may contain platform-specific binaries that break in
+# the Alpine container.
+node_modules/
+
+# Version control & editor noise
+.git/
+.gitignore
+.gitattributes
+.editorconfig
+
+# Godot project + exported game client — not used by the Node relay at all
+web/
+models/
+scenes/
+src/
+archive/
+.godot/
+project.godot
+export_presets.cfg
+elemental-tag.html
+icon.svg
+icon.svg.import
+
+# Docs & deploy config (not needed at runtime)
+docs/
+README.md
+render.yaml
+
+# Local build / QA artifacts
+build/
+scripts/nettest_logs/
+*.png
+
+# Don't copy Docker's own files into the image
+Dockerfile
+.dockerignore
+docker-compose.yml

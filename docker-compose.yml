@@ -1,0 +1,49 @@
+# docker-compose.yml — declare HOW to run the container, instead of typing a long
+# `docker run ...` every time.
+#
+# `docker run -p 8910:8910 --rm elemental-relay` works fine for one container, but
+# the flags live in your shell history and are easy to forget. Compose moves all
+# of that into this file, so the command becomes simply:
+#
+#     docker compose up --build      # build the image (if needed) + start it
+#     docker compose up -d           # ...detached (in the background)
+#     docker compose logs -f         # follow the logs
+#     docker compose down            # stop and remove everything
+#
+# Compose really shines with MULTIPLE services (e.g. a web app + a database +
+# a cache) wired together on one network. We only have the single relay here, so
+# this doubles as a clean, readable launcher AND a glimpse of how multi-service
+# stacks are described.
+
+services:
+  # "relay" is the service name. With more services, they'd reach each other by
+  # these names as hostnames (Compose gives them a shared private network).
+  relay:
+    # Build the image from the Dockerfile in this directory ("." = build context).
+    # Alternatively you could pull a prebuilt image with `image: someregistry/...`.
+    build: .
+
+    # A friendly fixed name for `docker ps` (otherwise Compose auto-generates one).
+    container_name: elemental-relay
+
+    # Port mapping — "HOST:CONTAINER". Left side is the port on YOUR machine, right
+    # side is the port inside the container (where server.js listens). Visit
+    # http://localhost:8910 to reach it. Change the left number to avoid a clash,
+    # e.g. "9000:8910".
+    ports:
+      - "8910:8910"
+
+    # Environment variables passed into the container. server.js reads these:
+    #   PORT             — which port to listen on (must match the container side above)
+    #   RELAY_LATENCY_MS — QA only: fake one-way network delay in ms (0 = off)
+    #   RELAY_JITTER_MS  — QA only: extra random delay 0..N ms (0 = off)
+    # Try uncommenting the latency knobs to feel how a laggy internet link plays.
+    environment:
+      - PORT=8910
+      # - RELAY_LATENCY_MS=80
+      # - RELAY_JITTER_MS=20
+
+    # Restart policy: if the relay crashes or the host reboots, bring it back —
+    # but not if you deliberately `docker compose down`. Good default for a
+    # long-running server.
+    restart: unless-stopped
