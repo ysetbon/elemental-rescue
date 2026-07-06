@@ -101,6 +101,9 @@ var train_pad_by_owner: Dictionary = {}   # el -> { "x","z","r" }
 var castle_grounds: Array = []            # [{ "x","z","r" }] — everything inside a curtain wall;
                                           # molecules / stones / wander targets stay OUT (wilderness)
 var key_spot_by_owner: Dictionary = {}    # el -> Vector3 treasury pedestal INSIDE that element's keep
+var tower_by_owner: Dictionary = {}       # el -> home-tower dict (see WorldBuilder._build_tower):
+                                          # 6 walkable floors + roof, spiral stair, furniture circles,
+                                          # sliding-bookshelf secret and portrait passage
 var deco_anims: Array = []       # [Callable(t_ms)]
 var wind_leaves: Array = []
 
@@ -233,9 +236,21 @@ const DECO_LITE_HZ := 20.0       # lite: run décor / wind-leaf animation at thi
 const PERF_SCALE_LITE := 0.75    # lite: render the 3D world at 75% then upscale (HUD stays sharp)
 const PERF_SCALE_GUEST := 0.60   # guests prioritize local responsiveness over visual sharpness
 var cam_yaw := 0.0
+var cam_pitch := 0.0             # first-person look pitch — only used inside the home tower
 var dragging := false
 var _press_pos := Vector2.ZERO
 var _press_moved := false
+
+# --------------------------------------------------------- home-tower state
+# Walking through your tower door switches to a first-person view of the
+# interior (6 floors + roof); walking out the door restores the chase camera.
+var tower_mode := false
+var _tower_shelf_t := 0.0        # 0..1 — the library's secret bookshelf sliding open
+var _tower_heart_claimed := false # the hidden nook's treasure: one bonus heart per round
+const TOWER_EYE := 1.55          # first-person eye height
+const TOWER_SPEED := 7.5         # indoor walk speed (sprint ×1.35, no stamina cost at home)
+const TOWER_STAIR_R := 2.55      # inside this radius of the tower centre you're on the spiral
+const TOWER_COL_R := 0.95        # central column keep-out
 
 # --------------------------------------------------------- rescue-mode state
 var allies: Array = []           # [GameChar] recruited clan members (every player's, tagged by owner_peer online)
@@ -511,6 +526,7 @@ func _rebuild_world(world_seed: int) -> void:
 	train_pad_by_owner.clear()
 	castle_grounds.clear()
 	key_spot_by_owner.clear()
+	tower_by_owner.clear()
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
@@ -604,7 +620,7 @@ func _process(delta: float) -> void:
 			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
 		ch.group.animate(time_ms, ch.vel.length())
 	# drive the black-figure disguise model so it mirrors the (now-hidden) player
-	if disguise_node and is_instance_valid(disguise_node) and player and _is_disguised():
+	if disguise_node and is_instance_valid(disguise_node) and player and _is_disguised() and not tower_mode:
 		disguise_node.position = player.pos
 		disguise_node.rotation.y = player.group.rotation.y
 		disguise_node.animate(time_ms, player.vel.length())
@@ -655,6 +671,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_click_select(event.position)
 	elif event is InputEventMouseMotion and dragging:
 		cam_yaw -= event.relative.x * 0.0052
+		if tower_mode:
+			cam_pitch = clampf(cam_pitch - event.relative.y * 0.0042, -1.15, 1.15)
 		if event.position.distance_to(_press_pos) > 6.0:
 			_press_moved = true
 
@@ -788,7 +806,13 @@ func server_assign_clan_task(peer: int, ids: Array, task: String) -> void:
 # ------------------------------------------------------------------ camera
 func _update_camera(dt: float) -> void:
 	if player:
-		if _clan_assign_active():
+		if tower_mode:
+			# first person: the world through your character's eyes
+			var eye := player.pos + Vector3(0, TOWER_EYE, 0)
+			camera.position = eye
+			var fwd := Vector3(-sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), -cos(cam_yaw) * cos(cam_pitch))
+			camera.look_at(eye + fwd, Vector3.UP)
+		elif _clan_assign_active():
 			# top-down command view, raised enough that the whole clan ring stays in frame
 			var hall: Dictionary = clan_hall_by_owner[player.el]
 			var cam_h := _assign_cam_height()
@@ -960,15 +984,20 @@ func _update_cave_timers(dt: float) -> void:
 		if ch.cave_cooldown > 0.0:
 			ch.cave_cooldown = maxf(0.0, ch.cave_cooldown - dt)
 		if inside_own_cave(ch):
-			ch.cave_time += dt
-			if ch.cave_time >= CAVE_MAX_STAY:
-				ch.cave_time = 0.0
-				_eject_from_cave(ch)
+			if ch.is_player and tower_mode:
+				ch.cave_time = 0.0   # at home in your own tower — stay as long as you like
+			else:
+				ch.cave_time += dt
+				if ch.cave_time >= CAVE_MAX_STAY:
+					ch.cave_time = 0.0
+					_eject_from_cave(ch)
 		else:
 			ch.cave_time = 0.0
 	if mode == Mode.SERVER:
 		return
-	if player and player.alive and inside_own_cave(player):
+	if player and player.alive and tower_mode:
+		ui.set_cave(_tower_floor_label(_tower()))
+	elif player and player.alive and inside_own_cave(player):
 		ui.set_cave("Home keep — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
 	elif player and player.cave_cooldown > 0.0:
 		ui.set_cave("Keep lockout %ds" % int(ceil(player.cave_cooldown)))
@@ -1378,6 +1407,12 @@ func _update_o2(ch: GameChar, dt: float) -> void:
 func _update_player(dt: float) -> void:
 	if not player or not player.alive:
 		return
+	if tower_mode:
+		_update_tower_player(dt)
+		return
+	_check_tower_gate()
+	if tower_mode:
+		return
 	var mx := 0.0
 	var mz := 0.0
 	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
@@ -1410,6 +1445,180 @@ func _update_player(dt: float) -> void:
 	resolve_collisions(player)
 	if sprint and player.vel.length_squared() > 40.0 and randf() < dt * 26.0:
 		_spawn_trail(player)
+
+# ------------------------------------------------------------ the home tower
+# Your castle's central tower is a private, walkable house: 6 floors joined by
+# a spiral staircase around the light column, and a roof terrace on top. Inside
+# it the game switches to a first-person view. Movement here uses the tower's
+# own collision (floor plates, the helix, furniture) instead of the world's 2D
+# sets, because the tower is the one place with real height.
+func _tower() -> Dictionary:
+	if player == null:
+		return {}
+	return tower_by_owner.get(player.el, {})
+
+# Cross the tower doorway (only reachable by the owner — the sanctum circle
+# walls everyone else out) and the view drops into your character's eyes.
+func _check_tower_gate() -> void:
+	if mode != Mode.SINGLE:
+		return   # single-player only for now — online movement is host-replayed in 2D
+	var t := _tower()
+	if t.is_empty():
+		return
+	if Vector2(player.pos.x - t["x"], player.pos.z - t["z"]).length() < float(t["r_in"]) - 0.15:
+		_enter_tower()
+
+func _enter_tower() -> void:
+	tower_mode = true
+	cam_pitch = 0.05
+	player.vel = Vector3.ZERO
+	player.group.visible = false
+	ui.toast("Home sweet tower! Spiral stairs, six floors, a roof — and a secret or two…")
+
+func _exit_tower(quiet: bool = false) -> void:
+	tower_mode = false
+	cam_pitch = 0.0
+	if player:
+		player.pos.y = 0.0
+		player.group.visible = true
+		player.group.position = player.pos
+	if not quiet:
+		ui.toast("Back outside — the rescue continues!")
+
+func _update_tower_player(dt: float) -> void:
+	var t := _tower()
+	if t.is_empty():
+		_exit_tower(true)
+		return
+	# --- input: WASD relative to where you're looking, like outdoors
+	var mx := 0.0
+	var mz := 0.0
+	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
+	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN): mz -= 1.0
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT): mx += 1.0
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT): mx -= 1.0
+	mx += touch_move.x
+	mz += touch_move.y
+	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
+	var target := Vector3.ZERO
+	if ln > 0.05:
+		var fx := -sin(cam_yaw)
+		var fz := -cos(cam_yaw)
+		var sprint := Input.is_key_pressed(KEY_SHIFT) or touch_sprint
+		target = Vector3(fx * mz - fz * mx, 0, fz * mz + fx * mx).normalized() \
+			* TOWER_SPEED * (1.35 if sprint else 1.0) * ln
+	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
+	var fh: float = t["floor_h"]
+	var top: float = float(t["levels"]) * fh
+	var p := player.pos + player.vel * dt
+	var rel := Vector2(p.x - t["x"], p.z - t["z"])
+	var r := rel.length()
+	var y := player.pos.y
+	if r < TOWER_STAIR_R:
+		# --- on the spiral: height follows the helix (one full turn per floor)
+		if r < TOWER_COL_R:
+			if r > 0.001:
+				rel = rel * (TOWER_COL_R / r)
+			else:
+				rel = Vector2(TOWER_COL_R, 0)
+			r = TOWER_COL_R
+		var ang := fposmod(atan2(rel.y, rel.x) - float(t["door_ang"]), TAU)
+		var base := ang / TAU * fh
+		var best := base
+		for k in range(1, int(t["levels"]) + 1):
+			if absf(base + k * fh - y) < absf(best - y):
+				best = base + k * fh
+		best = clampf(best, 0.0, top)
+		if absf(best - y) < 1.2:
+			y = best
+		else:
+			# stepping over the stairwell edge mid-air — stay on the floor plate
+			p = player.pos
+			rel = Vector2(p.x - t["x"], p.z - t["z"])
+			r = maxf(rel.length(), 0.001)
+	else:
+		# --- on a floor plate (or the roof terrace)
+		var lvl := clampi(int(round(y / fh)), 0, int(t["levels"]))
+		var ly := lvl * fh
+		if absf(y - ly) > 0.45:
+			# mid-flight on the stairs: an invisible rail keeps you on the helix
+			rel = rel * ((TOWER_STAIR_R - 0.05) / r)
+			r = TOWER_STAIR_R - 0.05
+		else:
+			y = ly
+			var door_d := absf(angle_difference(atan2(rel.y, rel.x), float(t["door_ang"])))
+			if lvl == 0 and door_d < 0.42:
+				pass   # the ground-floor doorway — walking out is allowed
+			elif r > float(t["r_in"]):
+				rel = rel * (float(t["r_in"]) / r)
+				r = float(t["r_in"])
+			var furn: Array = t["furn"][mini(lvl, t["furn"].size() - 1)]
+			for o in furn:
+				var dx := (t["x"] + rel.x) - float(o["x"])
+				var dz := (t["z"] + rel.y) - float(o["z"])
+				var dd := sqrt(dx * dx + dz * dz)
+				var mn := float(o["r"]) + 0.5
+				if dd < mn and dd > 0.001:
+					rel.x += dx / dd * (mn - dd)
+					rel.y += dz / dd * (mn - dd)
+			# the library's secret door blocks its nook until it has slid open
+			var sh: Dictionary = t["shelf"]
+			if lvl == int(sh["level"]) and _tower_shelf_t < 0.7:
+				var bx := (t["x"] + rel.x) - float(sh["block"]["x"])
+				var bz := (t["z"] + rel.y) - float(sh["block"]["z"])
+				var bd := sqrt(bx * bx + bz * bz)
+				var bmn := float(sh["block"]["r"]) + 0.5
+				if bd < bmn and bd > 0.001:
+					rel.x += bx / bd * (bmn - bd)
+					rel.y += bz / bd * (bmn - bd)
+	player.pos = Vector3(t["x"] + rel.x, y, t["z"] + rel.y)
+	player.group.position = player.pos
+	# walked out the front door?
+	if y < 0.2 and Vector2(player.pos.x - t["x"], player.pos.z - t["z"]).length() > float(t["r_in"]) + 1.2:
+		_exit_tower()
+		return
+	_tower_secrets(t, dt)
+
+# The tower's two secrets, Hogwarts-style: a bookshelf that slides aside for a
+# hidden treasure room, and a portrait hiding a ladder straight to the roof.
+func _tower_secrets(t: Dictionary, dt: float) -> void:
+	var fh: float = t["floor_h"]
+	var lvl := int(round(player.pos.y / fh))
+	if absf(player.pos.y - lvl * fh) > 0.45:
+		return   # on the stairs
+	var sh: Dictionary = t["shelf"]
+	if lvl == int(sh["level"]) and _tower_shelf_t < 1.0 \
+			and Vector2(player.pos.x - float(sh["zone"]["x"]), player.pos.z - float(sh["zone"]["z"])).length() < float(sh["zone"]["r"]):
+		if _tower_shelf_t == 0.0:
+			ui.toast("The bookshelf rumbles aside — a hidden room!")
+		_tower_shelf_t = minf(1.0, _tower_shelf_t + dt * 1.3)
+	var shelf_node: Node3D = sh.get("node")
+	if shelf_node and is_instance_valid(shelf_node):
+		var k := _tower_shelf_t * _tower_shelf_t * (3.0 - 2.0 * _tower_shelf_t)
+		shelf_node.position = (sh["closed"] as Vector3).lerp(sh["open"] as Vector3, k)
+	var nk: Dictionary = t["nook"]
+	if lvl == int(nk["level"]) and not _tower_heart_claimed \
+			and Vector2(player.pos.x - float(nk["x"]), player.pos.z - float(nk["z"])).length() < float(nk["r"]):
+		_tower_heart_claimed = true
+		player.max_hp = mini(MAX_HP_CAP, player.max_hp + 1)
+		player.hp = player.max_hp
+		_update_hud_hearts()
+		ui.toast("Secret treasure! Hearts refilled — max hearts now %d" % player.max_hp)
+	var ps: Dictionary = t["passage"]
+	if lvl == 0 and Vector2(player.pos.x - float(ps["x"]), player.pos.z - float(ps["z"])).length() < float(ps["r"]):
+		# whoosh — a hidden ladder behind the portrait, straight up to the roof
+		var out := Vector2(float(ps["x"]) - t["x"], float(ps["z"]) - t["z"]).normalized() * 3.9
+		player.pos = Vector3(t["x"] + out.x, float(t["levels"]) * fh, t["z"] + out.y)
+		player.vel = Vector3.ZERO
+		ui.toast("A ladder behind the portrait — up you go, straight to the roof!")
+
+func _tower_floor_label(t: Dictionary) -> String:
+	var fh: float = t["floor_h"]
+	var lvl := int(round(player.pos.y / fh))
+	if absf(player.pos.y - lvl * fh) > 0.45:
+		return "Home tower — on the spiral stairs"
+	var names := ["throne hall", "kitchen", "living room", "music room", "bedchamber", "library", "rooftop terrace"]
+	return "Home tower — %s" % names[clampi(lvl, 0, names.size() - 1)]
 
 # ------------------------------------------------------------------ trails
 func _spawn_trail(ch: GameChar) -> void:
@@ -1776,6 +1985,8 @@ func _respawn(ch: GameChar) -> void:
 		if ch.group:
 			ch.group.position = ch.pos
 	if ch.is_player:
+		if tower_mode:
+			_exit_tower(true)
 		ui.toast("Caught! Back to your castle.")
 		_update_hud_hearts()
 
@@ -2462,6 +2673,16 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	clan_cooldown = 0.0
 	disguise_timer = 0.0
 	_next_net_id = 1
+	# fresh round: step out of the tower and re-arm its secrets
+	if tower_mode:
+		_exit_tower(true)
+	_tower_shelf_t = 0.0
+	_tower_heart_claimed = false
+	for el in tower_by_owner:
+		var sh: Dictionary = tower_by_owner[el]["shelf"]
+		var shn: Node3D = sh.get("node")
+		if shn and is_instance_valid(shn):
+			shn.position = sh["closed"]
 	WorldBuilder.reset_cages(self)
 	var human_count := { "fire": 0, "water": 0, "grass": 0 }
 	for h in humans:

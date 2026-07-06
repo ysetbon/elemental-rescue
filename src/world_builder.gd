@@ -33,6 +33,15 @@ const KEEP_SOLID := 3.2      # solid stone below this height; tinted glass-stone
 const KEEP_DOOR_HALF := 4.0  # keep door half-width (8 wide)
 const HOME_R := 6.0          # the sanctum circle at the keep's heart = the home "cave"
 
+# ---- the home tower: a walkable 6-floor house rising from the keep's centre.
+# Only its owner can reach it (the sanctum circle walls everyone else out), and
+# game.gd switches to a first-person view inside. One spiral turn = one floor.
+const TOWER_R := 6.0         # outer wall radius (matches the sanctum circle)
+const TOWER_IN_R := 5.15     # interior walk boundary
+const TOWER_FLOOR_H := 3.6
+const TOWER_LEVELS := 6      # walkable levels 0..6, where 6 is the roof terrace
+const TOWER_DOOR_HALF := 0.45  # doorway half-angle (≈4.6u wide at the wall)
+
 static var _root: Node3D
 static var _game
 
@@ -407,17 +416,17 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 			_add_tower(w.x, w.y, 1.6, KEEP_H + 2.0, stone, col, false)
 
 	# --- interior partitions (chest-high so the camera reads the rooms) ---
-	# cross wall separating the great hall (front) from the two bedchambers (back)
+	# side walls toward the bedchambers; the tower's curved wall closes the middle
 	_cwall(cd, -3.0, -10.9, 0.6, 4.25, 3.0, stone_dark)
-	_cwall(cd, -3.0, 0.0, 0.6, 8.5, 3.0, stone_dark)
 	_cwall(cd, -3.0, 10.9, 0.6, 4.25, 3.0, stone_dark)
-	# spine wall splitting the back into two bedchambers
-	_cwall(cd, -7.0, 0.0, 8.0, 0.6, 3.0, stone_dark)
+	# spine wall splitting the back into two bedchambers (stops at the tower)
+	_cwall(cd, -8.6, 0.0, 4.8, 0.6, 3.0, stone_dark)
 
 	# --- the sanctum: home glow + beacon (this circle is the "cave" — safe for
-	# its element, walled to everyone else, and where the rescued twin must reach)
+	# its element, walled to everyone else, and where the rescued twin must reach).
+	# The HOME TOWER rises from this exact circle — its ground hall IS home.
 	var w0 := _lw(cd, 0.0, 0.0)
-	var glow := MeshLib.disc(HOME_R - 1.0, MeshLib.unlit_mat(col, 0.18), 22)
+	var glow := MeshLib.disc(HOME_R - 1.6, MeshLib.unlit_mat(col, 0.18), 22)
 	glow.position = Vector3(w0.x, 0.1, w0.y)
 	_add(glow)
 	_add_beam(w0.x, w0.y, col)
@@ -426,14 +435,14 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 		"openAngle": atan2(g.y, g.x), "radarFill": col }
 	_game.caves.append(cave)
 	_game.cave_by_owner[el] = cave
+	_build_tower(el, cd, col, tint, stone, stone_dark)
 
 	# --- great hall furnishing ---
-	# carpet from the door to the sanctum
-	var carpet := MeshLib.box(_lsz(cd, 13.0, 3.4).x, 0.05, _lsz(cd, 13.0, 3.4).y, MeshLib.unlit_mat(col, 0.45))
-	var cw := _lw(cd, 4.5, 0.0)
+	# carpet from the keep door to the tower door
+	var carpet := MeshLib.box(_lsz(cd, 5.0, 3.4).x, 0.05, _lsz(cd, 5.0, 3.4).y, MeshLib.unlit_mat(col, 0.45))
+	var cw := _lw(cd, 8.5, 0.0)
 	carpet.position = Vector3(cw.x, 0.1, cw.y)
 	_add(carpet)
-	_add_throne(cd, col)
 	# treasury nook: the dais where a raiding rival finds ITS key (game.gd
 	# reads key_spot_by_owner and parks each element's key in its predator's keep)
 	var ped_w := _add_key_dais(cd, 6.0, -9.5, col)
@@ -464,7 +473,464 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 		rug.position = Vector3(rw.x, 0.09, rw.y)
 		_add(rug)
 
-static func _add_throne(cd: Dictionary, col: Color) -> void:
+# ------------------------------------------------------------ the home tower
+# Position on the tower's own polar grid: `ang` is the local angle measured
+# from the door direction, `rr` the distance from the tower centre.
+static func _tw(cd: Dictionary, rr: float, ang: float) -> Vector2:
+	return _lw(cd, cos(ang) * rr, sin(ang) * rr)
+
+# World yaw of the door direction (+u); local angle a sits at door_ang + a.
+static func _door_ang(cd: Dictionary) -> float:
+	var g: Vector2 = cd["gate"]
+	return atan2(g.y, g.x)
+
+# Place a node at polar (rr, ang), y0 up. face_in: +Z toward the tower centre
+# (furniture backed against the curved wall); otherwise +Z runs tangentially.
+static func _tower_place(cd: Dictionary, node: Node3D, rr: float, ang: float, face_in: bool, y0: float = 0.0) -> Vector2:
+	var w := _tw(cd, rr, ang)
+	var wa := _door_ang(cd) + ang
+	node.position = Vector3(w.x, y0, w.y)
+	node.rotation.y = atan2(-cos(wa), -sin(wa)) if face_in else -wa
+	_add(node)
+	return w
+
+static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, stone: Material, stone_dark: Material) -> void:
+	var fh := TOWER_FLOOR_H
+	var top := TOWER_LEVELS * fh
+	var w0 := _lw(cd, 0.0, 0.0)
+	# furniture-collision circles per level (game.gd walks the tower on these)
+	var furn: Array = []
+	for i in TOWER_LEVELS + 1:
+		furn.append([])
+	var blk := func(lvl: int, w: Vector2, r: float) -> void:
+		furn[lvl].append({ "x": w.x, "z": w.y, "r": r })
+
+	# --- interior wall material must show its inside faces (the camera lives here)
+	var wall_in := StandardMaterial3D.new()
+	wall_in.albedo_color = MeshLib.rgb(0xb9bcc8)
+	wall_in.roughness = 1.0
+	wall_in.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var floor_mat := MeshLib.lit_mat(MeshLib.rgb(0xcabfa8))
+	var wood := MeshLib.lit_mat(MeshLib.rgb(0x7a5a3a))
+	var gold := MeshLib.lit_mat(MeshLib.rgb(0xc9a23f))
+
+	# --- ground storey: an arc of wall segments leaving the doorway open
+	var segs := 18
+	for i in segs:
+		var a := TOWER_DOOR_HALF + (TAU - TOWER_DOOR_HALF * 2.0) * (float(i) + 0.5) / segs
+		var wseg := MeshLib.box(0.5, fh, 2.05, stone)
+		var w := _tower_place(cd, wseg, TOWER_R - 0.25, a, false, fh / 2.0)
+		wseg.position.y = fh / 2.0
+		_obstacle(w.x, w.y, 1.0)     # world-side collision (AI, twin, pre-entry player)
+	# door jambs + lintel + a step
+	for s in [-1.0, 1.0]:
+		var jamb := MeshLib.box(0.7, fh, 0.7, stone_dark)
+		var wj := _tower_place(cd, jamb, TOWER_R - 0.2, s * TOWER_DOOR_HALF, false, fh / 2.0)
+		jamb.position.y = fh / 2.0
+		_obstacle(wj.x, wj.y, 0.55)
+	var lintel := MeshLib.box(0.8, 1.2, TOWER_R * 2.0 * sin(TOWER_DOOR_HALF) + 1.4, stone_dark)
+	_tower_place(cd, lintel, TOWER_R - 0.2, 0.0, false, fh - 0.6)
+	var step := MeshLib.box(0.22, 0.22, 3.6, stone_dark)
+	_tower_place(cd, step, TOWER_R + 0.55, 0.0, false, 0.11)
+
+	# --- upper storeys: open tubes (double-sided) + a tinted band at each floor line
+	for f in range(1, TOWER_LEVELS):
+		var tube := CylinderMesh.new()
+		tube.top_radius = TOWER_R - 0.12
+		tube.bottom_radius = TOWER_R
+		tube.height = fh
+		tube.radial_segments = 20
+		tube.cap_top = false
+		tube.cap_bottom = false
+		var tm := MeshLib.mi(tube, wall_in)
+		tm.position = Vector3(w0.x, f * fh + fh / 2.0, w0.y)
+		_add(tm)
+	for f in range(1, TOWER_LEVELS + 1):
+		var band := MeshLib.cyl(TOWER_R + 0.14, TOWER_R + 0.14, 0.34, MeshLib.lit_mat(tint), 20)
+		band.position = Vector3(w0.x, f * fh, w0.y)
+		_add(band)
+
+	# --- small windows: warm slits poking through the wall (seen inside and out)
+	for f in range(1, TOWER_LEVELS):
+		for a in [0.55, 2.2, 4.75]:
+			var win := MeshLib.box(0.8, 1.15, 0.62, MeshLib.unlit_mat(MeshLib.rgb(0xfff0c0)))
+			_tower_place(cd, win, TOWER_R - 0.1, a, false, f * fh + 1.9)
+
+	# --- floor plates: rings of wedges leaving the central stairwell open
+	var nplate := 14
+	for f in range(1, TOWER_LEVELS + 1):
+		for i in nplate:
+			var a := TAU * (float(i) + 0.5) / nplate
+			var plate := MeshLib.box(2.75, 0.22, 1.98, floor_mat)
+			_tower_place(cd, plate, 3.95, a, false, f * fh - 0.11)
+		var rim := TorusMesh.new()
+		rim.inner_radius = 2.5
+		rim.outer_radius = 2.66
+		var rim_mi := MeshLib.mi(rim, wood)
+		rim_mi.position = Vector3(w0.x, f * fh + 0.02, w0.y)
+		_add(rim_mi)
+
+	# --- the spiral: central column + one turn of steps per floor
+	var column := MeshLib.cyl(0.45, 0.55, top + 1.6, stone_dark, 12)
+	column.position = Vector3(w0.x, (top + 1.6) / 2.0, w0.y)
+	_add(column)
+	_obstacle(w0.x, w0.y, 1.0)
+	var step_mat := MeshLib.lit_mat(MeshLib.rgb(0xb2a88e))
+	for i in 12 * TOWER_LEVELS:
+		var a := TAU * float(i) / 12.0
+		var sy := fh * float(i) / 12.0
+		var st := MeshLib.box(1.9, 0.14, 0.85, step_mat)
+		_tower_place(cd, st, 1.7, a, false, sy - 0.07)
+
+	# --- roof terrace: parapet ring, banner pole, brazier and a stargazing scope
+	for i in 16:
+		var a := TAU * (float(i) + 0.5) / 16.0
+		var par := MeshLib.box(0.45, 1.15, 2.2, stone)
+		_tower_place(cd, par, TOWER_R - 0.22, a, false, top + 0.57)
+		if i % 2 == 0:
+			var mer := MeshLib.box(0.5, 0.5, 1.0, stone_dark)
+			_tower_place(cd, mer, TOWER_R - 0.22, a, false, top + 1.4)
+	var pole := MeshLib.cyl(0.07, 0.07, 3.2, MeshLib.lit_mat(MeshLib.rgb(0x97816a)), 6)
+	pole.position = Vector3(w0.x, top + 2.2, w0.y)
+	_add(pole)
+	var rflag := MeshLib.box(1.6, 0.95, 0.08, MeshLib.unlit_mat(col))
+	rflag.position = Vector3(w0.x + 0.9, top + 3.2, w0.y)
+	_add(rflag)
+	var rbraz_w := _tw(cd, 3.8, 2.6)
+	var rbowl := MeshLib.cyl(0.6, 0.4, 0.7, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 10)
+	rbowl.position = Vector3(rbraz_w.x, top + 0.35, rbraz_w.y)
+	_add(rbowl)
+	var rflame := MeshLib.sphere(0.3, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
+	rflame.position = Vector3(rbraz_w.x, top + 0.9, rbraz_w.y)
+	_add(rflame)
+	blk.call(6, rbraz_w, 0.7)
+	var scope := Node3D.new()
+	var barrel := MeshLib.cyl(0.14, 0.2, 1.6, gold, 8)
+	barrel.rotation.x = 1.0
+	barrel.position.y = 1.3
+	scope.add_child(barrel)
+	for si in 3:
+		var leg := MeshLib.cyl(0.05, 0.05, 1.1, wood, 5)
+		var la := si * TAU / 3.0
+		leg.position = Vector3(cos(la) * 0.4, 0.55, sin(la) * 0.4)
+		leg.rotation.z = cos(la) * 0.35
+		leg.rotation.x = -sin(la) * 0.35
+		scope.add_child(leg)
+	var scope_w := _tower_place(cd, scope, 3.8, 5.6, true, top)
+	blk.call(6, scope_w, 0.7)
+
+	# ================= the six floors of home =================
+	# L0 — throne hall (also the sanctum the twin must reach)
+	var thr_w := _add_throne(cd, 3.6, PI, col)
+	blk.call(0, thr_w, 1.0)
+	_obstacle(thr_w.x, thr_w.y, 0.9)
+	var hearth0 := _add_hearth(cd, 4.55, 1.85, 0.0)
+	blk.call(0, hearth0, 0.9)
+	_obstacle(hearth0.x, hearth0.y, 0.8)
+	_add_portrait(el, cd, cos(2.6) * 4.68, sin(2.6) * 4.68, -cos(2.6), -sin(2.6))
+	for ba in [0.9, 5.4]:
+		var bench := MeshLib.box(2.0, 0.5, 0.6, wood)
+		var wb := _tower_place(cd, bench, 4.3, ba, false, 0.25)
+		blk.call(0, wb, 0.8)
+		_obstacle(wb.x, wb.y, 0.7)
+	# the SECRET portrait — walk into it and a hidden ladder whisks you to the roof
+	_add_portrait(el, cd, cos(4.3) * 4.68, sin(4.3) * 4.68, -cos(4.3), -sin(4.3))
+	var pass_w := _tw(cd, 4.3, 4.3)
+
+	# L1 — kitchen
+	var hearth1 := _add_hearth(cd, 4.55, PI, fh)
+	blk.call(1, hearth1, 0.9)
+	var ktable := Node3D.new()
+	var ttop := MeshLib.box(2.6, 0.12, 1.2, wood)
+	ttop.position.y = 0.78
+	ktable.add_child(ttop)
+	for s in [-1.0, 1.0]:
+		var tleg := MeshLib.box(0.14, 0.72, 1.0, wood)
+		tleg.position = Vector3(s * 1.1, 0.36, 0)
+		ktable.add_child(tleg)
+	for pi2 in 2:
+		var pot := MeshLib.cyl(0.22, 0.18, 0.28, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 8)
+		pot.position = Vector3(-0.7 + pi2 * 1.3, 0.98, 0.1)
+		ktable.add_child(pot)
+	var bread := MeshLib.sphere(0.2, MeshLib.lit_mat(MeshLib.rgb(0xd8a860)), 8, 6)
+	bread.scale = Vector3(1.4, 0.7, 0.9)
+	bread.position = Vector3(0.2, 0.95, -0.3)
+	ktable.add_child(bread)
+	var ktw := _tower_place(cd, ktable, 3.7, 4.6, false, fh)
+	blk.call(1, ktw, 1.2)
+	for sa in [4.0, 5.2]:
+		var stool := MeshLib.cyl(0.3, 0.26, 0.55, wood, 8)
+		var ws := _tower_place(cd, stool, 2.9, sa, false, fh + 0.27)
+		blk.call(1, ws, 0.45)
+	var shelfk := MeshLib.box(2.2, 0.14, 0.5, wood)
+	_tower_place(cd, shelfk, 4.65, 1.1, false, fh + 1.9)
+	for mi2 in 3:
+		var mug := MeshLib.cyl(0.11, 0.11, 0.22, MeshLib.lit_mat(MeshLib.rgb([0xc46a5a, 0x6d9ce9, 0xe8d8b0][mi2])), 6)
+		_tower_place(cd, mug, 4.62, 0.96 + mi2 * 0.14, false, fh + 2.05)
+	var barrelk := MeshLib.cyl(0.42, 0.48, 0.85, wood, 10)
+	var wbar := _tower_place(cd, barrelk, 4.5, 0.55, false, fh + 0.42)
+	blk.call(1, wbar, 0.65)
+
+	# L2 — living room
+	for ca in [2.15, 4.15]:
+		var sofa := Node3D.new()
+		var seat2 := MeshLib.box(2.3, 0.5, 0.9, MeshLib.lit_mat(col.lightened(0.35)))
+		seat2.position.y = 0.35
+		sofa.add_child(seat2)
+		var back2 := MeshLib.box(2.3, 0.7, 0.25, MeshLib.lit_mat(col.lightened(0.2)))
+		back2.position = Vector3(0, 0.85, -0.35)
+		sofa.add_child(back2)
+		var ws2 := _tower_place(cd, sofa, 3.9, ca, true, 2.0 * fh)
+		blk.call(2, ws2, 1.2)
+	var lrug := MeshLib.disc(1.8, MeshLib.unlit_mat(col, 0.25), 18)
+	lrug.position = Vector3(_tw(cd, 3.4, PI).x, 2.0 * fh + 0.06, _tw(cd, 3.4, PI).y)
+	_add(lrug)
+	var ltab := MeshLib.box(1.2, 0.5, 0.8, wood)
+	var wlt := _tower_place(cd, ltab, 3.4, PI, false, 2.0 * fh + 0.25)
+	blk.call(2, wlt, 0.75)
+	var hearth2 := _add_hearth(cd, 4.55, 0.9, 2.0 * fh)
+	blk.call(2, hearth2, 0.9)
+	_add_portrait(el, cd, cos(5.5) * 4.68, sin(5.5) * 4.68, -cos(5.5), -sin(5.5), 2.0 * fh)
+
+	# L3 — MUSIC ROOM: piano, cello, violin (and drifting notes)
+	var piano_w := _add_piano(cd, 3.9, PI, 3.0 * fh)
+	blk.call(3, piano_w, 1.5)
+	var cello_w := _add_cello(cd, 4.2, 1.7, 3.0 * fh)
+	blk.call(3, cello_w, 0.7)
+	var viol := Node3D.new()
+	var vtab := MeshLib.box(1.0, 0.75, 0.7, wood)
+	vtab.position.y = 0.37
+	viol.add_child(vtab)
+	var vbody := MeshLib.sphere(0.22, MeshLib.lit_mat(MeshLib.rgb(0xa06a3a)), 10, 8)
+	vbody.scale = Vector3(0.8, 0.35, 1.3)
+	vbody.position = Vector3(0, 0.85, 0.05)
+	viol.add_child(vbody)
+	var vneck := MeshLib.box(0.07, 0.05, 0.55, MeshLib.lit_mat(MeshLib.rgb(0x3a2c20)))
+	vneck.position = Vector3(0, 0.88, -0.4)
+	viol.add_child(vneck)
+	var wv := _tower_place(cd, viol, 4.2, 4.6, true, 3.0 * fh)
+	blk.call(3, wv, 0.7)
+	var mstool := MeshLib.cyl(0.32, 0.28, 0.6, wood, 8)
+	var wms := _tower_place(cd, mstool, 2.95, PI - 0.75, false, 3.0 * fh + 0.3)
+	blk.call(3, wms, 0.45)
+	if not _game.lite:
+		for ni in 3:
+			var note := Node3D.new()
+			var head := MeshLib.sphere(0.13, MeshLib.unlit_mat(MeshLib.rgb(0x2a2733)), 8, 6)
+			head.scale = Vector3(1.2, 0.85, 1.0)
+			note.add_child(head)
+			var stem := MeshLib.box(0.04, 0.55, 0.04, MeshLib.unlit_mat(MeshLib.rgb(0x2a2733)))
+			stem.position = Vector3(0.13, 0.3, 0)
+			note.add_child(stem)
+			var na := 2.6 + ni * 0.5
+			var nw := _tw(cd, 3.3, na)
+			var base_y := 3.0 * fh + 1.7 + ni * 0.3
+			note.position = Vector3(nw.x, base_y, nw.y)
+			_add(note)
+			var ph := ni * 2.1
+			_game.deco_anims.append(func(t: float) -> void:
+				note.position.y = base_y + sin(t * 0.0021 + ph) * 0.25
+				note.rotation.y = sin(t * 0.0013 + ph) * 0.5)
+
+	# L4 — bedchamber
+	var bed_w := _add_tower_bed(cd, 3.95, PI, col, 4.0 * fh)
+	blk.call(4, bed_w, 1.3)
+	var ward := Node3D.new()
+	var wbody := MeshLib.box(1.7, 2.5, 0.7, wood)
+	wbody.position.y = 1.25
+	ward.add_child(wbody)
+	var wline := MeshLib.box(0.04, 2.1, 0.06, MeshLib.lit_mat(MeshLib.rgb(0x4a3826)))
+	wline.position = Vector3(0, 1.25, 0.36)
+	ward.add_child(wline)
+	var ww := _tower_place(cd, ward, 4.4, 1.9, true, 4.0 * fh)
+	blk.call(4, ww, 1.0)
+	var desk := Node3D.new()
+	var dtop := MeshLib.box(1.4, 0.1, 0.8, wood)
+	dtop.position.y = 0.75
+	desk.add_child(dtop)
+	for s in [-1.0, 1.0]:
+		var dleg := MeshLib.box(0.1, 0.72, 0.7, wood)
+		dleg.position = Vector3(s * 0.6, 0.36, 0)
+		desk.add_child(dleg)
+	var candle := MeshLib.cyl(0.06, 0.06, 0.3, MeshLib.unlit_mat(MeshLib.rgb(0xf6f0dc)), 6)
+	candle.position = Vector3(0.3, 0.95, 0)
+	desk.add_child(candle)
+	var cflame := MeshLib.sphere(0.08, MeshLib.unlit_mat(MeshLib.rgb(0xffc060)), 8, 6)
+	cflame.position = Vector3(0.3, 1.14, 0)
+	desk.add_child(cflame)
+	var wd := _tower_place(cd, desk, 4.3, 4.5, true, 4.0 * fh)
+	blk.call(4, wd, 0.85)
+	var brug := MeshLib.disc(1.5, MeshLib.unlit_mat(col, 0.22), 16)
+	brug.position = Vector3(_tw(cd, 3.3, 5.6).x, 4.0 * fh + 0.06, _tw(cd, 3.3, 5.6).y)
+	_add(brug)
+	_add_portrait(el, cd, cos(0.8) * 4.68, sin(0.8) * 4.68, -cos(0.8), -sin(0.8), 4.0 * fh)
+
+	# L5 — library, with the sliding-bookshelf SECRET room
+	for ba2 in [0.9, 1.6, 4.6, 5.3]:
+		var bw := _add_bookshelf(cd, 4.6, ba2, 5.0 * fh)
+		blk.call(5, bw, 0.75)
+	var chair := Node3D.new()
+	var cseat := MeshLib.box(0.9, 0.45, 0.9, MeshLib.lit_mat(col.lightened(0.3)))
+	cseat.position.y = 0.35
+	chair.add_child(cseat)
+	var cback := MeshLib.box(0.9, 0.9, 0.2, MeshLib.lit_mat(col.lightened(0.15)))
+	cback.position = Vector3(0, 0.85, -0.35)
+	chair.add_child(cback)
+	var wch := _tower_place(cd, chair, 3.7, 5.9, true, 5.0 * fh)
+	blk.call(5, wch, 0.7)
+	# hidden nook: walled slice of the floor, its doorway sealed by a bookshelf
+	# (see game.gd _tower_secrets — walking up to it slides the shelf into the wall)
+	var nook_a1 := 2.75
+	var nook_a2 := 3.65
+	var nwall := MeshLib.box(2.15, 3.0, 0.35, stone_dark)
+	_tower_place(cd, nwall, 3.97, nook_a2, false, 5.0 * fh + 1.5)
+	for rr2 in [3.3, 4.6]:
+		blk.call(5, _tw(cd, rr2, nook_a2), 0.6)
+	var iwall := MeshLib.box(0.35, 3.0, 2.3, stone_dark)
+	_tower_place(cd, iwall, 2.95, (nook_a1 + nook_a2) / 2.0, false, 5.0 * fh + 1.5)
+	blk.call(5, _tw(cd, 2.95, 3.05), 0.55)
+	blk.call(5, _tw(cd, 2.95, 3.4), 0.55)
+	var shelf_door := _make_bookshelf_node(2.0)
+	var shelf_closed_w := _tw(cd, 3.95, nook_a1)
+	var shelf_wa := _door_ang(cd) + nook_a1
+	shelf_door.position = Vector3(shelf_closed_w.x, 5.0 * fh, shelf_closed_w.y)
+	shelf_door.rotation.y = -shelf_wa + PI   # spine along the radial line, books facing the library
+	_add(shelf_door)
+	var shelf_closed := shelf_door.position
+	var shelf_open := shelf_closed + Vector3(cos(shelf_wa), 0, sin(shelf_wa)) * 2.05  # slides into the outer wall
+	# the treasure inside
+	var chest := Node3D.new()
+	var cbody := MeshLib.box(1.5, 0.7, 0.9, MeshLib.lit_mat(MeshLib.rgb(0x7a5a3a)))
+	cbody.position.y = 0.35
+	chest.add_child(cbody)
+	var clid := MeshLib.box(1.5, 0.3, 0.9, MeshLib.lit_mat(MeshLib.rgb(0x6a4c30)))
+	clid.position.y = 0.82
+	chest.add_child(clid)
+	var cband := MeshLib.box(1.56, 0.14, 0.96, gold)
+	cband.position.y = 0.62
+	chest.add_child(cband)
+	var chest_w := _tower_place(cd, chest, 4.55, 3.35, true, 5.0 * fh)
+	blk.call(5, chest_w, 0.6)
+	var sparkle := MeshLib.sphere(0.18, MeshLib.unlit_mat(col, 0.9), 8, 6)
+	var sp_w := _tw(cd, 4.3, 3.35)
+	sparkle.position = Vector3(sp_w.x, 5.0 * fh + 1.3, sp_w.y)
+	_add(sparkle)
+	var ngw := _tw(cd, 3.9, 3.15)
+	var nglow := MeshLib.disc(0.9, MeshLib.unlit_mat(col, 0.2), 12)
+	nglow.position = Vector3(ngw.x, 5.0 * fh + 0.05, ngw.y)
+	_add(nglow)
+
+	# --- register it all for game.gd
+	var zone_w := _tw(cd, 3.95, nook_a1 - 0.55)
+	var nook_w := _tw(cd, 3.95, 3.2)
+	_game.tower_by_owner[el] = {
+		"x": w0.x, "z": w0.y,
+		"door_ang": _door_ang(cd),
+		"r_in": TOWER_IN_R, "floor_h": fh, "levels": TOWER_LEVELS,
+		"furn": furn,
+		"shelf": {
+			"level": 5, "node": shelf_door, "closed": shelf_closed, "open": shelf_open,
+			"zone": { "x": zone_w.x, "z": zone_w.y, "r": 1.5 },
+			"block": { "x": shelf_closed_w.x, "z": shelf_closed_w.y, "r": 1.1 },
+		},
+		"nook": { "level": 5, "x": nook_w.x, "z": nook_w.y, "r": 1.1 },
+		"passage": { "x": pass_w.x, "z": pass_w.y, "r": 1.0 },
+	}
+
+# A hearth: stone surround + fire glow, backed against the tower wall.
+static func _add_hearth(cd: Dictionary, rr: float, ang: float, y0: float) -> Vector2:
+	var n := Node3D.new()
+	var stone_d := MeshLib.lit_mat(MeshLib.rgb(0x8e8a96))
+	var back := MeshLib.box(1.8, 1.7, 0.4, stone_d)
+	back.position = Vector3(0, 0.85, -0.3)
+	n.add_child(back)
+	for s in [-1.0, 1.0]:
+		var post := MeshLib.box(0.35, 1.3, 0.5, stone_d)
+		post.position = Vector3(s * 0.75, 0.65, 0.05)
+		n.add_child(post)
+	var mantel := MeshLib.box(1.9, 0.22, 0.65, stone_d)
+	mantel.position = Vector3(0, 1.4, 0.05)
+	n.add_child(mantel)
+	var fire := MeshLib.sphere(0.32, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
+	fire.scale = Vector3(1.3, 1.0, 0.8)
+	fire.position = Vector3(0, 0.35, 0.05)
+	n.add_child(fire)
+	var glow := MeshLib.disc(0.75, MeshLib.unlit_mat(MeshLib.rgb(0xff7030), 0.25), 12)
+	glow.position = Vector3(0, 0.03, 0.35)
+	n.add_child(glow)
+	if not _game.lite:
+		var ph := randf() * TAU
+		_game.deco_anims.append(func(t: float) -> void:
+			fire.scale = Vector3(1.3, 1.0 + sin(t * 0.019 + ph) * 0.18, 0.8))
+	return _tower_place(cd, n, rr, ang, true, y0)
+
+# A grand piano (well, a storybook one): body, keys, propped lid and bench.
+static func _add_piano(cd: Dictionary, rr: float, ang: float, y0: float) -> Vector2:
+	var n := Node3D.new()
+	var dark := MeshLib.lit_mat(MeshLib.rgb(0x2a2731))
+	var body := MeshLib.box(2.2, 0.55, 1.35, dark)
+	body.position.y = 1.0
+	n.add_child(body)
+	for s in [[-0.9, -0.5], [0.9, -0.5], [0.0, 0.55]]:
+		var leg := MeshLib.cyl(0.07, 0.09, 0.75, dark, 6)
+		leg.position = Vector3(s[0], 0.37, s[1])
+		n.add_child(leg)
+	var keys := MeshLib.box(1.9, 0.1, 0.32, MeshLib.unlit_mat(MeshLib.rgb(0xf6f2e6)))
+	keys.position = Vector3(0, 1.3, 0.78)
+	n.add_child(keys)
+	var blacks := MeshLib.box(1.7, 0.06, 0.14, MeshLib.unlit_mat(MeshLib.rgb(0x17151f)))
+	blacks.position = Vector3(0, 1.36, 0.7)
+	n.add_child(blacks)
+	var lid := MeshLib.box(2.1, 0.07, 1.25, dark)
+	lid.position = Vector3(0, 1.75, -0.35)
+	lid.rotation.x = 0.55
+	n.add_child(lid)
+	var bench := MeshLib.box(1.2, 0.5, 0.45, MeshLib.lit_mat(MeshLib.rgb(0x7a5a3a)))
+	bench.position = Vector3(0, 0.25, 1.45)
+	n.add_child(bench)
+	return _tower_place(cd, n, rr, ang, true, y0)
+
+# A cello resting on its stand.
+static func _add_cello(cd: Dictionary, rr: float, ang: float, y0: float) -> Vector2:
+	var n := Node3D.new()
+	var body := MeshLib.sphere(0.5, MeshLib.lit_mat(MeshLib.rgb(0xa06a3a)), 12, 10)
+	body.scale = Vector3(0.75, 1.15, 0.35)
+	body.position = Vector3(0, 0.75, 0.1)
+	body.rotation.x = -0.22
+	n.add_child(body)
+	var neck := MeshLib.box(0.09, 1.0, 0.07, MeshLib.lit_mat(MeshLib.rgb(0x3a2c20)))
+	neck.position = Vector3(0, 1.75, -0.14)
+	neck.rotation.x = -0.22
+	n.add_child(neck)
+	var scroll := MeshLib.sphere(0.09, MeshLib.lit_mat(MeshLib.rgb(0x3a2c20)), 8, 6)
+	scroll.position = Vector3(0, 2.28, -0.26)
+	n.add_child(scroll)
+	for s in [-1.0, 1.0]:
+		var sleg := MeshLib.cyl(0.04, 0.04, 0.9, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 5)
+		sleg.position = Vector3(s * 0.3, 0.45, 0.32)
+		sleg.rotation.x = 0.35
+		n.add_child(sleg)
+	return _tower_place(cd, n, rr, ang, true, y0)
+
+# One bookshelf unit (frame + three rows of books) placed against the wall.
+static func _add_bookshelf(cd: Dictionary, rr: float, ang: float, y0: float) -> Vector2:
+	var n := _make_bookshelf_node(1.8)
+	return _tower_place(cd, n, rr, ang, true, y0)
+
+static func _make_bookshelf_node(width: float) -> Node3D:
+	var n := Node3D.new()
+	var frame := MeshLib.box(width, 2.5, 0.45, MeshLib.lit_mat(MeshLib.rgb(0x6a4c30)))
+	frame.position.y = 1.25
+	n.add_child(frame)
+	var tones := [0xc46a5a, 0x6d9ce9, 0x8fa86e, 0xf0c060, 0xbaa0e0]
+	for row in 3:
+		var books := MeshLib.box(width - 0.25, 0.52, 0.3, MeshLib.lit_mat(MeshLib.rgb(tones[(row * 2) % tones.size()])))
+		books.position = Vector3(0, 0.55 + row * 0.72, 0.12)
+		n.add_child(books)
+	return n
+
+# The throne now lives on the tower's ground floor, facing the door.
+static func _add_throne(cd: Dictionary, rr: float, ang: float, col: Color) -> Vector2:
 	var n := Node3D.new()
 	var wood := MeshLib.lit_mat(MeshLib.rgb(0x6e5138))
 	var gold := MeshLib.lit_mat(MeshLib.rgb(0xc9a23f))
@@ -487,10 +953,28 @@ static func _add_throne(cd: Dictionary, col: Color) -> void:
 		var arm := MeshLib.box(0.22, 0.7, 1.0, wood)
 		arm.position = Vector3(s * 0.85, 0.9, -0.15)
 		n.add_child(arm)
-	# the throne sits just behind the sanctum, facing the door
-	_place(cd, n, -2.2, 0.0, 1.0, 0.0)
-	var w := _lw(cd, -2.2, 0.0)
-	_obstacle(w.x, w.y, 0.9)
+	return _tower_place(cd, n, rr, ang, true)
+
+# A bed on the tower's polar grid (head against the curved wall).
+static func _add_tower_bed(cd: Dictionary, rr: float, ang: float, col: Color, y0: float) -> Vector2:
+	var n := Node3D.new()
+	var wood := MeshLib.lit_mat(MeshLib.rgb(0x7a5a3a))
+	var frame := MeshLib.box(1.9, 0.45, 3.1, wood)
+	frame.position.y = 0.25
+	n.add_child(frame)
+	var head := MeshLib.box(1.9, 1.05, 0.18, wood)
+	head.position = Vector3(0, 0.75, -1.46)
+	n.add_child(head)
+	var mattress := MeshLib.box(1.66, 0.26, 2.8, MeshLib.lit_mat(MeshLib.rgb(0xf2eee2)))
+	mattress.position.y = 0.58
+	n.add_child(mattress)
+	var pillow := MeshLib.box(1.2, 0.2, 0.6, MeshLib.lit_mat(MeshLib.rgb(0xfaf7ee)))
+	pillow.position = Vector3(0, 0.78, -1.0)
+	n.add_child(pillow)
+	var blanket := MeshLib.box(1.7, 0.16, 1.8, MeshLib.lit_mat(col.lightened(0.15)))
+	blanket.position = Vector3(0, 0.68, 0.5)
+	n.add_child(blanket)
+	return _tower_place(cd, n, rr, ang, true, y0)
 
 # A flat treasury dais: the key bobs low (its teeth dip to ~0.1), so it gets a
 # gold-ringed floor rostrum rather than a raised column it would clip through.
@@ -562,7 +1046,8 @@ static func _add_torch(cd: Dictionary, u: float, v: float) -> void:
 
 # A framed painting of the castle's own element character, hung on a wall.
 # The "canvas" is a dark backdrop with a flattened mini figure in relief.
-static func _add_portrait(el: String, cd: Dictionary, u: float, v: float, du: float, dv: float) -> void:
+# y0 lifts it to an upper tower floor.
+static func _add_portrait(el: String, cd: Dictionary, u: float, v: float, du: float, dv: float, y0: float = 0.0) -> void:
 	var n := Node3D.new()
 	var gold := MeshLib.lit_mat(MeshLib.rgb(0xc9a23f))
 	var backs := { "fire": 0x3a2420, "water": 0x1f2c40, "grass": 0x24321f }
@@ -585,7 +1070,7 @@ static func _add_portrait(el: String, cd: Dictionary, u: float, v: float, du: fl
 	mini.scale = Vector3(0.62, 0.62, 0.14)   # squashed flat → reads as a painted figure
 	mini.position = Vector3(0, 0.85, 0.14)
 	n.add_child(mini)
-	_place(cd, n, u, v, du, dv)
+	_place(cd, n, u, v, du, dv, y0)
 
 static func _add_bed(cd: Dictionary, u: float, v: float, col: Color) -> void:
 	var n := Node3D.new()

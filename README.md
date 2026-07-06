@@ -59,6 +59,19 @@ Along the way:
   a while. Each castle's garden matches its element: an **ember garden** of braziers
   and glowing coals for Fire, **lily ponds and fountains** for Water, and **clipped
   hedgerows and topiary** for Leaf.
+- **The home tower (first person!).** A great round tower rises from the middle of
+  your keep — and it's your house. Step through its door and the camera drops into
+  **your character's eyes** (drag to look around, WASD to walk). A **spiral
+  staircase** winds around the glowing light column through six floors: the throne
+  hall, a kitchen, a living room, a **music room** (grand piano, cello, violin and
+  drifting notes), a bedchamber and a library — small candle-lit windows, rugs,
+  fireplaces and portraits of your element all the way up — then opens onto a
+  **crenellated roof terrace** with a banner, a brazier and a stargazing scope.
+  Two secrets hide inside, Hogwarts-style: a **bookshelf that slides aside** for a
+  treasure room (a bonus heart, once per round), and a **portrait concealing a
+  ladder** that whisks you straight to the roof. Time at home never counts toward
+  the camping eject — stay as long as you like. Walk out the door and the chase
+  camera returns. (Single-player for now; online guests keep the classic view.)
 - **Self‑training.** Stand on the glowing **totem** in your courtyard (with no enemy
   near) to earn an **extra heart**, up to four. Training is kept even after you're
   sent home.
@@ -138,7 +151,7 @@ Key scripts (under `src/`):
 - `mesh_lib.gd` — procedural mesh/material factory and the character builders.
 - `char_visual.gd` — the walking rig (body bob + leg/arm swing).
 - `world_builder.gd` — lays out the three castles (walls, gardens, keeps,
-  portraits, beds), the dungeon yard, hamlets and river.
+  home towers, portraits, beds), the dungeon yard, hamlets and river.
 - `ui.gd` / `radar.gd` — HUD, scoreboard and minimap.
 
 It began life as a Three.js prototype (`elemental-tag.html`) and was ported to
