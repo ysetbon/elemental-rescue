@@ -5,7 +5,7 @@ extends Node3D
 # hunts everyone and O₂ molecules hand out points. Most points when time runs out.
 
 # ------------------------------------------------------------------ constants
-const ARENA := 120.0
+const ARENA := 200.0     # castle world — much larger than the old 120 twilight town
 const CATCH_DIST := 2.4
 # Online only: a guest is DRAWN ~(½RTT + INTERP_DELAY)·speed from where the host authoritatively
 # has it (guest prioritises its own smoothness over matching the host — see _render_off). So
@@ -21,8 +21,8 @@ const CO2_SIGHT := 28.0
 const PTS_O2 := 5
 const PTS_PREY := 15
 const ROUND_TIME := 240.0
-const N_O2 := 8
-const N_CO2 := 3
+const N_O2 := 14              # the wilderness between the castles is where the gases roam
+const N_CO2 := 6
 const N_O2_ONLINE := 6        # lighter molecule set online (snapshot bandwidth + host load)
 const N_CO2_ONLINE := 2
 const RIVER_X1 := 2.0
@@ -59,7 +59,7 @@ const TWIN_LEASH := 18.0      # twin only follows while you're within this
 const STEER_SLOTS := 16       # candidate directions each NPC weighs every tick
 const PROBE_DIST := 7.5       # how far ahead a direction is checked for walls/dead-ends
 const DISGUISE_TIME := 15.0   # seconds you stay a black figure after a black stone
-const N_BLACK_STONES := 4
+const N_BLACK_STONES := 6     # a couple more on the big castle map
 const CO_REVERT_TIME := 15.0  # a spent CO₂ (now CO, gray, harmless) auto-recharges after this
 const O2_RESPAWN := 10.0      # a consumed O₂ molecule reappears elsewhere after this
 const O2_CHARGE_CAP := 8      # how many O₂ sips the player can bank for sprint stamina
@@ -71,13 +71,16 @@ const SUN_COLOR := 0xffeccb
 const SUN_ENERGY := 0.60
 const SUN_FROM := Vector3(-95.0, 52.0, 38.0)
 const FOG_COLOR := 0xeec7b7
-const FOG_DENSITY := 0.0062
+const FOG_DENSITY := 0.0046   # thinner haze so the far-off castles still read on the big map
 const EXPOSURE := 1.0
 
-const BRIDGES := [{ "z": -70.0, "half": 3.5 }, { "z": 0.0, "half": 3.5 }, { "z": 70.0, "half": 3.5 }]
-const SCHOOL := { "x": 80.0, "z": -60.0, "w": 28.0, "d": 20.0 }
-const PLAYGROUND := { "x": -70.0, "z": 70.0 }
-const ZOO := { "x": -34.0, "z": 24.0 }
+const BRIDGES := [
+	{ "z": -150.0, "half": 4.0 }, { "z": -75.0, "half": 4.0 }, { "z": 0.0, "half": 4.0 },
+	{ "z": 75.0, "half": 4.0 }, { "z": 150.0, "half": 4.0 },
+]
+# The old zoo is now a medieval dungeon yard out in the wilderness — same cages,
+# same rescue rules, castle-age dressing.
+const ZOO := { "x": -52.0, "z": 22.0 }
 
 const ELEMENTS := {
 	"fire": { "color": 0xf0662a, "glow": 0xffc878, "prey": "grass", "predator": "water", "label": "Fire" },
@@ -95,6 +98,9 @@ var cages: Array = []            # zoo cages [{ "x","z","r","ident","node" }]
 var cage_by_el: Dictionary = {}  # el -> cage dict (the twin you must free)
 var clan_hall_by_owner: Dictionary = {}   # el -> { "x","z","r" }
 var train_pad_by_owner: Dictionary = {}   # el -> { "x","z","r" }
+var castle_grounds: Array = []            # [{ "x","z","r" }] — everything inside a curtain wall;
+                                          # molecules / stones / wander targets stay OUT (wilderness)
+var key_spot_by_owner: Dictionary = {}    # el -> Vector3 treasury pedestal INSIDE that element's keep
 var deco_anims: Array = []       # [Callable(t_ms)]
 var wind_leaves: Array = []
 
@@ -503,6 +509,8 @@ func _rebuild_world(world_seed: int) -> void:
 	cage_by_el.clear()
 	clan_hall_by_owner.clear()
 	train_pad_by_owner.clear()
+	castle_grounds.clear()
+	key_spot_by_owner.clear()
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
@@ -943,7 +951,7 @@ func _eject_from_cave(ch: GameChar) -> void:
 	ch.vel = Vector3(cos(a), 0, sin(a)) * 6.0
 	ch.cave_cooldown = CAVE_LOCKOUT
 	if ch.is_player:
-		ui.toast("Ejected! Cave locked for %ds" % int(CAVE_LOCKOUT))
+		ui.toast("Ejected! Keep locked for %ds" % int(CAVE_LOCKOUT))
 
 func _update_cave_timers(dt: float) -> void:
 	for ch in actors:
@@ -961,9 +969,9 @@ func _update_cave_timers(dt: float) -> void:
 	if mode == Mode.SERVER:
 		return
 	if player and player.alive and inside_own_cave(player):
-		ui.set_cave("Home — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
+		ui.set_cave("Home keep — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
 	elif player and player.cave_cooldown > 0.0:
-		ui.set_cave("Cave lockout %ds" % int(ceil(player.cave_cooldown)))
+		ui.set_cave("Keep lockout %ds" % int(ceil(player.cave_cooldown)))
 	else:
 		ui.set_cave("")
 
@@ -1087,6 +1095,9 @@ func random_spot(min_r: float = 0.0) -> Vector3:
 		if x > RIVER_X1 - 2 and x < RIVER_X2 + 2:
 			continue
 		if caves.any(func(c): return Vector2(c["x"] - x, c["z"] - z).length() < c["r"] + 3):
+			continue
+		# the wilds only: nothing random spawns or wanders inside a castle's curtain wall
+		if castle_grounds.any(func(g): return Vector2(g["x"] - x, g["z"] - z).length() < g["r"]):
 			continue
 		if rects.any(func(r): return absf(x - r["x"]) < r["hw"] + 2 and absf(z - r["z"]) < r["hd"] + 2):
 			continue
@@ -1765,7 +1776,7 @@ func _respawn(ch: GameChar) -> void:
 		if ch.group:
 			ch.group.position = ch.pos
 	if ch.is_player:
-		ui.toast("Caught! Back to your cave.")
+		ui.toast("Caught! Back to your castle.")
 		_update_hud_hearts()
 
 func _disperse_ally(a: GameChar) -> void:
@@ -2188,14 +2199,14 @@ func _update_key(dt: float) -> void:
 			if player and player.alive and key_carrier.pos.distance_to(player.pos) < 2.6:
 				has_key = true
 				key_carrier = null
-				ui.toast("Your clan brought you your key! Free your twin at the zoo cage.")
+				ui.toast("Your clan brought you your key! Free your twin at the dungeon yard.")
 				_update_objective()
 				_update_hud_status()
 			return
 	# the player walks onto their OWN key
 	if player and player.alive and player.pos.distance_to(mine["pos"]) < KEY_PICK_DIST:
 		has_key = true
-		ui.toast("Got your %s key! Free your twin at the zoo cage." % ELEMENTS[player.el]["label"])
+		ui.toast("Got your %s key! Free your twin at the dungeon yard." % ELEMENTS[player.el]["label"])
 		_update_objective()
 		_update_hud_status()
 		return
@@ -2256,7 +2267,7 @@ func _release_twin(cage: Dictionary) -> void:
 	t.group.position = t.pos
 	t.group.scale = Vector3.ONE * 0.8
 	freed_twin = t
-	ui.toast("%s is free! Lead them home to your cave." % ELEMENTS[player.el]["label"])
+	ui.toast("%s is free! Lead them home to your castle keep." % ELEMENTS[player.el]["label"])
 	_update_objective()
 
 func _free_keys() -> void:
@@ -2358,10 +2369,14 @@ func _make_key_node(el: String) -> Node3D:
 	n.set_meta("beam", beam)
 	return n
 
-# Each element's key is parked in its PREDATOR's camp — out among that predator's
-# cave, clan hall and training pad. So claiming your key means a raid into the turf
-# of the element that hunts you (and every element's key follows the same rule).
+# Each element's key is locked in its PREDATOR's castle — on the treasury pedestal
+# inside the keep of the element that hunts you. So claiming your key means a raid
+# through their gate, across their garden and into their great hall (every element's
+# key follows the same rule).
 func _pick_key_spot(pred_el: String, used: Array) -> Vector3:
+	if key_spot_by_owner.has(pred_el):
+		return key_spot_by_owner[pred_el]
+	# legacy fallback (no castle registered): near the predator's camp
 	var c: Dictionary = cave_by_owner[pred_el]
 	var hall: Dictionary = clan_hall_by_owner.get(pred_el, c)
 	var pad: Dictionary = train_pad_by_owner.get(pred_el, c)
@@ -2408,13 +2423,13 @@ func _update_hud_status() -> void:
 	ui.set_status(s)
 
 func _update_objective() -> void:
-	var txt := "Find your %s key" % ELEMENTS[player.el]["label"]
+	var txt := "Steal your %s key from %s's castle" % [ELEMENTS[player.el]["label"], ELEMENTS[ELEMENTS[player.el]["predator"]]["label"]]
 	if won:
 		txt = "Rescued!"
 	elif freed_twin:
-		txt = "Escort %s home to your cave!" % ELEMENTS[player.el]["label"]
+		txt = "Escort %s home to your castle!" % ELEMENTS[player.el]["label"]
 	elif has_key:
-		txt = "Free %s at the zoo cage" % ELEMENTS[player.el]["label"]
+		txt = "Free %s at the dungeon yard" % ELEMENTS[player.el]["label"]
 	ui.set_objective(txt)
 
 # ------------------------------------------------------------- game flow
@@ -3630,11 +3645,11 @@ func _client_update_status() -> void:
 func _client_update_hud() -> void:
 	ui.set_hearts(player.hp, maxi(player.max_hp, player.hp))
 	if bool(_net_rt.get(local_el, false)):
-		ui.set_objective("Escort your twin home to your cave!")
+		ui.set_objective("Escort your twin home to your castle!")
 	elif bool(_net_rk.get(local_el, false)):
-		ui.set_objective("Free your twin at the zoo cage")
+		ui.set_objective("Free your twin at the dungeon yard")
 	else:
-		ui.set_objective("Find your %s key" % ELEMENTS[local_el]["label"])
+		ui.set_objective("Steal your %s key from %s's castle" % [ELEMENTS[local_el]["label"], ELEMENTS[ELEMENTS[local_el]["predator"]]["label"]])
 	var entries: Array = []
 	for el in ["fire", "water", "grass"]:
 		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })

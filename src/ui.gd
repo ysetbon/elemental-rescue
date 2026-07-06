@@ -159,7 +159,7 @@ func _build_start() -> void:
 	var title := _make_label("ELEMENTAL RESCUE", 54, _c(0xfff1e0))
 	v.add_child(title)
 	var tag := _make_label(
-		"Your twin is locked in a zoo cage. Find your key, free them, and walk them home\nto your cave — while your rival and CO₂ try to send you back. Pick your element:",
+		"Your twin is caged in the old dungeon yard. Your key is locked in your rival's castle:\nraid it, free your twin, and walk them home to your keep. Pick your element:",
 		16, Color(1, 1, 1, 0.92))
 	v.add_child(tag)
 
@@ -177,9 +177,9 @@ func _build_start() -> void:
 
 	var hint := _make_label(
 		"Hearts: a touch from your rival or CO₂ costs a heart — at zero you're sent home (you're never out)\n"
-		+ "Training totem by your cave: earn an extra heart   ·   Clan hall: teach 20s for a clan of 10, then click them to assign tasks\n"
-		+ "Whoever hits you (or your clan) is slowed 5s   ·   each element has its own colour-matched key — only you can take yours\n"
-		+ "Find your key → free your twin at its cage → lead it into your cave to WIN\n"
+		+ "Training totem in your garden: earn an extra heart   ·   Clan hall in your courtyard: teach to summon a clan, then click them to assign tasks\n"
+		+ "Whoever hits you (or your clan) is slowed 5s   ·   your key sits on the treasury pedestal inside the castle of the element that EATS you\n"
+		+ "Steal your key → free your twin at the dungeon yard → lead it into your keep to WIN\n"
 		+ "Grab a black stone (Pac-Man power-up): chase & eat your predator, CO₂ ignore you — but O₂ hunt you\n"
 		+ "Sip white O₂ to supercharge your sprint (slower drain, faster recovery)\n"
 		+ "WASD move   ·   Shift sprint   ·   drag mouse to look",
