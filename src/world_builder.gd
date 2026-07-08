@@ -39,7 +39,7 @@ const HOME_R := 6.0          # the sanctum circle at the keep's heart = the home
 const TOWER_R := 6.0         # outer wall radius (matches the sanctum circle)
 const TOWER_IN_R := 5.15     # interior walk boundary
 const TOWER_FLOOR_H := 3.6
-const TOWER_LEVELS := 6      # walkable levels 0..6, where 6 is the roof terrace
+const TOWER_LEVELS := 3      # walkable levels 0..3, where 3 is the roof terrace
 const TOWER_DOOR_HALF := 0.45  # doorway half-angle (≈4.6u wide at the wall)
 
 static var _root: Node3D
@@ -405,8 +405,15 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 	_cwall(cd, -HU, 0.0, 0.9, HV * 2, glass_h, upper, KEEP_SOLID)
 	_cwall(cd, 0.0, -HV, HU * 2, 0.9, glass_h, upper, KEEP_SOLID)
 	_cwall(cd, 0.0, HV, HU * 2, 0.9, glass_h, upper, KEEP_SOLID)
-	# see-through roof slab + banner over the door
-	_cwall(cd, 0.0, 0.0, HU * 2 + 1.5, HV * 2 + 1.5, 0.45, _glass_or_lit(tint, 0.4), KEEP_H + 0.1)
+	# see-through roof slab + banner over the door. Built as four slabs leaving a
+	# hole where the home tower rises through — one big slab would slice through
+	# the tower's bedchamber storey at knee height.
+	var roof_mat := _glass_or_lit(tint, 0.4)
+	var hole := TOWER_R + 0.2
+	for sv in [-1.0, 1.0]:
+		_cwall(cd, 0.0, sv * (hole + HV + 0.75) / 2.0, HU * 2 + 1.5, HV + 0.75 - hole, 0.45, roof_mat, KEEP_H + 0.1)
+	for su in [-1.0, 1.0]:
+		_cwall(cd, su * (hole + HU + 0.75) / 2.0, 0.0, HU + 0.75 - hole, hole * 2, 0.45, roof_mat, KEEP_H + 0.1)
 	var door_banner := MeshLib.box(2.0, 2.6, 0.14, MeshLib.unlit_mat(col))
 	_place(cd, door_banner, HU + 0.6, 0.0, 1.0, 0.0, KEEP_SOLID + 1.2)
 	# small corner turrets
@@ -454,10 +461,10 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 		_add_torch(cd, t[0], t[1])
 
 	# --- portraits: framed images of THIS castle's element character ---
-	_add_portrait(el, cd, 3.5, HV - 0.65, 0.0, -1.0)     # great hall, both side walls
-	_add_portrait(el, cd, 3.5, -(HV - 0.65), 0.0, 1.0)
-	_add_portrait(el, cd, -(HU - 0.65), 6.5, 1.0, 0.0)   # one per bedchamber, back wall
-	_add_portrait(el, cd, -(HU - 0.65), -6.5, 1.0, 0.0)
+	_add_portrait(el, cd, 3.5, HV - 0.65, 0.0, -1.0, 0.0, "clan")     # great hall — the king and his clan
+	_add_portrait(el, cd, 3.5, -(HV - 0.65), 0.0, 1.0, 0.0, "sword")  # great hall — at war with its predator
+	_add_portrait(el, cd, -(HU - 0.65), 6.5, 1.0, 0.0, 0.0, "crown")  # bedchambers — the crowned ruler
+	_add_portrait(el, cd, -(HU - 0.65), -6.5, 1.0, 0.0, 0.0, "heart") # bedchambers — in love
 
 	# --- bedchambers ---
 	# north room (v > 0): two beds, heads against the back wall
@@ -546,9 +553,18 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 		tm.position = Vector3(w0.x, f * fh + fh / 2.0, w0.y)
 		_add(tm)
 	for f in range(1, TOWER_LEVELS + 1):
-		var band := MeshLib.cyl(TOWER_R + 0.14, TOWER_R + 0.14, 0.34, MeshLib.lit_mat(tint), 20)
-		band.position = Vector3(w0.x, f * fh, w0.y)
-		_add(band)
+		# an open tube — a capped cylinder would fill the whole storey with an
+		# opaque disc, burying the floor plates and the glass descent hatch
+		var band := CylinderMesh.new()
+		band.top_radius = TOWER_R + 0.14
+		band.bottom_radius = TOWER_R + 0.14
+		band.height = 0.34
+		band.radial_segments = 20
+		band.cap_top = false
+		band.cap_bottom = false
+		var band_mi := MeshLib.mi(band, MeshLib.lit_mat(tint))
+		band_mi.position = Vector3(w0.x, f * fh, w0.y)
+		_add(band_mi)
 
 	# --- small windows: warm slits poking through the wall (seen inside and out)
 	for f in range(1, TOWER_LEVELS):
@@ -556,7 +572,10 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 			var win := MeshLib.box(0.8, 1.15, 0.62, MeshLib.unlit_mat(MeshLib.rgb(0xfff0c0)))
 			_tower_place(cd, win, TOWER_R - 0.1, a, false, f * fh + 1.9)
 
-	# --- floor plates: rings of wedges leaving the central stairwell open
+	# --- floor plates: rings of wedges leaving the central stairwell open.
+	# The wedge just clockwise of the stair seam is rendered as a SEE-THROUGH
+	# panel — a window in the floor, right beside the first step down, so you can
+	# tell at a glance you can descend to the level below.
 	var nplate := 14
 	for f in range(1, TOWER_LEVELS + 1):
 		for i in nplate:
@@ -581,6 +600,8 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 		var sy := fh * float(i) / 12.0
 		var st := MeshLib.box(1.9, 0.14, 0.85, step_mat)
 		_tower_place(cd, st, 1.7, a, false, sy - 0.07)
+	# glowing rims + down-beacons make the spiral's descent obvious on every floor
+	_add_stair_guides(cd, tint)
 
 	# --- roof terrace: parapet ring, banner pole, brazier and a stargazing scope
 	for i in 16:
@@ -603,7 +624,7 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var rflame := MeshLib.sphere(0.3, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
 	rflame.position = Vector3(rbraz_w.x, top + 0.9, rbraz_w.y)
 	_add(rflame)
-	blk.call(6, rbraz_w, 0.7)
+	blk.call(TOWER_LEVELS,rbraz_w, 0.7)
 	var scope := Node3D.new()
 	var barrel := MeshLib.cyl(0.14, 0.2, 1.6, gold, 8)
 	barrel.rotation.x = 1.0
@@ -617,9 +638,30 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 		leg.rotation.x = -sin(la) * 0.35
 		scope.add_child(leg)
 	var scope_w := _tower_place(cd, scope, 3.8, 5.6, true, top)
-	blk.call(6, scope_w, 0.7)
+	blk.call(TOWER_LEVELS,scope_w, 0.7)
+	# --- roof rune shaft: a glowing sigil laid FLAT on the roof floor; step onto
+	# it and game.gd's _tower_secrets drops you straight down to the throne hall
+	# (the mirror of the ground-floor secret portrait that whisks you up here).
+	var rune_w := _tw(cd, 3.4, 3.0)
+	var rune := MeshLib.disc(1.35, MeshLib.unlit_mat(tint.lightened(0.3), 0.55), 24)
+	rune.position = Vector3(rune_w.x, top + 0.05, rune_w.y)
+	_add(rune)
+	var rune_ring := TorusMesh.new()
+	rune_ring.inner_radius = 1.18
+	rune_ring.outer_radius = 1.42
+	var rune_ring_mi := MeshLib.mi(rune_ring, MeshLib.unlit_mat(col, 0.85))
+	rune_ring_mi.position = Vector3(rune_w.x, top + 0.08, rune_w.y)
+	_add(rune_ring_mi)
+	var emblem := _mini_figure(el, 0.55)   # the element's sigil, laid face-up
+	emblem.rotation.x = -PI / 2.0
+	emblem.position = Vector3(rune_w.x, top + 0.12, rune_w.y)
+	_add(emblem)
+	var land_w := _tw(cd, 3.6, 0.0)        # landing: by the throne-hall front door
+	if not _game.lite:
+		_game.deco_anims.append(func(t: float) -> void:
+			rune.scale = Vector3.ONE * (1.0 + sin(t * 0.004) * 0.08))
 
-	# ================= the six floors of home =================
+	# ================= the floors of home (0-2 + roof) =================
 	# L0 — throne hall (also the sanctum the twin must reach)
 	var thr_w := _add_throne(cd, 3.6, PI, col)
 	blk.call(0, thr_w, 1.0)
@@ -627,92 +669,25 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var hearth0 := _add_hearth(cd, 4.55, 1.85, 0.0)
 	blk.call(0, hearth0, 0.9)
 	_obstacle(hearth0.x, hearth0.y, 0.8)
-	_add_portrait(el, cd, cos(2.6) * 4.68, sin(2.6) * 4.68, -cos(2.6), -sin(2.6))
+	_add_portrait(el, cd, cos(2.6) * 4.68, sin(2.6) * 4.68, -cos(2.6), -sin(2.6), 0.0, "co2")
 	for ba in [0.9, 5.4]:
 		var bench := MeshLib.box(2.0, 0.5, 0.6, wood)
 		var wb := _tower_place(cd, bench, 4.3, ba, false, 0.25)
 		blk.call(0, wb, 0.8)
 		_obstacle(wb.x, wb.y, 0.7)
 	# the SECRET portrait — walk into it and a hidden ladder whisks you to the roof
-	_add_portrait(el, cd, cos(4.3) * 4.68, sin(4.3) * 4.68, -cos(4.3), -sin(4.3))
+	_add_portrait(el, cd, cos(4.3) * 4.68, sin(4.3) * 4.68, -cos(4.3), -sin(4.3), 0.0, "key")
 	var pass_w := _tw(cd, 4.3, 4.3)
 
-	# L1 — kitchen
-	var hearth1 := _add_hearth(cd, 4.55, PI, fh)
-	blk.call(1, hearth1, 0.9)
-	var ktable := Node3D.new()
-	var ttop := MeshLib.box(2.6, 0.12, 1.2, wood)
-	ttop.position.y = 0.78
-	ktable.add_child(ttop)
-	for s in [-1.0, 1.0]:
-		var tleg := MeshLib.box(0.14, 0.72, 1.0, wood)
-		tleg.position = Vector3(s * 1.1, 0.36, 0)
-		ktable.add_child(tleg)
-	for pi2 in 2:
-		var pot := MeshLib.cyl(0.22, 0.18, 0.28, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 8)
-		pot.position = Vector3(-0.7 + pi2 * 1.3, 0.98, 0.1)
-		ktable.add_child(pot)
-	var bread := MeshLib.sphere(0.2, MeshLib.lit_mat(MeshLib.rgb(0xd8a860)), 8, 6)
-	bread.scale = Vector3(1.4, 0.7, 0.9)
-	bread.position = Vector3(0.2, 0.95, -0.3)
-	ktable.add_child(bread)
-	var ktw := _tower_place(cd, ktable, 3.7, 4.6, false, fh)
-	blk.call(1, ktw, 1.2)
-	for sa in [4.0, 5.2]:
-		var stool := MeshLib.cyl(0.3, 0.26, 0.55, wood, 8)
-		var ws := _tower_place(cd, stool, 2.9, sa, false, fh + 0.27)
-		blk.call(1, ws, 0.45)
-	var shelfk := MeshLib.box(2.2, 0.14, 0.5, wood)
-	_tower_place(cd, shelfk, 4.65, 1.1, false, fh + 1.9)
-	for mi2 in 3:
-		var mug := MeshLib.cyl(0.11, 0.11, 0.22, MeshLib.lit_mat(MeshLib.rgb([0xc46a5a, 0x6d9ce9, 0xe8d8b0][mi2])), 6)
-		_tower_place(cd, mug, 4.62, 0.96 + mi2 * 0.14, false, fh + 2.05)
-	var barrelk := MeshLib.cyl(0.42, 0.48, 0.85, wood, 10)
-	var wbar := _tower_place(cd, barrelk, 4.5, 0.55, false, fh + 0.42)
-	blk.call(1, wbar, 0.65)
-
-	# L2 — living room
-	for ca in [2.15, 4.15]:
-		var sofa := Node3D.new()
-		var seat2 := MeshLib.box(2.3, 0.5, 0.9, MeshLib.lit_mat(col.lightened(0.35)))
-		seat2.position.y = 0.35
-		sofa.add_child(seat2)
-		var back2 := MeshLib.box(2.3, 0.7, 0.25, MeshLib.lit_mat(col.lightened(0.2)))
-		back2.position = Vector3(0, 0.85, -0.35)
-		sofa.add_child(back2)
-		var ws2 := _tower_place(cd, sofa, 3.9, ca, true, 2.0 * fh)
-		blk.call(2, ws2, 1.2)
-	var lrug := MeshLib.disc(1.8, MeshLib.unlit_mat(col, 0.25), 18)
-	lrug.position = Vector3(_tw(cd, 3.4, PI).x, 2.0 * fh + 0.06, _tw(cd, 3.4, PI).y)
-	_add(lrug)
-	var ltab := MeshLib.box(1.2, 0.5, 0.8, wood)
-	var wlt := _tower_place(cd, ltab, 3.4, PI, false, 2.0 * fh + 0.25)
-	blk.call(2, wlt, 0.75)
-	var hearth2 := _add_hearth(cd, 4.55, 0.9, 2.0 * fh)
-	blk.call(2, hearth2, 0.9)
-	_add_portrait(el, cd, cos(5.5) * 4.68, sin(5.5) * 4.68, -cos(5.5), -sin(5.5), 2.0 * fh)
-
-	# L3 — MUSIC ROOM: piano, cello, violin (and drifting notes)
-	var piano_w := _add_piano(cd, 3.9, PI, 3.0 * fh)
-	blk.call(3, piano_w, 1.5)
-	var cello_w := _add_cello(cd, 4.2, 1.7, 3.0 * fh)
-	blk.call(3, cello_w, 0.7)
-	var viol := Node3D.new()
-	var vtab := MeshLib.box(1.0, 0.75, 0.7, wood)
-	vtab.position.y = 0.37
-	viol.add_child(vtab)
-	var vbody := MeshLib.sphere(0.22, MeshLib.lit_mat(MeshLib.rgb(0xa06a3a)), 10, 8)
-	vbody.scale = Vector3(0.8, 0.35, 1.3)
-	vbody.position = Vector3(0, 0.85, 0.05)
-	viol.add_child(vbody)
-	var vneck := MeshLib.box(0.07, 0.05, 0.55, MeshLib.lit_mat(MeshLib.rgb(0x3a2c20)))
-	vneck.position = Vector3(0, 0.88, -0.4)
-	viol.add_child(vneck)
-	var wv := _tower_place(cd, viol, 4.2, 4.6, true, 3.0 * fh)
-	blk.call(3, wv, 0.7)
+	# L1 — MUSIC & LIBRARY: a piano and drifting notes share the floor with the
+	# bookshelves and the sliding-shelf SECRET room.
+	var piano_w := _add_piano(cd, 3.9, 5.3, fh)
+	blk.call(1, piano_w, 1.5)
+	var cello_w := _add_cello(cd, 4.2, 4.4, fh)
+	blk.call(1, cello_w, 0.7)
 	var mstool := MeshLib.cyl(0.32, 0.28, 0.6, wood, 8)
-	var wms := _tower_place(cd, mstool, 2.95, PI - 0.75, false, 3.0 * fh + 0.3)
-	blk.call(3, wms, 0.45)
+	var wms := _tower_place(cd, mstool, 2.95, 4.95, false, fh + 0.3)
+	blk.call(1, wms, 0.45)
 	if not _game.lite:
 		for ni in 3:
 			var note := Node3D.new()
@@ -722,53 +697,19 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 			var stem := MeshLib.box(0.04, 0.55, 0.04, MeshLib.unlit_mat(MeshLib.rgb(0x2a2733)))
 			stem.position = Vector3(0.13, 0.3, 0)
 			note.add_child(stem)
-			var na := 2.6 + ni * 0.5
+			var na := 4.8 + ni * 0.42
 			var nw := _tw(cd, 3.3, na)
-			var base_y := 3.0 * fh + 1.7 + ni * 0.3
+			var base_y := fh + 1.7 + ni * 0.3
 			note.position = Vector3(nw.x, base_y, nw.y)
 			_add(note)
 			var ph := ni * 2.1
 			_game.deco_anims.append(func(t: float) -> void:
 				note.position.y = base_y + sin(t * 0.0021 + ph) * 0.25
 				note.rotation.y = sin(t * 0.0013 + ph) * 0.5)
-
-	# L4 — bedchamber
-	var bed_w := _add_tower_bed(cd, 3.95, PI, col, 4.0 * fh)
-	blk.call(4, bed_w, 1.3)
-	var ward := Node3D.new()
-	var wbody := MeshLib.box(1.7, 2.5, 0.7, wood)
-	wbody.position.y = 1.25
-	ward.add_child(wbody)
-	var wline := MeshLib.box(0.04, 2.1, 0.06, MeshLib.lit_mat(MeshLib.rgb(0x4a3826)))
-	wline.position = Vector3(0, 1.25, 0.36)
-	ward.add_child(wline)
-	var ww := _tower_place(cd, ward, 4.4, 1.9, true, 4.0 * fh)
-	blk.call(4, ww, 1.0)
-	var desk := Node3D.new()
-	var dtop := MeshLib.box(1.4, 0.1, 0.8, wood)
-	dtop.position.y = 0.75
-	desk.add_child(dtop)
-	for s in [-1.0, 1.0]:
-		var dleg := MeshLib.box(0.1, 0.72, 0.7, wood)
-		dleg.position = Vector3(s * 0.6, 0.36, 0)
-		desk.add_child(dleg)
-	var candle := MeshLib.cyl(0.06, 0.06, 0.3, MeshLib.unlit_mat(MeshLib.rgb(0xf6f0dc)), 6)
-	candle.position = Vector3(0.3, 0.95, 0)
-	desk.add_child(candle)
-	var cflame := MeshLib.sphere(0.08, MeshLib.unlit_mat(MeshLib.rgb(0xffc060)), 8, 6)
-	cflame.position = Vector3(0.3, 1.14, 0)
-	desk.add_child(cflame)
-	var wd := _tower_place(cd, desk, 4.3, 4.5, true, 4.0 * fh)
-	blk.call(4, wd, 0.85)
-	var brug := MeshLib.disc(1.5, MeshLib.unlit_mat(col, 0.22), 16)
-	brug.position = Vector3(_tw(cd, 3.3, 5.6).x, 4.0 * fh + 0.06, _tw(cd, 3.3, 5.6).y)
-	_add(brug)
-	_add_portrait(el, cd, cos(0.8) * 4.68, sin(0.8) * 4.68, -cos(0.8), -sin(0.8), 4.0 * fh)
-
-	# L5 — library, with the sliding-bookshelf SECRET room
-	for ba2 in [0.9, 1.6, 4.6, 5.3]:
-		var bw := _add_bookshelf(cd, 4.6, ba2, 5.0 * fh)
-		blk.call(5, bw, 0.75)
+	# the library side: bookshelves + a reading chair
+	for ba2 in [0.6, 1.35, 2.0]:
+		var bw := _add_bookshelf(cd, 4.6, ba2, fh)
+		blk.call(1, bw, 0.75)
 	var chair := Node3D.new()
 	var cseat := MeshLib.box(0.9, 0.45, 0.9, MeshLib.lit_mat(col.lightened(0.3)))
 	cseat.position.y = 0.35
@@ -776,24 +717,25 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var cback := MeshLib.box(0.9, 0.9, 0.2, MeshLib.lit_mat(col.lightened(0.15)))
 	cback.position = Vector3(0, 0.85, -0.35)
 	chair.add_child(cback)
-	var wch := _tower_place(cd, chair, 3.7, 5.9, true, 5.0 * fh)
-	blk.call(5, wch, 0.7)
+	var wch := _tower_place(cd, chair, 3.5, 1.1, true, fh)
+	blk.call(1, wch, 0.7)
+	_add_portrait(el, cd, cos(5.9) * 4.68, sin(5.9) * 4.68, -cos(5.9), -sin(5.9), fh, "child")
 	# hidden nook: walled slice of the floor, its doorway sealed by a bookshelf
 	# (see game.gd _tower_secrets — walking up to it slides the shelf into the wall)
 	var nook_a1 := 2.75
 	var nook_a2 := 3.65
 	var nwall := MeshLib.box(2.15, 3.0, 0.35, stone_dark)
-	_tower_place(cd, nwall, 3.97, nook_a2, false, 5.0 * fh + 1.5)
+	_tower_place(cd, nwall, 3.97, nook_a2, false, fh + 1.5)
 	for rr2 in [3.3, 4.6]:
-		blk.call(5, _tw(cd, rr2, nook_a2), 0.6)
+		blk.call(1, _tw(cd, rr2, nook_a2), 0.6)
 	var iwall := MeshLib.box(0.35, 3.0, 2.3, stone_dark)
-	_tower_place(cd, iwall, 2.95, (nook_a1 + nook_a2) / 2.0, false, 5.0 * fh + 1.5)
-	blk.call(5, _tw(cd, 2.95, 3.05), 0.55)
-	blk.call(5, _tw(cd, 2.95, 3.4), 0.55)
+	_tower_place(cd, iwall, 2.95, (nook_a1 + nook_a2) / 2.0, false, fh + 1.5)
+	blk.call(1, _tw(cd, 2.95, 3.05), 0.55)
+	blk.call(1, _tw(cd, 2.95, 3.4), 0.55)
 	var shelf_door := _make_bookshelf_node(2.0)
 	var shelf_closed_w := _tw(cd, 3.95, nook_a1)
 	var shelf_wa := _door_ang(cd) + nook_a1
-	shelf_door.position = Vector3(shelf_closed_w.x, 5.0 * fh, shelf_closed_w.y)
+	shelf_door.position = Vector3(shelf_closed_w.x, fh, shelf_closed_w.y)
 	shelf_door.rotation.y = -shelf_wa + PI   # spine along the radial line, books facing the library
 	_add(shelf_door)
 	var shelf_closed := shelf_door.position
@@ -809,16 +751,46 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var cband := MeshLib.box(1.56, 0.14, 0.96, gold)
 	cband.position.y = 0.62
 	chest.add_child(cband)
-	var chest_w := _tower_place(cd, chest, 4.55, 3.35, true, 5.0 * fh)
-	blk.call(5, chest_w, 0.6)
+	var chest_w := _tower_place(cd, chest, 4.55, 3.35, true, fh)
+	blk.call(1, chest_w, 0.6)
 	var sparkle := MeshLib.sphere(0.18, MeshLib.unlit_mat(col, 0.9), 8, 6)
 	var sp_w := _tw(cd, 4.3, 3.35)
-	sparkle.position = Vector3(sp_w.x, 5.0 * fh + 1.3, sp_w.y)
+	sparkle.position = Vector3(sp_w.x, fh + 1.3, sp_w.y)
 	_add(sparkle)
 	var ngw := _tw(cd, 3.9, 3.15)
 	var nglow := MeshLib.disc(0.9, MeshLib.unlit_mat(col, 0.2), 12)
-	nglow.position = Vector3(ngw.x, 5.0 * fh + 0.05, ngw.y)
+	nglow.position = Vector3(ngw.x, fh + 0.05, ngw.y)
 	_add(nglow)
+
+	# L2 — bedchamber
+	var bed_w := _add_tower_bed(cd, 3.95, PI, col, 2.0 * fh)
+	blk.call(2, bed_w, 1.3)
+	var ward := Node3D.new()
+	var wbody := MeshLib.box(1.7, 2.5, 0.7, wood)
+	wbody.position.y = 1.25
+	ward.add_child(wbody)
+	var wline := MeshLib.box(0.04, 2.1, 0.06, MeshLib.lit_mat(MeshLib.rgb(0x4a3826)))
+	wline.position = Vector3(0, 1.25, 0.36)
+	ward.add_child(wline)
+	var ww := _tower_place(cd, ward, 4.4, 1.9, true, 2.0 * fh)
+	blk.call(2, ww, 1.0)
+	var desk := Node3D.new()
+	var dtop := MeshLib.box(1.4, 0.1, 0.8, wood)
+	dtop.position.y = 0.75
+	desk.add_child(dtop)
+	for s in [-1.0, 1.0]:
+		var dleg := MeshLib.box(0.1, 0.72, 0.7, wood)
+		dleg.position = Vector3(s * 0.6, 0.36, 0)
+		desk.add_child(dleg)
+	var candle := MeshLib.cyl(0.06, 0.06, 0.3, MeshLib.unlit_mat(MeshLib.rgb(0xf6f0dc)), 6)
+	candle.position = Vector3(0.3, 0.95, 0)
+	desk.add_child(candle)
+	var cflame := MeshLib.sphere(0.08, MeshLib.unlit_mat(MeshLib.rgb(0xffc060)), 8, 6)
+	cflame.position = Vector3(0.3, 1.14, 0)
+	desk.add_child(cflame)
+	var wd := _tower_place(cd, desk, 4.3, 4.5, true, 2.0 * fh)
+	blk.call(2, wd, 0.85)
+	_add_portrait(el, cd, cos(0.8) * 4.68, sin(0.8) * 4.68, -cos(0.8), -sin(0.8), 2.0 * fh, "trophy")
 
 	# --- register it all for game.gd
 	var zone_w := _tw(cd, 3.95, nook_a1 - 0.55)
@@ -829,13 +801,29 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 		"r_in": TOWER_IN_R, "floor_h": fh, "levels": TOWER_LEVELS,
 		"furn": furn,
 		"shelf": {
-			"level": 5, "node": shelf_door, "closed": shelf_closed, "open": shelf_open,
+			"level": 1, "node": shelf_door, "closed": shelf_closed, "open": shelf_open,
 			"zone": { "x": zone_w.x, "z": zone_w.y, "r": 1.5 },
 			"block": { "x": shelf_closed_w.x, "z": shelf_closed_w.y, "r": 1.1 },
 		},
-		"nook": { "level": 5, "x": nook_w.x, "z": nook_w.y, "r": 1.1 },
+		"nook": { "level": 1, "x": nook_w.x, "z": nook_w.y, "r": 1.1 },
 		"passage": { "x": pass_w.x, "z": pass_w.y, "r": 1.0 },
+		"roof_drop": { "x": rune_w.x, "z": rune_w.y, "r": 1.35, "lx": land_w.x, "lz": land_w.y },
 	}
+
+# Descent aid: a faint glowing rim traces each floor's stairwell opening so the
+# floor↔stair edge is easy to find. The see-through descent panel itself is built
+# into the floor-plate ring (see _build_tower). Purely cosmetic.
+static func _add_stair_guides(cd: Dictionary, tint: Color) -> void:
+	var c := _lw(cd, 0.0, 0.0)
+	var edge := MeshLib.unlit_mat(tint.lightened(0.25), 0.28)
+	for f in range(1, TOWER_LEVELS + 1):
+		var y: float = f * TOWER_FLOOR_H
+		var ring := TorusMesh.new()
+		ring.inner_radius = 2.3
+		ring.outer_radius = 2.54
+		var rm := MeshLib.mi(ring, edge)
+		rm.position = Vector3(c.x, y + 0.05, c.y)
+		_add(rm)
 
 # A hearth: stone surround + fire glow, backed against the tower wall.
 static func _add_hearth(cd: Dictionary, rr: float, ang: float, y0: float) -> Vector2:
@@ -1047,7 +1035,11 @@ static func _add_torch(cd: Dictionary, u: float, v: float) -> void:
 # A framed painting of the castle's own element character, hung on a wall.
 # The "canvas" is a dark backdrop with a flattened mini figure in relief.
 # y0 lifts it to an upper tower floor.
-static func _add_portrait(el: String, cd: Dictionary, u: float, v: float, du: float, dv: float, y0: float = 0.0) -> void:
+# A framed portrait. `variant` chooses a little scene painted around the element:
+#   plain · crown (ruler) · clan (king + minions) · child (parent) · sword (war
+#   on the predator that eats it) · key (wedded to its key) · co2 (charged, ringed
+#   by CO₂) · heart (in love) · trophy (champion).
+static func _add_portrait(el: String, cd: Dictionary, u: float, v: float, du: float, dv: float, y0: float = 0.0, variant: String = "plain") -> void:
 	var n := Node3D.new()
 	var gold := MeshLib.lit_mat(MeshLib.rgb(0xc9a23f))
 	var backs := { "fire": 0x3a2420, "water": 0x1f2c40, "grass": 0x24321f }
@@ -1065,12 +1057,124 @@ static func _add_portrait(el: String, cd: Dictionary, u: float, v: float, du: fl
 	var plaque := MeshLib.box(0.8, 0.22, 0.1, gold)
 	plaque.position = Vector3(0, 0.4, 0.04)
 	n.add_child(plaque)
-	var builders := { "fire": MeshLib.build_flame, "water": MeshLib.build_droplet, "grass": MeshLib.build_leaf }
-	var mini: Node3D = builders[el].call()
-	mini.scale = Vector3(0.62, 0.62, 0.14)   # squashed flat → reads as a painted figure
-	mini.position = Vector3(0, 0.85, 0.14)
-	n.add_child(mini)
+	_portrait_scene(el, n, variant, gold)
 	_place(cd, n, u, v, du, dv, y0)
+
+# Paints the figure (and any companions/props) onto an already-framed canvas.
+static func _portrait_scene(el: String, n: Node3D, variant: String, gold: Material) -> void:
+	var lite: bool = _game.lite
+	var pred := { "fire": "water", "water": "grass", "grass": "fire" }   # who eats me
+	var keycol := { "fire": 0xff5a3a, "water": 0x4aa0ff, "grass": 0x7ad04a }
+	# the star of the painting — shift aside when a companion/prop shares the frame
+	var side := variant in ["child", "sword", "key", "heart", "trophy"]
+	var main := _mini_figure(el, 0.62)
+	main.position = Vector3(0.5 if side else 0.0, 0.85, 0.14)
+	n.add_child(main)
+	match variant:
+		"crown", "clan":
+			var crown := _crown(gold)
+			crown.position = Vector3(0.0, 1.95, 0.22)
+			n.add_child(crown)
+		"child":
+			var kid := _mini_figure(el, 0.34)
+			kid.position = Vector3(-0.62, 0.72, 0.16)
+			n.add_child(kid)
+		"sword":
+			var sword := _sword()
+			sword.position = Vector3(0.28, 1.35, 0.24)
+			sword.rotation.z = -0.55
+			n.add_child(sword)
+			var foe := _mini_figure(pred[el], 0.32)      # the predator, cowering
+			foe.position = Vector3(-0.72, 0.66, 0.16)
+			n.add_child(foe)
+		"key":
+			var key := MeshLib.key_node(MeshLib.rgb(keycol[el]))
+			key.scale = Vector3(0.5, 0.5, 0.12)
+			key.rotation.z = 0.5
+			key.position = Vector3(-0.55, 1.45, 0.2)
+			n.add_child(key)
+		"co2":
+			if not lite:
+				for i in 2:
+					var c := MeshLib.build_co2()
+					c.scale = Vector3(0.24, 0.24, 0.06)
+					c.position = Vector3(-0.72 + i * 1.42, 0.66, 0.16)
+					n.add_child(c)
+		"heart":
+			n.add_child(_heart(Vector3(-0.55, 1.5, 0.2)))
+		"trophy":
+			n.add_child(_trophy(Vector3(-0.55, 1.3, 0.2), gold))
+	if variant == "clan" and not lite:
+		for i in 3:
+			var minion := _mini_figure(el, 0.24)
+			minion.position = Vector3(-0.78 + i * 0.78, 0.5, 0.18)
+			n.add_child(minion)
+
+# A squashed-flat element figure that reads as a painted character.
+static func _mini_figure(el2: String, s: float) -> Node3D:
+	var builders := { "fire": MeshLib.build_flame, "water": MeshLib.build_droplet, "grass": MeshLib.build_leaf }
+	var m: Node3D = builders[el2].call()
+	m.scale = Vector3(s, s, s * 0.22)
+	return m
+
+static func _crown(gold: Material) -> Node3D:
+	var c := Node3D.new()
+	var band := MeshLib.cyl(0.24, 0.26, 0.16, gold, 10)
+	c.add_child(band)
+	for i in 5:
+		var a := i * TAU / 5.0
+		var spike := MeshLib.box(0.07, 0.24, 0.05, gold)
+		spike.position = Vector3(cos(a) * 0.2, 0.16, 0)
+		c.add_child(spike)
+	c.scale = Vector3(1, 1, 0.4)
+	return c
+
+static func _sword() -> Node3D:
+	var s := Node3D.new()
+	var steel := MeshLib.lit_mat(MeshLib.rgb(0xcfd6e0))
+	var blade := MeshLib.box(0.08, 1.05, 0.05, steel)
+	blade.position.y = 0.5
+	s.add_child(blade)
+	var guard := MeshLib.box(0.42, 0.09, 0.07, MeshLib.lit_mat(MeshLib.rgb(0x8a6a3a)))
+	s.add_child(guard)
+	var grip := MeshLib.box(0.07, 0.26, 0.06, MeshLib.lit_mat(MeshLib.rgb(0x5a3a24)))
+	grip.position.y = -0.16
+	s.add_child(grip)
+	return s
+
+static func _heart(pos: Vector3) -> Node3D:
+	var mat := MeshLib.unlit_mat(MeshLib.rgb(0xff5a6a))
+	var h := Node3D.new()
+	for sx in [-1.0, 1.0]:
+		var lobe := MeshLib.sphere(0.16, mat, 10, 8)
+		lobe.position = Vector3(sx * 0.13, 0.11, 0)
+		h.add_child(lobe)
+	var tip := MeshLib.box(0.3, 0.3, 0.1, mat)
+	tip.rotation.z = PI / 4.0
+	tip.position = Vector3(0, -0.13, 0)
+	h.add_child(tip)
+	h.scale = Vector3(1, 1, 0.4)
+	h.position = pos
+	return h
+
+static func _trophy(pos: Vector3, gold: Material) -> Node3D:
+	var cup := Node3D.new()
+	var bowl := MeshLib.cyl(0.26, 0.12, 0.3, gold, 10)
+	bowl.position.y = 0.2
+	cup.add_child(bowl)
+	var stem := MeshLib.cyl(0.05, 0.05, 0.18, gold, 6)
+	cup.add_child(stem)
+	var foot := MeshLib.cyl(0.15, 0.18, 0.08, gold, 10)
+	foot.position.y = -0.13
+	cup.add_child(foot)
+	for sx in [-1.0, 1.0]:
+		var handle := MeshLib.box(0.08, 0.24, 0.05, gold)
+		handle.position = Vector3(sx * 0.3, 0.22, 0)
+		handle.rotation.z = sx * 0.5
+		cup.add_child(handle)
+	cup.scale = Vector3(1, 1, 0.4)
+	cup.position = pos
+	return cup
 
 static func _add_bed(cd: Dictionary, u: float, v: float, col: Color) -> void:
 	var n := Node3D.new()
@@ -1273,8 +1377,8 @@ static func _build_dungeon_yard() -> void:
 	# corner braziers light the yard
 	for sx in [-1.0, 1.0]:
 		for sz2 in [-1.0, 1.0]:
-			var bx := zx + sx * 12.5
-			var bz := zz + sz2 * 12.5
+			var bx: float = zx + sx * 12.5
+			var bz: float = zz + sz2 * 12.5
 			var bowl := MeshLib.cyl(0.7, 0.42, 0.75, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 10)
 			bowl.position = Vector3(bx, 0.38, bz)
 			_add(bowl)

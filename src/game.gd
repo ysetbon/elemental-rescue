@@ -1473,7 +1473,7 @@ func _enter_tower() -> void:
 	cam_pitch = 0.05
 	player.vel = Vector3.ZERO
 	player.group.visible = false
-	ui.toast("Home sweet tower! Spiral stairs, six floors, a roof — and a secret or two…")
+	ui.toast("Home sweet tower! Spiral stairs, three floors, a roof — and a secret or two…")
 
 func _exit_tower(quiet: bool = false) -> void:
 	tower_mode = false
@@ -1554,8 +1554,8 @@ func _update_tower_player(dt: float) -> void:
 				r = float(t["r_in"])
 			var furn: Array = t["furn"][mini(lvl, t["furn"].size() - 1)]
 			for o in furn:
-				var dx := (t["x"] + rel.x) - float(o["x"])
-				var dz := (t["z"] + rel.y) - float(o["z"])
+				var dx := (float(t["x"]) + rel.x) - float(o["x"])
+				var dz := (float(t["z"]) + rel.y) - float(o["z"])
 				var dd := sqrt(dx * dx + dz * dz)
 				var mn := float(o["r"]) + 0.5
 				if dd < mn and dd > 0.001:
@@ -1564,8 +1564,8 @@ func _update_tower_player(dt: float) -> void:
 			# the library's secret door blocks its nook until it has slid open
 			var sh: Dictionary = t["shelf"]
 			if lvl == int(sh["level"]) and _tower_shelf_t < 0.7:
-				var bx := (t["x"] + rel.x) - float(sh["block"]["x"])
-				var bz := (t["z"] + rel.y) - float(sh["block"]["z"])
+				var bx := (float(t["x"]) + rel.x) - float(sh["block"]["x"])
+				var bz := (float(t["z"]) + rel.y) - float(sh["block"]["z"])
 				var bd := sqrt(bx * bx + bz * bz)
 				var bmn := float(sh["block"]["r"]) + 0.5
 				if bd < bmn and bd > 0.001:
@@ -1611,13 +1611,20 @@ func _tower_secrets(t: Dictionary, dt: float) -> void:
 		player.pos = Vector3(t["x"] + out.x, float(t["levels"]) * fh, t["z"] + out.y)
 		player.vel = Vector3.ZERO
 		ui.toast("A ladder behind the portrait — up you go, straight to the roof!")
+	# the reverse: a glowing rune shaft laid on the ROOF floor drops you straight home
+	var drop: Dictionary = t.get("roof_drop", {})
+	if not drop.is_empty() and lvl >= int(t["levels"]) \
+			and Vector2(player.pos.x - float(drop["x"]), player.pos.z - float(drop["z"])).length() < float(drop["r"]):
+		player.pos = Vector3(float(drop["lx"]), 0.0, float(drop["lz"]))
+		player.vel = Vector3.ZERO
+		ui.toast("Down the rune shaft — back to the throne hall!")
 
 func _tower_floor_label(t: Dictionary) -> String:
 	var fh: float = t["floor_h"]
 	var lvl := int(round(player.pos.y / fh))
 	if absf(player.pos.y - lvl * fh) > 0.45:
 		return "Home tower — on the spiral stairs"
-	var names := ["throne hall", "kitchen", "living room", "music room", "bedchamber", "library", "rooftop terrace"]
+	var names := ["throne hall", "music & library", "bedchamber", "rooftop terrace"]
 	return "Home tower — %s" % names[clampi(lvl, 0, names.size() - 1)]
 
 # ------------------------------------------------------------------ trails
@@ -2647,6 +2654,31 @@ func _update_objective() -> void:
 # Single-player entry: one local human + NPC fillers (the N=1 case of _spawn_match).
 func start_game(my_el: String) -> void:
 	_spawn_match([{ "peer": 1, "el": my_el, "local": true }], my_el)
+	_debug_tower_start()
+
+# Dev helper (web): ?tower=<level> starts you inside your home tower on that
+# floor — skips the walk across the map when playtesting the interiors.
+func _debug_tower_start() -> void:
+	if mode != Mode.SINGLE or not OS.has_feature("web"):
+		return
+	var v: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('tower')", true)
+	if v == null:
+		return
+	var t := _tower()
+	if t.is_empty():
+		return
+	var lvl := clampi(int(str(v)), 0, int(t["levels"]))
+	_enter_tower()
+	# spawn on a clear patch of floor, facing the stairwell's glass descent hatch
+	var da := float(t["door_ang"])
+	var c := Vector2(float(t["x"]), float(t["z"]))
+	var sp := c + Vector2(cos(da + 0.35), sin(da + 0.35)) * 4.5
+	var hp := c + Vector2(cos(da - 0.225), sin(da - 0.225)) * 3.03
+	player.pos = Vector3(sp.x, lvl * float(t["floor_h"]), sp.y)
+	player.group.position = player.pos
+	var d := (hp - sp).normalized()
+	cam_yaw = atan2(-d.x, -d.y)
+	cam_pitch = -0.55
 
 # Build a match from a list of humans [{peer, el, local?}]. Each element is filled
 # with NPC elementals up to the largest human team ("match the biggest team"), so
