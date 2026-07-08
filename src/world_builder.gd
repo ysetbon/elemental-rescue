@@ -819,9 +819,6 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	desk.add_child(cflame)
 	var wd := _tower_place(cd, desk, 4.3, 4.5, true, 2.0 * fh)
 	blk.call(2, wd, 0.85)
-	var brug := MeshLib.disc(1.5, MeshLib.unlit_mat(col, 0.22), 16)
-	brug.position = Vector3(_tw(cd, 3.3, 5.6).x, 2.0 * fh + 0.06, _tw(cd, 3.3, 5.6).y)
-	_add(brug)
 	_add_portrait(el, cd, cos(0.8) * 4.68, sin(0.8) * 4.68, -cos(0.8), -sin(0.8), 2.0 * fh, "trophy")
 
 	# --- register it all for game.gd
