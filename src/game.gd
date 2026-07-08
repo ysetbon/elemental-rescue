@@ -6,6 +6,7 @@ extends Node3D
 
 # ------------------------------------------------------------------ constants
 const ARENA := 200.0     # castle world — much larger than the old 120 twilight town
+const PACE := 1.2        # uniform speed-up of every character to match the bigger map
 const CATCH_DIST := 2.4
 # Online only: a guest is DRAWN ~(½RTT + INTERP_DELAY)·speed from where the host authoritatively
 # has it (guest prioritises its own smoothness over matching the host — see _render_off). So
@@ -439,6 +440,67 @@ func _ready_visual() -> void:
 		elif OS.get_cmdline_user_args().has("grass"): _el = "grass"
 		start_game(_el)
 		running = true
+	# debug: `-- autostart perftest` — headless sim-cost probe: worst-case actor load
+	# (full clan on attack), then print per-frame sim-time stats and quit.
+	if OS.get_cmdline_user_args().has("perftest"):
+		call_deferred("_setup_perftest")
+	# debug: `-- autostart drawcalls` (windowed) — print the frame's draw-call count,
+	# save a viewport screenshot to user://drawcalls.png, then quit.
+	if OS.get_cmdline_user_args().has("drawcalls"):
+		call_deferred("_setup_drawcalls_probe")
+
+# ---- `-- autostart perftest` probe: measures raw main-loop cost per frame while the
+# sim runs a worst-case load (full clan on attack + all molecules). Headless frames are
+# uncapped, so frame-to-frame wall time ≈ pure sim CPU cost (no render).
+const PT_WARMUP := 120
+const PT_FRAMES := 600
+var _pt_samples := PackedFloat64Array()
+var _pt_last := 0
+var _pt_seen := 0
+
+func _setup_perftest() -> void:
+	var hall: Dictionary = clan_hall_by_owner.get("fire", {})
+	if not hall.is_empty():
+		_summon_clan(hall, 0, "fire")
+	if not OS.get_cmdline_user_args().has("idle"):   # `idle` = clan stays on the cheap path
+		for a in allies:
+			a.role = "attack"
+	if OS.get_cmdline_user_args().has("simoff"):     # `simoff` = cosmetics/animate floor only
+		running = false
+	_pt_last = Time.get_ticks_usec()
+	get_tree().process_frame.connect(_perftest_tick)
+
+func _perftest_tick() -> void:
+	var now := Time.get_ticks_usec()
+	var dtus := now - _pt_last
+	_pt_last = now
+	_pt_seen += 1
+	if _pt_seen <= PT_WARMUP:
+		return
+	_pt_samples.append(float(dtus))
+	if _pt_samples.size() < PT_FRAMES:
+		return
+	_pt_samples.sort()
+	var sum := 0.0
+	for s in _pt_samples:
+		sum += s
+	var n := _pt_samples.size()
+	print("[perftest] frames=%d actors=%d allies=%d npcs=%d obstacles=%d rects=%d" % [
+		n, actors.size(), allies.size(), npcs.size(), obstacles.size(), rects.size()])
+	print("[perftest] sim ms/frame mean=%.3f p50=%.3f p95=%.3f max=%.3f" % [
+		sum / n / 1000.0, _pt_samples[n / 2] / 1000.0,
+		_pt_samples[int(n * 0.95)] / 1000.0, _pt_samples[n - 1] / 1000.0])
+	get_tree().quit()
+
+# ---- `-- autostart drawcalls` probe: report GPU draw calls + a screenshot (windowed).
+func _setup_drawcalls_probe() -> void:
+	get_tree().create_timer(2.0).timeout.connect(func() -> void:
+		var dc := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+		print("[drawcalls] %d" % dc)
+		var img := get_viewport().get_texture().get_image()
+		img.save_png("user://drawcalls.png")
+		print("[drawcalls] saved %s/drawcalls.png" % OS.get_user_data_dir())
+		get_tree().quit())
 
 # 3D render-scale is the single biggest phone FPS lever: render the 3D world at a
 # lower internal resolution and upscale it; the 2D HUD / joystick stay crisp. Tune
@@ -531,6 +593,7 @@ func _rebuild_world(world_seed: int) -> void:
 	wind_leaves.clear()
 	seed(world_seed)
 	WorldBuilder.build(self)
+	_sg_nobs = -1   # world changed — lazily rebuild the spatial index on first query
 	_sync_radar_world()
 
 func _sync_radar_world() -> void:
@@ -868,21 +931,148 @@ func _assign_cam_height() -> float:
 	var fit := 7.0 / (half_v * minf(1.0, aspect))   # clan ring radius + margin
 	return maxf(ASSIGN_CAM_H, fit)
 
+# ------------------------------------------------------- spatial index (perf)
+# The castle world registers ~300 obstacles + ~80 rects, and the steering / LOS /
+# collision code used to scan ALL of them per query — with ~30 agents × 16 steer
+# slots per frame that was the main-thread hotspot (the "castle lag"). The world is
+# static after build, so everything is bucketed once into a uniform grid (+ packed
+# coordinate mirrors so the hot loops never touch Dictionaries), and each query only
+# tests the primitives near it. Rebuilt lazily whenever the array sizes change
+# (world rebuild, cage restore).
+const SG_CELL := 16.0
+const SG_PAD := 3.2    # insert inflation — must cover the largest query inflation
+                       # (avoidance rect pad 2.2, slot probe 0.9 + seg-sample slack 2.0)
+const SG_SEG_STEP := 4.0   # sample spacing along segment queries (slack covered by SG_PAD)
+var _sg_nobs := -1     # obstacle count at last build (-1 = dirty)
+var _sg_nrcs := -1
+var _sg_w := 1
+var _sg_min := 0.0
+var _sg_obs: Array = []    # per cell: PackedInt32Array of obstacle indices (or null)
+var _sg_rcs: Array = []    # per cell: PackedInt32Array of rect indices (or null)
+var _ob_x := PackedFloat32Array()
+var _ob_z := PackedFloat32Array()
+var _ob_r := PackedFloat32Array()
+var _rc_x := PackedFloat32Array()
+var _rc_z := PackedFloat32Array()
+var _rc_hw := PackedFloat32Array()
+var _rc_hd := PackedFloat32Array()
+var _ob_stamp := PackedInt32Array()   # last query id that already collected index i
+var _rc_stamp := PackedInt32Array()
+var _sg_qid := 0
+var _q_obs := PackedInt32Array()      # scratch: candidates of the CURRENT gather
+var _q_rcs := PackedInt32Array()
+
+func _ensure_spatial() -> void:
+	if obstacles.size() != _sg_nobs or rects.size() != _sg_nrcs:
+		_build_spatial_index()
+
+func _build_spatial_index() -> void:
+	_sg_nobs = obstacles.size()
+	_sg_nrcs = rects.size()
+	var span := ARENA + 40.0
+	_sg_min = -span
+	_sg_w = maxi(1, int(ceil(span * 2.0 / SG_CELL)))
+	var ncell := _sg_w * _sg_w
+	_sg_obs = []
+	_sg_obs.resize(ncell)
+	_sg_rcs = []
+	_sg_rcs.resize(ncell)
+	_ob_x.resize(_sg_nobs); _ob_z.resize(_sg_nobs); _ob_r.resize(_sg_nobs)
+	_ob_stamp = PackedInt32Array()
+	_ob_stamp.resize(_sg_nobs)
+	for i in _sg_nobs:
+		var o: Dictionary = obstacles[i]
+		_ob_x[i] = o["x"]; _ob_z[i] = o["z"]; _ob_r[i] = o["r"]
+		_sg_insert(_sg_obs, o["x"], o["z"], o["r"] + SG_PAD, o["r"] + SG_PAD, i)
+	_rc_x.resize(_sg_nrcs); _rc_z.resize(_sg_nrcs); _rc_hw.resize(_sg_nrcs); _rc_hd.resize(_sg_nrcs)
+	_rc_stamp = PackedInt32Array()
+	_rc_stamp.resize(_sg_nrcs)
+	for i in _sg_nrcs:
+		var r: Dictionary = rects[i]
+		_rc_x[i] = r["x"]; _rc_z[i] = r["z"]; _rc_hw[i] = r["hw"]; _rc_hd[i] = r["hd"]
+		_sg_insert(_sg_rcs, r["x"], r["z"], r["hw"] + SG_PAD, r["hd"] + SG_PAD, i)
+	_sg_qid = 0
+
+func _sg_insert(grid: Array, x: float, z: float, hx: float, hz: float, idx: int) -> void:
+	var cx0 := clampi(int((x - hx - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cx1 := clampi(int((x + hx - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz0 := clampi(int((z - hz - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz1 := clampi(int((z + hz - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			var ci := cx * _sg_w + cz
+			if grid[ci] == null:
+				grid[ci] = PackedInt32Array()
+			grid[ci].append(idx)
+
+func _sg_cell(x: float, z: float) -> int:
+	var cx := clampi(int((x - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz := clampi(int((z - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	return cx * _sg_w + cz
+
+# collect into _q_obs/_q_rcs every primitive registered in a cell, dedup by stamp
+func _sg_take_cell(ci: int, qid: int) -> void:
+	var cell = _sg_obs[ci]
+	if cell != null:
+		for i in cell:
+			if _ob_stamp[i] != qid:
+				_ob_stamp[i] = qid
+				_q_obs.append(i)
+	cell = _sg_rcs[ci]
+	if cell != null:
+		for i in cell:
+			if _rc_stamp[i] != qid:
+				_rc_stamp[i] = qid
+				_q_rcs.append(i)
+
+# candidates within a half×half box around (x,z) → _q_obs/_q_rcs
+func _sg_gather_disc(x: float, z: float, half: float) -> void:
+	_sg_qid += 1
+	_q_obs.resize(0)
+	_q_rcs.resize(0)
+	var cx0 := clampi(int((x - half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cx1 := clampi(int((x + half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz0 := clampi(int((z - half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz1 := clampi(int((z + half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			_sg_take_cell(cx * _sg_w + cz, _sg_qid)
+
+# candidates near the segment a→b → _q_obs/_q_rcs (samples every SG_SEG_STEP; the
+# ≤ SG_SEG_STEP/2 gap between samples is covered by SG_PAD at insert time)
+func _sg_gather_seg(ax: float, az: float, bx: float, bz: float) -> void:
+	_sg_qid += 1
+	_q_obs.resize(0)
+	_q_rcs.resize(0)
+	var dx := bx - ax
+	var dz := bz - az
+	var len_ := sqrt(dx * dx + dz * dz)
+	var steps := maxi(1, int(ceil(len_ / SG_SEG_STEP)))
+	var last_ci := -1
+	for s in steps + 1:
+		var t := float(s) / float(steps)
+		var ci := _sg_cell(ax + dx * t, az + dz * t)
+		if ci != last_ci:
+			last_ci = ci
+			_sg_take_cell(ci, _sg_qid)
+
 func _cam_obstruction(px: float, pz: float, dx: float, dz: float, maxd: float) -> float:
+	_ensure_spatial()
+	_sg_gather_seg(px, pz, px + dx * maxd, pz + dz * maxd)
 	var best := maxd
-	for o in obstacles:
-		var ox: float = px - o["x"]
-		var oz: float = pz - o["z"]
+	for i in _q_obs:
+		var ox: float = px - _ob_x[i]
+		var oz: float = pz - _ob_z[i]
 		var b: float = ox * dx + oz * dz
-		var c: float = ox * ox + oz * oz - o["r"] * o["r"]
+		var c: float = ox * ox + oz * oz - _ob_r[i] * _ob_r[i]
 		var disc: float = b * b - c
 		if disc < 0.0:
 			continue
 		var t: float = -b - sqrt(disc)
 		if t > 0.0 and t < best:
 			best = t
-	for r in rects:
-		var t: float = _ray_aabb(px, pz, dx, dz, r["x"] - r["hw"], r["z"] - r["hd"], r["x"] + r["hw"], r["z"] + r["hd"])
+	for i in _q_rcs:
+		var t: float = _ray_aabb(px, pz, dx, dz, _rc_x[i] - _rc_hw[i], _rc_z[i] - _rc_hd[i], _rc_x[i] + _rc_hw[i], _rc_z[i] + _rc_hd[i])
 		if t >= 0.0 and t < best:
 			best = t
 	return maxf(2.6, best - 0.5) if best < maxd else maxd
@@ -1013,11 +1203,13 @@ func can_see(a: GameChar, b: GameChar, range_: float = SIGHT_RANGE) -> bool:
 		return false
 	if dist < 0.01:
 		return true
-	for o in obstacles:
-		if _seg_circle(a.pos.x, a.pos.z, b.pos.x, b.pos.z, o["x"], o["z"], o["r"]):
+	_ensure_spatial()
+	_sg_gather_seg(a.pos.x, a.pos.z, b.pos.x, b.pos.z)
+	for i in _q_obs:
+		if _seg_circle(a.pos.x, a.pos.z, b.pos.x, b.pos.z, _ob_x[i], _ob_z[i], _ob_r[i]):
 			return false
-	for r in rects:
-		if _seg_aabb(a.pos.x, a.pos.z, b.pos.x, b.pos.z, r["x"] - r["hw"], r["z"] - r["hd"], r["x"] + r["hw"], r["z"] + r["hd"]):
+	for i in _q_rcs:
+		if _seg_aabb(a.pos.x, a.pos.z, b.pos.x, b.pos.z, _rc_x[i] - _rc_hw[i], _rc_z[i] - _rc_hd[i], _rc_x[i] + _rc_hw[i], _rc_z[i] + _rc_hd[i]):
 			return false
 	return true
 
@@ -1076,24 +1268,30 @@ func _block_circle(ch: GameChar, room: Dictionary) -> void:
 
 func resolve_collisions(ch: GameChar) -> void:
 	var R := 0.9
-	for o in obstacles:
-		var dx: float = ch.pos.x - o["x"]
-		var dz: float = ch.pos.z - o["z"]
-		var dist := sqrt(dx * dx + dz * dz)
-		var mn: float = o["r"] + R
-		if dist < mn and dist > 0.001:
-			var k := (mn - dist) / dist
-			ch.pos.x += dx * k; ch.pos.z += dz * k
-	for r in rects:
-		var dx: float = ch.pos.x - r["x"]
-		var dz: float = ch.pos.z - r["z"]
-		if absf(dx) < r["hw"] + R and absf(dz) < r["hd"] + R:
-			var ox: float = r["hw"] + R - absf(dx)
-			var oz: float = r["hd"] + R - absf(dz)
-			if ox < oz:
-				ch.pos.x += signf(dx if dx != 0.0 else 1.0) * ox
-			else:
-				ch.pos.z += signf(dz if dz != 0.0 else 1.0) * oz
+	_ensure_spatial()
+	var ci := _sg_cell(ch.pos.x, ch.pos.z)   # SG_PAD covers every primitive within reach
+	var obs_cell = _sg_obs[ci]
+	if obs_cell != null:
+		for i in obs_cell:
+			var dx: float = ch.pos.x - _ob_x[i]
+			var dz: float = ch.pos.z - _ob_z[i]
+			var dist := sqrt(dx * dx + dz * dz)
+			var mn: float = _ob_r[i] + R
+			if dist < mn and dist > 0.001:
+				var k := (mn - dist) / dist
+				ch.pos.x += dx * k; ch.pos.z += dz * k
+	var rc_cell = _sg_rcs[ci]
+	if rc_cell != null:
+		for i in rc_cell:
+			var dx: float = ch.pos.x - _rc_x[i]
+			var dz: float = ch.pos.z - _rc_z[i]
+			if absf(dx) < _rc_hw[i] + R and absf(dz) < _rc_hd[i] + R:
+				var ox: float = _rc_hw[i] + R - absf(dx)
+				var oz: float = _rc_hd[i] + R - absf(dz)
+				if ox < oz:
+					ch.pos.x += signf(dx if dx != 0.0 else 1.0) * ox
+				else:
+					ch.pos.z += signf(dz if dz != 0.0 else 1.0) * oz
 	for c in caves:
 		if not cave_blocks(ch, c):
 			continue
@@ -1128,12 +1326,30 @@ func random_spot(min_r: float = 0.0) -> Vector3:
 		# the wilds only: nothing random spawns or wanders inside a castle's curtain wall
 		if castle_grounds.any(func(g): return Vector2(g["x"] - x, g["z"] - z).length() < g["r"]):
 			continue
-		if rects.any(func(r): return absf(x - r["x"]) < r["hw"] + 2 and absf(z - r["z"]) < r["hd"] + 2):
-			continue
-		if obstacles.any(func(o): return Vector2(o["x"] - x, o["z"] - z).length() < o["r"] + 1.5):
+		if _spot_blocked(x, z):
 			continue
 		return Vector3(x, 0, z)
 	return Vector3(-30, 0, -30)
+
+# grid-backed "is anything solid near this point" (rect pad 2.0 / obstacle pad 1.5,
+# both within SG_PAD so the point's own cell sees every candidate)
+func _spot_blocked(x: float, z: float) -> bool:
+	_ensure_spatial()
+	var ci := _sg_cell(x, z)
+	var rc_cell = _sg_rcs[ci]
+	if rc_cell != null:
+		for i in rc_cell:
+			if absf(x - _rc_x[i]) < _rc_hw[i] + 2.0 and absf(z - _rc_z[i]) < _rc_hd[i] + 2.0:
+				return true
+	var obs_cell = _sg_obs[ci]
+	if obs_cell != null:
+		for i in obs_cell:
+			var dx := x - _ob_x[i]
+			var dz := z - _ob_z[i]
+			var rr: float = _ob_r[i] + 1.5
+			if dx * dx + dz * dz < rr * rr:
+				return true
+	return false
 
 # ------------------------------------------------------------------ steering
 func _avoidance_and_walls(ch: GameChar, desired: Vector3) -> Vector3:
@@ -1143,24 +1359,30 @@ func _avoidance_and_walls(ch: GameChar, desired: Vector3) -> Vector3:
 	if ch.pos.x < -m: d.x += (-m - ch.pos.x) * 0.25
 	if ch.pos.z > m: d.z -= (ch.pos.z - m) * 0.25
 	if ch.pos.z < -m: d.z += (-m - ch.pos.z) * 0.25
-	for o in obstacles:
-		var dx: float = ch.pos.x - o["x"]
-		var dz: float = ch.pos.z - o["z"]
-		var dist := sqrt(dx * dx + dz * dz)
-		var rr: float = o["r"] + 1.8
-		if dist < rr and dist > 0.01:
-			var w := (rr - dist) / rr
-			d.x += dx / dist * w * 1.7; d.z += dz / dist * w * 1.7
-	for r in rects:
-		var dx: float = ch.pos.x - r["x"]
-		var dz: float = ch.pos.z - r["z"]
-		if absf(dx) < r["hw"] + 2.2 and absf(dz) < r["hd"] + 2.2:
-			var px: float = absf(dx) - r["hw"]
-			var pz: float = absf(dz) - r["hd"]
-			if px > pz:
-				d.x += signf(dx if dx != 0.0 else 1.0) * 1.5
-			else:
-				d.z += signf(dz if dz != 0.0 else 1.0) * 1.5
+	_ensure_spatial()
+	var ci := _sg_cell(ch.pos.x, ch.pos.z)   # SG_PAD covers every primitive within reach
+	var obs_cell = _sg_obs[ci]
+	if obs_cell != null:
+		for i in obs_cell:
+			var dx: float = ch.pos.x - _ob_x[i]
+			var dz: float = ch.pos.z - _ob_z[i]
+			var dist := sqrt(dx * dx + dz * dz)
+			var rr: float = _ob_r[i] + 1.8
+			if dist < rr and dist > 0.01:
+				var w := (rr - dist) / rr
+				d.x += dx / dist * w * 1.7; d.z += dz / dist * w * 1.7
+	var rc_cell = _sg_rcs[ci]
+	if rc_cell != null:
+		for i in rc_cell:
+			var dx: float = ch.pos.x - _rc_x[i]
+			var dz: float = ch.pos.z - _rc_z[i]
+			if absf(dx) < _rc_hw[i] + 2.2 and absf(dz) < _rc_hd[i] + 2.2:
+				var px: float = absf(dx) - _rc_hw[i]
+				var pz: float = absf(dz) - _rc_hd[i]
+				if px > pz:
+					d.x += signf(dx if dx != 0.0 else 1.0) * 1.5
+				else:
+					d.z += signf(dz if dz != 0.0 else 1.0) * 1.5
 	for c in caves:
 		if not cave_blocks(ch, c):
 			continue
@@ -1226,15 +1448,17 @@ func _lead_point(from: Vector3, target: GameChar, chaser_speed: float) -> Vector
 	var lead: float = clampf(from.distance_to(target.pos) / maxf(chaser_speed, 1.0), 0.0, 1.3)
 	return target.pos + target.vel * lead
 
-# how clear a heading is: 1 = open, 0 = wall/obstacle just ahead
+# how clear a heading is: 1 = open, 0 = wall/obstacle just ahead.
+# Reads the candidates _smart_move gathered into _q_obs/_q_rcs for this agent —
+# one grid gather serves all STEER_SLOTS probes (they share the same origin).
 func _slot_openness(ch: GameChar, dir: Vector3) -> float:
 	var ax := ch.pos.x; var az := ch.pos.z
 	var bx := ax + dir.x * PROBE_DIST; var bz := az + dir.z * PROBE_DIST
-	for o in obstacles:
-		if _seg_circle(ax, az, bx, bz, o["x"], o["z"], o["r"] + 0.9):
+	for i in _q_obs:
+		if _seg_circle(ax, az, bx, bz, _ob_x[i], _ob_z[i], _ob_r[i] + 0.9):
 			return 0.0
-	for r in rects:
-		if _seg_aabb(ax, az, bx, bz, r["x"] - r["hw"] - 0.9, r["z"] - r["hd"] - 0.9, r["x"] + r["hw"] + 0.9, r["z"] + r["hd"] + 0.9):
+	for i in _q_rcs:
+		if _seg_aabb(ax, az, bx, bz, _rc_x[i] - _rc_hw[i] - 0.9, _rc_z[i] - _rc_hd[i] - 0.9, _rc_x[i] + _rc_hw[i] + 0.9, _rc_z[i] + _rc_hd[i] + 0.9):
 			return 0.0
 	var m := ARENA - 4.0
 	if absf(bx) > m or absf(bz) > m:
@@ -1243,9 +1467,16 @@ func _slot_openness(ch: GameChar, dir: Vector3) -> float:
 
 # attracts / repels: arrays of { "pos": Vector3, "weight": float, "range": float }
 func _smart_move(ch: GameChar, attracts: Array, repels: Array, dt: float, speed_mult: float) -> void:
+	# the full slot scan is the priciest AI step — re-plan every other frame (phase
+	# spreads agents across frames) and hold the cached heading in between
+	if (Engine.get_process_frames() + ch.steer_phase) & 1 == 1 and ch.steer_dir != Vector3.ZERO:
+		_steer(ch, ch.steer_dir, dt, speed_mult)
+		return
 	var best := -1e20
 	var best_dir := Vector3.ZERO
 	var vdir := ch.vel.normalized() if ch.vel.length() > 0.1 else Vector3.ZERO
+	_ensure_spatial()
+	_sg_gather_disc(ch.pos.x, ch.pos.z, PROBE_DIST)   # candidates for all _slot_openness probes
 	for i in STEER_SLOTS:
 		var a := TAU * float(i) / float(STEER_SLOTS)
 		var dir := Vector3(sin(a), 0, cos(a))
@@ -1264,6 +1495,7 @@ func _smart_move(ch: GameChar, attracts: Array, repels: Array, dt: float, speed_
 		score += dir.dot(vdir) * 0.2                          # momentum — less jitter
 		if score > best:
 			best = score; best_dir = dir
+	ch.steer_dir = best_dir
 	_steer(ch, best_dir, dt, speed_mult)
 
 # nearest ALIVE actor of a group (the per-element array in by_el) to a point.
@@ -1697,7 +1929,10 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 	ch.is_player = is_player
 	ch.net_id = _next_net_id
 	_next_net_id += 1
-	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
+	# PACE scales EVERY character uniformly: the castle world is ~1.7× wider than the
+	# old 120-arena town, so everyone strides faster to keep travel times reasonable.
+	# Chase balance is untouched (all relative speeds preserved).
+	ch.speed = (10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)) * PACE
 	if kind == "element":
 		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
 	elif kind == "o2":

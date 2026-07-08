@@ -80,6 +80,43 @@ static func glass_stone_mat(c: Color, alpha: float = 0.5) -> StandardMaterial3D:
 	return m
 
 # ----------------------------------------------------------- primitive helpers
+# Shared mesh cache: identical dimensions reuse one Mesh resource instead of a
+# fresh .new() per call (thousands of world props share a handful of shapes).
+# Safe because no caller mutates a returned instance's mesh — colouring goes
+# through material_override and sizing through the node's own .scale.
+static var _mesh_cache: Dictionary = {}
+
+static func box_mesh(w: float, h: float, d: float) -> BoxMesh:
+	var key := "b:%.4f:%.4f:%.4f" % [w, h, d]
+	if not _mesh_cache.has(key):
+		var b := BoxMesh.new()
+		b.size = Vector3(w, h, d)
+		_mesh_cache[key] = b
+	return _mesh_cache[key]
+
+static func cyl_mesh(top: float, bottom: float, h: float, seg: int) -> CylinderMesh:
+	var key := "c:%.4f:%.4f:%.4f:%d" % [top, bottom, h, seg]
+	if not _mesh_cache.has(key):
+		var c := CylinderMesh.new()
+		c.top_radius = top
+		c.bottom_radius = bottom
+		c.height = h
+		c.radial_segments = seg
+		c.rings = 1
+		_mesh_cache[key] = c
+	return _mesh_cache[key]
+
+static func sphere_mesh(r: float, seg: int, rings: int) -> SphereMesh:
+	var key := "s:%.4f:%d:%d" % [r, seg, rings]
+	if not _mesh_cache.has(key):
+		var s := SphereMesh.new()
+		s.radius = r
+		s.height = r * 2.0
+		s.radial_segments = seg
+		s.rings = rings
+		_mesh_cache[key] = s
+	return _mesh_cache[key]
+
 static func mi(mesh: Mesh, mat: Material) -> MeshInstance3D:
 	var n := MeshInstance3D.new()
 	n.mesh = mesh
@@ -87,36 +124,17 @@ static func mi(mesh: Mesh, mat: Material) -> MeshInstance3D:
 	return n
 
 static func cyl(top: float, bottom: float, h: float, mat: Material, seg: int = 8) -> MeshInstance3D:
-	var c := CylinderMesh.new()
-	c.top_radius = top
-	c.bottom_radius = bottom
-	c.height = h
-	c.radial_segments = seg
-	c.rings = 1
-	return mi(c, mat)
+	return mi(cyl_mesh(top, bottom, h, seg), mat)
 
 static func box(w: float, h: float, d: float, mat: Material) -> MeshInstance3D:
-	var b := BoxMesh.new()
-	b.size = Vector3(w, h, d)
-	return mi(b, mat)
+	return mi(box_mesh(w, h, d), mat)
 
 static func sphere(r: float, mat: Material, seg: int = 16, rings: int = 10) -> MeshInstance3D:
-	var s := SphereMesh.new()
-	s.radius = r
-	s.height = r * 2.0
-	s.radial_segments = seg
-	s.rings = rings
-	return mi(s, mat)
+	return mi(sphere_mesh(r, seg, rings), mat)
 
 # flat disc lying on the ground (cave glows etc.)
 static func disc(r: float, mat: Material, seg: int = 24) -> MeshInstance3D:
-	var c := CylinderMesh.new()
-	c.top_radius = r
-	c.bottom_radius = r
-	c.height = 0.02
-	c.radial_segments = seg
-	c.rings = 1
-	return mi(c, mat)
+	return mi(cyl_mesh(r, r, 0.02, seg), mat)
 
 # ---------------------------------------------------- lathe / teardrop bodies
 static func teardrop_profile(R: float, H: float, exp_: float, rings: int) -> PackedVector2Array:

@@ -38,4 +38,10 @@ var cave_cooldown: float = 0.0
 var wander_target := Vector3.ZERO
 var wander_timer: float = 0.0
 
+# smart-steering re-plan cache: heading picked by the last full _smart_move slot
+# scan. Agents re-plan on alternating frames (phase spreads them out) and hold
+# this heading in between — halves the steering cost invisibly (30Hz re-plan).
+var steer_dir := Vector3.ZERO
+var steer_phase: int = randi() & 1
+
 var radar_color := Color.WHITE

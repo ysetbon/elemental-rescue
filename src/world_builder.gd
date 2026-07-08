@@ -48,6 +48,7 @@ static var _game
 static func build(game) -> void:
 	_game = game
 	_root = game.world_root
+	_batches.clear()   # world can be rebuilt — never carry transforms across builds
 	_ground_and_walls()
 	_river_and_bridges()
 	for el in ["fire", "water", "grass"]:
@@ -62,6 +63,7 @@ static func build(game) -> void:
 	_build_hamlet(86, -96)
 	_scatter()
 	_build_wind_leaves()
+	_flush_batches()
 
 # --------------------------------------------------- registration helpers
 static func _obstacle(x: float, z: float, r: float) -> void:
@@ -72,6 +74,47 @@ static func _rect(x: float, z: float, hw: float, hd: float) -> void:
 
 static func _add(n: Node3D) -> void:
 	_root.add_child(n)
+
+# ------------------------------------------------ static-geometry batching
+# Repeated static props (wall slabs, merlons, stair steps, floor plates, tower
+# drums, flowers, …) accumulate per (mesh, material) and are flushed into one
+# MultiMeshInstance3D each at the end of build() — hundreds of identical draw
+# calls collapse into a few. Transforms are GLOBAL (relative to world_root).
+# Only use this for geometry that is never animated, toggled or repositioned.
+# Transparent materials keep their own MeshInstance3D so alpha sorting stays
+# exactly as before.
+static var _batches: Dictionary = {}
+
+static func _batch_mesh(mesh: Mesh, mat: Material, xf: Transform3D) -> void:
+	var bm := mat as BaseMaterial3D
+	if bm != null and bm.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED:
+		var m := MeshLib.mi(mesh, mat)
+		m.transform = xf
+		_add(m)
+		return
+	var key := "%d:%d" % [mesh.get_instance_id(), mat.get_instance_id()]
+	if not _batches.has(key):
+		_batches[key] = { "mesh": mesh, "mat": mat, "xfs": [] }
+	(_batches[key]["xfs"] as Array).append(xf)
+
+static func _batch_box(w: float, h: float, d: float, mat: Material, xf: Transform3D) -> void:
+	_batch_mesh(MeshLib.box_mesh(w, h, d), mat, xf)
+
+static func _flush_batches() -> void:
+	for key in _batches:
+		var b: Dictionary = _batches[key]
+		var xfs: Array = b["xfs"]
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = b["mesh"]
+		mm.instance_count = xfs.size()
+		for i in xfs.size():
+			mm.set_instance_transform(i, xfs[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = b["mat"]
+		_add(mmi)
+	_batches.clear()
 
 static func _pick_house() -> Color:
 	return MeshLib.rgb(HOUSE_COLORS[randi() % HOUSE_COLORS.size()])
@@ -102,12 +145,9 @@ static func _lsz(cd: Dictionary, lu: float, lv: float) -> Vector2:
 static func _cwall(cd: Dictionary, u: float, v: float, lu: float, lv: float, h: float, mat: Material, y0: float = 0.0) -> void:
 	var w := _lw(cd, u, v)
 	var s := _lsz(cd, lu, lv)
+	_batch_box(s.x, h, s.y, mat, Transform3D(Basis(), Vector3(w.x, y0 + h / 2.0, w.y)))
 	if y0 == 0.0:
-		_add_box_wall(w.x, w.y, s.x, s.y, h, mat)
-	else:
-		var m := MeshLib.box(s.x, h, s.y, mat)
-		m.position = Vector3(w.x, y0 + h / 2.0, w.y)
-		_add(m)
+		_rect(w.x, w.y, s.x / 2.0, s.y / 2.0)
 
 # Place a prebuilt node at local (u, v), turning its +Z toward local dir (du, dv).
 static func _place(cd: Dictionary, node: Node3D, u: float, v: float, du: float, dv: float, y: float = 0.0) -> void:
@@ -131,12 +171,9 @@ static func _ground_and_walls() -> void:
 	for w in walls:
 		_add_box_wall(w[0], w[1], w[2], w[3], 4.0, wall_mat)
 
-static func _add_box_wall(x: float, z: float, w: float, d: float, h: float, mat: Material) -> MeshInstance3D:
-	var m := MeshLib.box(w, h, d, mat)
-	m.position = Vector3(x, h / 2.0, z)
-	_add(m)
+static func _add_box_wall(x: float, z: float, w: float, d: float, h: float, mat: Material) -> void:
+	_batch_box(w, h, d, mat, Transform3D(Basis(), Vector3(x, h / 2.0, z)))
 	_rect(x, z, w / 2.0, d / 2.0)
-	return m
 
 # --------------------------------------------------------- house + props
 static func _add_house(x: float, z: float, w: float, d: float, h: float, color: Color, win_side: String = "pz") -> void:
@@ -235,11 +272,9 @@ static func add_cave(cx: float, cz: float, owner: String) -> void:
 		var a := open_angle + PI / 4.0 + i * (PI * 1.5 / (segs - 1))
 		var x := cx + cos(a) * r
 		var z := cz + sin(a) * r
-		var rock := MeshLib.sphere(1.5, rock_mat, 6, 4)
-		rock.position = Vector3(x, 1.2, z)
-		rock.scale = Vector3(1, 1.7, 1)
-		rock.rotation = Vector3((randf() - 0.5) * 0.3, randf() * PI, (randf() - 0.5) * 0.3)
-		_add(rock)
+		var rot := Vector3((randf() - 0.5) * 0.3, randf() * PI, (randf() - 0.5) * 0.3)
+		_batch_mesh(MeshLib.sphere_mesh(1.5, 6, 4), rock_mat,
+			Transform3D(Basis.from_euler(rot) * Basis.from_scale(Vector3(1, 1.7, 1)), Vector3(x, 1.2, z)))
 		_obstacle(x, z, 1.25)
 	# semi-glass / semi-stone roof so a character sheltering inside stays visible from above
 	var roof_col: Color = MeshLib.rgb(CASTLE_TINTS[owner]) if owner != "" else MeshLib.rgb(0xbcc0cc)
@@ -355,22 +390,15 @@ static func _merlons(cd: Dictionary, mat: Material) -> void:
 		_cwall(cd, off, W, 1.5, WALL_T + 0.3, 0.9, mat, WALL_H)
 
 static func _add_tower(x: float, z: float, r: float, h: float, stone: Material, col: Color, flag: bool) -> void:
-	var body := MeshLib.cyl(r, r * 1.12, h, stone, 12)
-	body.position = Vector3(x, h / 2.0, z)
-	_add(body)
-	var ledge := MeshLib.cyl(r + 0.4, r + 0.4, 0.6, stone, 12)
-	ledge.position = Vector3(x, h - 0.3, z)
-	_add(ledge)
-	var cone := MeshLib.mi(_cone(r + 0.5, r * 0.9, 12), MeshLib.lit_mat(col.darkened(0.25)))
-	cone.position = Vector3(x, h + r * 0.45, z)
-	_add(cone)
+	_batch_mesh(MeshLib.cyl_mesh(r, r * 1.12, h, 12), stone, Transform3D(Basis(), Vector3(x, h / 2.0, z)))
+	_batch_mesh(MeshLib.cyl_mesh(r + 0.4, r + 0.4, 0.6, 12), stone, Transform3D(Basis(), Vector3(x, h - 0.3, z)))
+	_batch_mesh(MeshLib.cyl_mesh(0.0, r + 0.5, r * 0.9, 12), MeshLib.lit_mat(col.darkened(0.25)),
+		Transform3D(Basis(), Vector3(x, h + r * 0.45, z)))
 	if flag:
-		var pole := MeshLib.cyl(0.06, 0.06, 2.2, MeshLib.lit_mat(MeshLib.rgb(0x97816a)), 5)
-		pole.position = Vector3(x, h + r * 0.9 + 1.1, z)
-		_add(pole)
-		var f := MeshLib.box(1.2, 0.7, 0.07, MeshLib.unlit_mat(col))
-		f.position = Vector3(x + 0.65, h + r * 0.9 + 1.8, z)
-		_add(f)
+		_batch_mesh(MeshLib.cyl_mesh(0.06, 0.06, 2.2, 5), MeshLib.lit_mat(MeshLib.rgb(0x97816a)),
+			Transform3D(Basis(), Vector3(x, h + r * 0.9 + 1.1, z)))
+		_batch_box(1.2, 0.7, 0.07, MeshLib.unlit_mat(col),
+			Transform3D(Basis(), Vector3(x + 0.65, h + r * 0.9 + 1.8, z)))
 	_obstacle(x, z, r + 0.2)
 
 static func _cone(r: float, h: float, seg: int) -> CylinderMesh:
@@ -501,6 +529,13 @@ static func _tower_place(cd: Dictionary, node: Node3D, rr: float, ang: float, fa
 	_add(node)
 	return w
 
+# The same placement as _tower_place, but as a global Transform3D for batching.
+static func _tower_xf(cd: Dictionary, rr: float, ang: float, face_in: bool, y0: float = 0.0) -> Transform3D:
+	var w := _tw(cd, rr, ang)
+	var wa := _door_ang(cd) + ang
+	var yaw := atan2(-cos(wa), -sin(wa)) if face_in else -wa
+	return Transform3D(Basis(Vector3.UP, yaw), Vector3(w.x, y0, w.y))
+
 static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, stone: Material, stone_dark: Material) -> void:
 	var fh := TOWER_FLOOR_H
 	var top := TOWER_LEVELS * fh
@@ -525,15 +560,13 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var segs := 18
 	for i in segs:
 		var a := TOWER_DOOR_HALF + (TAU - TOWER_DOOR_HALF * 2.0) * (float(i) + 0.5) / segs
-		var wseg := MeshLib.box(0.5, fh, 2.05, stone)
-		var w := _tower_place(cd, wseg, TOWER_R - 0.25, a, false, fh / 2.0)
-		wseg.position.y = fh / 2.0
+		_batch_box(0.5, fh, 2.05, stone, _tower_xf(cd, TOWER_R - 0.25, a, false, fh / 2.0))
+		var w := _tw(cd, TOWER_R - 0.25, a)
 		_obstacle(w.x, w.y, 1.0)     # world-side collision (AI, twin, pre-entry player)
 	# door jambs + lintel + a step
 	for s in [-1.0, 1.0]:
-		var jamb := MeshLib.box(0.7, fh, 0.7, stone_dark)
-		var wj := _tower_place(cd, jamb, TOWER_R - 0.2, s * TOWER_DOOR_HALF, false, fh / 2.0)
-		jamb.position.y = fh / 2.0
+		_batch_box(0.7, fh, 0.7, stone_dark, _tower_xf(cd, TOWER_R - 0.2, s * TOWER_DOOR_HALF, false, fh / 2.0))
+		var wj := _tw(cd, TOWER_R - 0.2, s * TOWER_DOOR_HALF)
 		_obstacle(wj.x, wj.y, 0.55)
 	var lintel := MeshLib.box(0.8, 1.2, TOWER_R * 2.0 * sin(TOWER_DOOR_HALF) + 1.4, stone_dark)
 	_tower_place(cd, lintel, TOWER_R - 0.2, 0.0, false, fh - 0.6)
@@ -569,8 +602,8 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	# --- small windows: warm slits poking through the wall (seen inside and out)
 	for f in range(1, TOWER_LEVELS):
 		for a in [0.55, 2.2, 4.75]:
-			var win := MeshLib.box(0.8, 1.15, 0.62, MeshLib.unlit_mat(MeshLib.rgb(0xfff0c0)))
-			_tower_place(cd, win, TOWER_R - 0.1, a, false, f * fh + 1.9)
+			_batch_box(0.8, 1.15, 0.62, MeshLib.unlit_mat(MeshLib.rgb(0xfff0c0)),
+				_tower_xf(cd, TOWER_R - 0.1, a, false, f * fh + 1.9))
 
 	# --- floor plates: rings of wedges leaving the central stairwell open.
 	# The wedge just clockwise of the stair seam is rendered as a SEE-THROUGH
@@ -580,8 +613,7 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	for f in range(1, TOWER_LEVELS + 1):
 		for i in nplate:
 			var a := TAU * (float(i) + 0.5) / nplate
-			var plate := MeshLib.box(2.75, 0.22, 1.98, floor_mat)
-			_tower_place(cd, plate, 3.95, a, false, f * fh - 0.11)
+			_batch_box(2.75, 0.22, 1.98, floor_mat, _tower_xf(cd, 3.95, a, false, f * fh - 0.11))
 		var rim := TorusMesh.new()
 		rim.inner_radius = 2.5
 		rim.outer_radius = 2.66
@@ -598,19 +630,16 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	for i in 12 * TOWER_LEVELS:
 		var a := TAU * float(i) / 12.0
 		var sy := fh * float(i) / 12.0
-		var st := MeshLib.box(1.9, 0.14, 0.85, step_mat)
-		_tower_place(cd, st, 1.7, a, false, sy - 0.07)
+		_batch_box(1.9, 0.14, 0.85, step_mat, _tower_xf(cd, 1.7, a, false, sy - 0.07))
 	# glowing rims + down-beacons make the spiral's descent obvious on every floor
 	_add_stair_guides(cd, tint)
 
 	# --- roof terrace: parapet ring, banner pole, brazier and a stargazing scope
 	for i in 16:
 		var a := TAU * (float(i) + 0.5) / 16.0
-		var par := MeshLib.box(0.45, 1.15, 2.2, stone)
-		_tower_place(cd, par, TOWER_R - 0.22, a, false, top + 0.57)
+		_batch_box(0.45, 1.15, 2.2, stone, _tower_xf(cd, TOWER_R - 0.22, a, false, top + 0.57))
 		if i % 2 == 0:
-			var mer := MeshLib.box(0.5, 0.5, 1.0, stone_dark)
-			_tower_place(cd, mer, TOWER_R - 0.22, a, false, top + 1.4)
+			_batch_box(0.5, 0.5, 1.0, stone_dark, _tower_xf(cd, TOWER_R - 0.22, a, false, top + 1.4))
 	var pole := MeshLib.cyl(0.07, 0.07, 3.2, MeshLib.lit_mat(MeshLib.rgb(0x97816a)), 6)
 	pole.position = Vector3(w0.x, top + 2.2, w0.y)
 	_add(pole)
@@ -790,6 +819,9 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	desk.add_child(cflame)
 	var wd := _tower_place(cd, desk, 4.3, 4.5, true, 2.0 * fh)
 	blk.call(2, wd, 0.85)
+	var brug := MeshLib.disc(1.5, MeshLib.unlit_mat(col, 0.22), 16)
+	brug.position = Vector3(_tw(cd, 3.3, 5.6).x, 2.0 * fh + 0.06, _tw(cd, 3.3, 5.6).y)
+	_add(brug)
 	_add_portrait(el, cd, cos(0.8) * 4.68, sin(0.8) * 4.68, -cos(0.8), -sin(0.8), 2.0 * fh, "trophy")
 
 	# --- register it all for game.gd
@@ -1021,9 +1053,8 @@ static func _add_table(cd: Dictionary, u: float, v: float) -> void:
 
 static func _add_torch(cd: Dictionary, u: float, v: float) -> void:
 	var w := _lw(cd, u, v)
-	var stick := MeshLib.cyl(0.05, 0.07, 0.7, MeshLib.lit_mat(MeshLib.rgb(0x6a5136)), 6)
-	stick.position = Vector3(w.x, 2.35, w.y)
-	_add(stick)
+	_batch_mesh(MeshLib.cyl_mesh(0.05, 0.07, 0.7, 6), MeshLib.lit_mat(MeshLib.rgb(0x6a5136)),
+		Transform3D(Basis(), Vector3(w.x, 2.35, w.y)))
 	var flame := MeshLib.sphere(0.17, MeshLib.unlit_mat(MeshLib.rgb(0xffb054)), 8, 6)
 	flame.position = Vector3(w.x, 2.82, w.y)
 	_add(flame)
@@ -1219,37 +1250,31 @@ static func _build_garden(el: String, cd: Dictionary, col: Color) -> void:
 
 static func _add_lamp(cd: Dictionary, u: float, v: float) -> void:
 	var w := _lw(cd, u, v)
-	var post := MeshLib.cyl(0.08, 0.1, 2.2, MeshLib.lit_mat(MeshLib.rgb(0x5a544e)), 6)
-	post.position = Vector3(w.x, 1.1, w.y)
-	_add(post)
-	var lamp := MeshLib.sphere(0.22, MeshLib.unlit_mat(MeshLib.rgb(0xffe6a8), 0.95), 10, 8)
-	lamp.position = Vector3(w.x, 2.35, w.y)
-	_add(lamp)
+	_batch_mesh(MeshLib.cyl_mesh(0.08, 0.1, 2.2, 6), MeshLib.lit_mat(MeshLib.rgb(0x5a544e)),
+		Transform3D(Basis(), Vector3(w.x, 1.1, w.y)))
+	_batch_mesh(MeshLib.sphere_mesh(0.22, 10, 8), MeshLib.unlit_mat(MeshLib.rgb(0xffe6a8), 0.95),
+		Transform3D(Basis(), Vector3(w.x, 2.35, w.y)))
 	_obstacle(w.x, w.y, 0.35)
 
 static func _flower_bed(cd: Dictionary, u: float, v: float, r: float, colors: Array) -> void:
 	var w := _lw(cd, u, v)
-	var soil := MeshLib.disc(r, MeshLib.lit_mat(MeshLib.rgb(0x6e5f4e)), 14)
-	soil.position = Vector3(w.x, 0.05, w.y)
-	_add(soil)
+	_batch_mesh(MeshLib.cyl_mesh(r, r, 0.02, 14), MeshLib.lit_mat(MeshLib.rgb(0x6e5f4e)),
+		Transform3D(Basis(), Vector3(w.x, 0.05, w.y)))
 	var n := 4 if _game.lite else 8
 	for i in n:
 		var a := randf() * TAU
 		var rr := sqrt(randf()) * (r - 0.3)
 		var fx := w.x + cos(a) * rr
 		var fz := w.y + sin(a) * rr
-		var stem := MeshLib.cyl(0.03, 0.03, 0.5, MeshLib.lit_mat(MeshLib.rgb(0x4c7048)), 5)
-		stem.position = Vector3(fx, 0.25, fz)
-		_add(stem)
-		var head := MeshLib.sphere(0.14, MeshLib.unlit_mat(MeshLib.rgb(colors[i % colors.size()])), 8, 6)
-		head.position = Vector3(fx, 0.56, fz)
-		_add(head)
+		_batch_mesh(MeshLib.cyl_mesh(0.03, 0.03, 0.5, 5), MeshLib.lit_mat(MeshLib.rgb(0x4c7048)),
+			Transform3D(Basis(), Vector3(fx, 0.25, fz)))
+		_batch_mesh(MeshLib.sphere_mesh(0.14, 8, 6), MeshLib.unlit_mat(MeshLib.rgb(colors[i % colors.size()])),
+			Transform3D(Basis(), Vector3(fx, 0.56, fz)))
 
 static func _add_brazier(cd: Dictionary, u: float, v: float) -> void:
 	var w := _lw(cd, u, v)
-	var bowl := MeshLib.cyl(0.75, 0.45, 0.8, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 10)
-	bowl.position = Vector3(w.x, 0.4, w.y)
-	_add(bowl)
+	_batch_mesh(MeshLib.cyl_mesh(0.75, 0.45, 0.8, 10), MeshLib.lit_mat(MeshLib.rgb(0x4a4650)),
+		Transform3D(Basis(), Vector3(w.x, 0.4, w.y)))
 	var flame := MeshLib.sphere(0.38, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
 	flame.position = Vector3(w.x, 1.0, w.y)
 	_add(flame)
@@ -1277,10 +1302,9 @@ static func _garden_fire(cd: Dictionary, _col: Color) -> void:
 		var rock_mat := MeshLib.lit_mat(MeshLib.rgb(0x4e4652))
 		for i in 6:
 			var a := float(i) / 6.0 * TAU
-			var rock := MeshLib.sphere(0.5, rock_mat, 6, 4)
-			rock.position = Vector3(w.x + cos(a) * 2.6, 0.35, w.y + sin(a) * 2.6)
-			rock.scale = Vector3(1, 0.75, 1)
-			_add(rock)
+			_batch_mesh(MeshLib.sphere_mesh(0.5, 6, 4), rock_mat, Transform3D(
+				Basis.from_scale(Vector3(1, 0.75, 1)),
+				Vector3(w.x + cos(a) * 2.6, 0.35, w.y + sin(a) * 2.6)))
 		_flower_bed(cd, 22.0, sv * 17.0, 2.0, [0xff5a3c, 0xffa03c, 0xffd05c])
 		_flower_bed(cd, -6.0, sv * 16.5, 1.8, [0xff5a3c, 0xffa03c, 0xffd05c])
 
@@ -1301,14 +1325,12 @@ static func _garden_water(cd: Dictionary, _col: Color) -> void:
 		_add(rim_mi)
 		for i in 4:
 			var a := randf() * TAU
-			var pad := MeshLib.disc(0.32, MeshLib.lit_mat(MeshLib.rgb(0x5e9660)), 8)
-			pad.position = Vector3(w.x + cos(a) * (0.6 + randf() * 1.8), 0.17, w.y + sin(a) * (0.6 + randf() * 1.8))
-			_add(pad)
+			_batch_mesh(MeshLib.cyl_mesh(0.32, 0.32, 0.02, 8), MeshLib.lit_mat(MeshLib.rgb(0x5e9660)),
+				Transform3D(Basis(), Vector3(w.x + cos(a) * (0.6 + randf() * 1.8), 0.17, w.y + sin(a) * (0.6 + randf() * 1.8))))
 		for i in 5:
 			var a := PI * 0.25 + float(i) * 0.35
-			var reed := MeshLib.cyl(0.05, 0.05, 1.3, MeshLib.lit_mat(MeshLib.rgb(0x567a52)), 4)
-			reed.position = Vector3(w.x + cos(a) * 3.5, 0.65, w.y + sin(a) * 3.5)
-			_add(reed)
+			_batch_mesh(MeshLib.cyl_mesh(0.05, 0.05, 1.3, 4), MeshLib.lit_mat(MeshLib.rgb(0x567a52)),
+				Transform3D(Basis(), Vector3(w.x + cos(a) * 3.5, 0.65, w.y + sin(a) * 3.5)))
 		_add_fountain(cd, -2.0, sv * 17.5)
 		_flower_bed(cd, 23.0, sv * 18.0, 2.0, [0x6da0e8, 0xbcd4f8, 0xf4f8ff])
 		_flower_bed(cd, -16.0, sv * 9.5, 1.8, [0x6da0e8, 0xbcd4f8, 0xf4f8ff])
