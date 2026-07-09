@@ -355,7 +355,11 @@ func _build_hud() -> void:
 	hud_root.add_child(v)
 
 	timer_label = _pill(v)
-	timer_label.add_theme_font_size_override("font_size", 20)
+	timer_label.add_theme_font_size_override("font_size", 16)
+	# cap the objective's width so long lines wrap to two — otherwise this pill
+	# drags every pill below it out to the same width
+	timer_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	timer_label.custom_minimum_size = Vector2(190, 0)
 	timer_label.text = "Find your key"
 
 	# hearts = a row of little element-figure icons (filled = colour, empty = faded)
@@ -363,7 +367,7 @@ func _build_hud() -> void:
 	var hrow := HBoxContainer.new()
 	hrow.add_theme_constant_override("separation", 5)
 	hearts_pill.add_child(hrow)
-	var hlbl := _make_label_left("Lives", 15)
+	var hlbl := _make_label_left("Lives", 13)
 	hrow.add_child(hlbl)
 	hearts_box = HBoxContainer.new()
 	hearts_box.add_theme_constant_override("separation", 3)
@@ -374,7 +378,7 @@ func _build_hud() -> void:
 	board_box.add_theme_constant_override("separation", 12)
 	board_pill.add_child(board_box)
 	for el in ["fire", "water", "grass"]:
-		var lbl := _make_label("", 15, _c(UI_COLORS[el]))
+		var lbl := _make_label("", 13, _c(UI_COLORS[el]))
 		board_labels[el] = lbl
 		board_box.add_child(lbl)
 
@@ -390,11 +394,11 @@ func _build_hud() -> void:
 	channel_box.visible = false
 	var cv := VBoxContainer.new()
 	channel_box.add_child(cv)
-	channel_label = _make_label_left("", 13)
+	channel_label = _make_label_left("", 12)
 	cv.add_child(channel_label)
 	var ctrack := ColorRect.new()
 	ctrack.color = Color(0.227, 0.208, 0.314, 0.14)
-	ctrack.custom_minimum_size = Vector2(170, 8)
+	ctrack.custom_minimum_size = Vector2(150, 8)
 	cv.add_child(ctrack)
 	channel_fill = ColorRect.new()
 	channel_fill.color = _c(0x49b36a)
@@ -405,15 +409,15 @@ func _build_hud() -> void:
 	var stam_pill := _pill_panel(v)
 	var sv := VBoxContainer.new()
 	stam_pill.add_child(sv)
-	sv.add_child(_make_label_left("Sprint", 13))
+	sv.add_child(_make_label_left("Sprint", 12))
 	var track := ColorRect.new()
 	track.color = Color(0.227, 0.208, 0.314, 0.14)
-	track.custom_minimum_size = Vector2(170, 8)
+	track.custom_minimum_size = Vector2(150, 8)
 	sv.add_child(track)
 	stam_fill = ColorRect.new()
 	stam_fill.color = _c(0xf0541a)
 	stam_fill.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
-	stam_fill.size = Vector2(170, 8)
+	stam_fill.size = Vector2(150, 8)
 	track.add_child(stam_fill)
 
 	if mobile:
@@ -433,15 +437,16 @@ func _pill_panel(parent: Node) -> PanelContainer:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(1, 1, 1, 0.9)
 	sb.set_corner_radius_all(12)
-	sb.content_margin_left = 14; sb.content_margin_right = 14
-	sb.content_margin_top = 8; sb.content_margin_bottom = 8
+	sb.content_margin_left = 12; sb.content_margin_right = 12
+	sb.content_margin_top = 6; sb.content_margin_bottom = 6
 	p.add_theme_stylebox_override("panel", sb)
+	p.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN   # hug content, don't match the widest pill
 	parent.add_child(p)
 	return p
 
 func _pill(parent: Node) -> Label:
 	var p := _pill_panel(parent)
-	var l := _make_label_left("", 14)
+	var l := _make_label_left("", 13)
 	p.add_child(l)
 	return l
 
@@ -767,14 +772,14 @@ func set_channel(label: String, pct: float) -> void:
 		return
 	channel_box.visible = true
 	channel_label.text = label + "  " + str(int(round(pct * 100.0))) + "%"
-	channel_fill.size.x = 170.0 * clampf(pct, 0.0, 1.0)
+	channel_fill.size.x = 150.0 * clampf(pct, 0.0, 1.0)
 
 func set_cave(text: String) -> void:
 	cave_label.visible = text != ""
 	cave_label.text = text
 
 func set_stamina(pct: float) -> void:
-	stam_fill.size.x = 170.0 * clampf(pct, 0.0, 100.0) / 100.0
+	stam_fill.size.x = 150.0 * clampf(pct, 0.0, 100.0) / 100.0
 
 func toast(msg: String) -> void:
 	toast_label.text = msg
