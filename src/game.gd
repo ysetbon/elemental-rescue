@@ -1090,6 +1090,25 @@ func _cam_obstruction(px: float, pz: float, dx: float, dz: float, maxd: float) -
 		var t: float = _ray_aabb(px, pz, dx, dz, _rc_x[i] - _rc_hw[i], _rc_z[i] - _rc_hd[i], _rc_x[i] + _rc_hw[i], _rc_z[i] + _rc_hd[i])
 		if t >= 0.0 and t < best:
 			best = t
+	# Buildings read as SOLID to the camera. Their collision shells are rings of
+	# small circles with gaps (plus uncollided glass storeys), so the dolly ray can
+	# slip between them and film the interior. While the player is OUTSIDE a
+	# shelter circle (home-tower sanctum or cave), the camera stops at its wall
+	# and slides closer to the character instead of peeking inside.
+	for c in caves:
+		var ox: float = px - c["x"]
+		var oz: float = pz - c["z"]
+		var rr: float = c["r"] + 0.4
+		var c2: float = ox * ox + oz * oz - rr * rr
+		if c2 < 0.0:
+			continue   # player is inside this shelter — the camera may see in
+		var b: float = ox * dx + oz * dz
+		var disc: float = b * b - c2
+		if disc < 0.0:
+			continue
+		var t: float = -b - sqrt(disc)
+		if t > 0.0 and t < best:
+			best = t
 	return maxf(2.6, best - 0.5) if best < maxd else maxd
 
 func _ray_aabb(ox: float, oz: float, dx: float, dz: float, minx: float, minz: float, maxx: float, maxz: float) -> float:
