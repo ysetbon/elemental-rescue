@@ -418,6 +418,10 @@ func _build_hud() -> void:
 
 	if mobile:
 		hud_root.scale = Vector2(2, 2)   # grows down-right from the top-left corner
+	else:
+		# desktop: the 1280×720 canvas stretches up to the window, which made the
+		# stat pills read oversized — render the whole stack at 3/4 size instead
+		hud_root.scale = Vector2(0.75, 0.75)
 
 func _make_label_left(text: String, size: int, col: Color = TEXT) -> Label:
 	var l := _make_label(text, size, col)
