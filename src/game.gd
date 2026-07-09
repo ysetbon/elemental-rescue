@@ -493,14 +493,27 @@ func _perftest_tick() -> void:
 	get_tree().quit()
 
 # ---- `-- autostart drawcalls` probe: report GPU draw calls + a screenshot (windowed).
+# Add `towerfloor2` to park the camera inside the player's home tower on the
+# bedchamber floor instead of the spawn view (interior inspection shots).
+var _cam_freeze := false
+
 func _setup_drawcalls_probe() -> void:
 	get_tree().create_timer(2.0).timeout.connect(func() -> void:
-		var dc := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
-		print("[drawcalls] %d" % dc)
-		var img := get_viewport().get_texture().get_image()
-		img.save_png("user://drawcalls.png")
-		print("[drawcalls] saved %s/drawcalls.png" % OS.get_user_data_dir())
-		get_tree().quit())
+		if OS.get_cmdline_user_args().has("towerfloor2") and player:
+			var t := _tower()
+			if not t.is_empty():
+				var fh: float = t["floor_h"]
+				var a: float = float(t["door_ang"]) + 5.6   # aim across where the old rug sat
+				_cam_freeze = true
+				camera.position = Vector3(t["x"] + cos(a) * 0.9, 2.0 * fh + 1.7, t["z"] + sin(a) * 0.9)
+				camera.look_at(Vector3(t["x"] + cos(a) * 4.2, 2.0 * fh + 0.6, t["z"] + sin(a) * 4.2), Vector3.UP)
+		get_tree().create_timer(0.4).timeout.connect(func() -> void:
+			var dc := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+			print("[drawcalls] %d" % dc)
+			var img := get_viewport().get_texture().get_image()
+			img.save_png("user://drawcalls.png")
+			print("[drawcalls] saved %s/drawcalls.png" % OS.get_user_data_dir())
+			get_tree().quit()))
 
 # 3D render-scale is the single biggest phone FPS lever: render the 3D world at a
 # lower internal resolution and upscale it; the 2D HUD / joystick stay crisp. Tune
@@ -868,6 +881,8 @@ func server_assign_clan_task(peer: int, ids: Array, task: String) -> void:
 
 # ------------------------------------------------------------------ camera
 func _update_camera(dt: float) -> void:
+	if _cam_freeze:
+		return   # debug capture (see _setup_drawcalls_probe) has parked the camera
 	if player:
 		if tower_mode:
 			# first person: the world through your character's eyes
