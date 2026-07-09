@@ -324,6 +324,7 @@ static func _build_castle(el: String) -> void:
 
 	_curtain_wall(cd, stone, stone_dark, col)
 	_build_garden(el, cd, col)
+	_build_home_shrine(el, cd, col)
 	_build_keep(el, cd, col, tint, stone, stone_dark)
 
 	# clan hall + training pad live in the back corners of the courtyard garden
@@ -1267,6 +1268,30 @@ static func _flower_bed(cd: Dictionary, u: float, v: float, r: float, colors: Ar
 			Transform3D(Basis(), Vector3(fx, 0.25, fz)))
 		_batch_mesh(MeshLib.sphere_mesh(0.14, 8, 6), MeshLib.unlit_mat(MeshLib.rgb(colors[i % colors.size()])),
 			Transform3D(Basis(), Vector3(fx, 0.56, fz)))
+
+# The homecoming circle: a painted parent-and-child marker between two flame
+# braziers BEHIND the keep. The freed twin must be brought onto it to win
+# (game.gd _check_rescue). Fire's ember garden already owns that brazier pair
+# at (-16, ±10); water/grass get a matching pair so every castle reads the same.
+static func _build_home_shrine(el: String, cd: Dictionary, col: Color) -> void:
+	if el != "fire":
+		_add_brazier(cd, -16.0, 10.0)
+		_add_brazier(cd, -16.0, -10.0)
+	var w := _lw(cd, -16.0, 0.0)
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(5.6, 5.6)
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_texture = MeshLib.home_marker_tex(col)
+	var decal := MeshLib.mi(pm, mat)
+	decal.position = Vector3(w.x, 0.12, w.y)
+	_add(decal)
+	if not _game.lite:
+		_game.deco_anims.append(func(t: float) -> void:
+			var k := 1.0 + sin(t * 0.003) * 0.06
+			decal.scale = Vector3(k, 1.0, k))
+	_game.home_spot_by_owner[el] = { "x": w.x, "z": w.y, "r": 3.2 }
 
 static func _add_brazier(cd: Dictionary, u: float, v: float) -> void:
 	var w := _lw(cd, u, v)

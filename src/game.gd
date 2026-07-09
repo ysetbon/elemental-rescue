@@ -53,7 +53,7 @@ const CLAN_COOLDOWN := 8.0    # delay before you can re-teach after losing allie
 const ALLY_HELP_RANGE := 30.0 # (unused now — clan hunt the prey across the whole map)
 const KEY_PICK_DIST := 2.6
 const CAGE_RELEASE_DIST := 3.4
-const RESCUE_WIN_DIST := 4.2  # twin this close to your cave centre = win
+const RESCUE_WIN_DIST := 4.2  # fallback win radius when a world has no homecoming circle
 const TWIN_LEASH := 18.0      # twin only follows while you're within this
 
 # ------------------------------------------------------ smart-AI (context steering)
@@ -99,6 +99,8 @@ var cages: Array = []            # zoo cages [{ "x","z","r","ident","node" }]
 var cage_by_el: Dictionary = {}  # el -> cage dict (the twin you must free)
 var clan_hall_by_owner: Dictionary = {}   # el -> { "x","z","r" }
 var train_pad_by_owner: Dictionary = {}   # el -> { "x","z","r" }
+var home_spot_by_owner: Dictionary = {}   # el -> { "x","z","r" } — the homecoming circle
+                                          # behind the keep; bring the freed twin here to win
 var castle_grounds: Array = []            # [{ "x","z","r" }] — everything inside a curtain wall;
                                           # molecules / stones / wander targets stay OUT (wilderness)
 var key_spot_by_owner: Dictionary = {}    # el -> Vector3 treasury pedestal INSIDE that element's keep
@@ -507,6 +509,12 @@ func _setup_drawcalls_probe() -> void:
 				_cam_freeze = true
 				camera.position = Vector3(t["x"] + cos(a) * 0.9, 2.0 * fh + 1.7, t["z"] + sin(a) * 0.9)
 				camera.look_at(Vector3(t["x"] + cos(a) * 4.2, 2.0 * fh + 0.6, t["z"] + sin(a) * 4.2), Vector3.UP)
+		if OS.get_cmdline_user_args().has("homeshot") and player:
+			var hs := _home_spot(player.el)
+			if not hs.is_empty():
+				_cam_freeze = true
+				camera.position = Vector3(hs["x"], 16.0, hs["z"] + 0.5)
+				camera.look_at(Vector3(hs["x"], 0.0, hs["z"]), Vector3.UP)
 		get_tree().create_timer(0.4).timeout.connect(func() -> void:
 			var dc := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
 			print("[drawcalls] %d" % dc)
@@ -599,6 +607,7 @@ func _rebuild_world(world_seed: int) -> void:
 	cage_by_el.clear()
 	clan_hall_by_owner.clear()
 	train_pad_by_owner.clear()
+	home_spot_by_owner.clear()
 	castle_grounds.clear()
 	key_spot_by_owner.clear()
 	tower_by_owner.clear()
@@ -924,6 +933,11 @@ func _update_camera(dt: float) -> void:
 		elif has_key and freed_twin == null and cage_by_el.has(player.el):
 			var cg: Dictionary = cage_by_el[player.el]
 			blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
+		elif freed_twin:
+			# twin is out — point at the homecoming circle behind your keep
+			var hs := _home_spot(player.el)
+			if not hs.is_empty():
+				blips.append({ "pos": Vector2(hs["x"], hs["z"]), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
 		# available black stones (disguise pickups)
 		for s in black_stones:
 			if s["cooldown"] <= 0.0:
@@ -2730,7 +2744,8 @@ func _magnet_key_to(node: Node3D, ch: GameChar, dist: float, dt: float) -> void:
 	behind.y = 1.5 + sin(time_ms * 0.005) * 0.12
 	node.position = node.position.lerp(behind, 1.0 - pow(0.0008, dt))
 
-# Release the twin at your cage, then win by walking it into your home cave.
+# Release the twin at your cage, then win by leading it onto the homecoming
+# circle — the painted marker between the two braziers behind your keep.
 func _check_rescue() -> void:
 	if won or not player or not player.alive:
 		return
@@ -2738,11 +2753,22 @@ func _check_rescue() -> void:
 		var cage: Dictionary = cage_by_el.get(player.el, {})
 		if not cage.is_empty() and player.pos.distance_to(Vector3(cage["x"], 0, cage["z"])) < CAGE_RELEASE_DIST:
 			_release_twin(cage)
-	if freed_twin and cave_by_owner.has(player.el):
-		var c: Dictionary = cave_by_owner[player.el]
-		if Vector2(freed_twin.pos.x - c["x"], freed_twin.pos.z - c["z"]).length() < RESCUE_WIN_DIST:
+	if freed_twin:
+		var hs := _home_spot(player.el)
+		if not hs.is_empty() and Vector2(freed_twin.pos.x - hs["x"], freed_twin.pos.z - hs["z"]).length() < hs["r"]:
 			won = true
 			end_game("rescued")
+
+# The homecoming circle behind `el`'s keep (falls back to the tower centre if a
+# world somehow lacks one, e.g. the banner scene).
+func _home_spot(el: String) -> Dictionary:
+	var hs: Dictionary = home_spot_by_owner.get(el, {})
+	if not hs.is_empty():
+		return hs
+	var c: Dictionary = cave_by_owner.get(el, {})
+	if c.is_empty():
+		return {}
+	return { "x": c["x"], "z": c["z"], "r": RESCUE_WIN_DIST }
 
 func _release_twin(cage: Dictionary) -> void:
 	WorldBuilder.open_cage(cage)
@@ -2754,7 +2780,7 @@ func _release_twin(cage: Dictionary) -> void:
 	t.group.position = t.pos
 	t.group.scale = Vector3.ONE * 0.8
 	freed_twin = t
-	ui.toast("%s is free! Lead them home to your castle keep." % ELEMENTS[player.el]["label"])
+	ui.toast("%s is free! Lead them to the glowing circle behind your tower." % ELEMENTS[player.el]["label"])
 	_update_objective()
 
 func _free_keys() -> void:
@@ -2914,7 +2940,7 @@ func _update_objective() -> void:
 	if won:
 		txt = "Rescued!"
 	elif freed_twin:
-		txt = "Escort %s home to your castle!" % ELEMENTS[player.el]["label"]
+		txt = "Escort %s to the glowing circle behind your tower!" % ELEMENTS[player.el]["label"]
 	elif has_key:
 		txt = "Free %s at the dungeon yard" % ELEMENTS[player.el]["label"]
 	ui.set_objective(txt)
@@ -3838,11 +3864,10 @@ func _server_rescue(dt: float) -> void:
 					twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))
 			else:
 				twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))   # dropped key → wait where freed
-			if cave_by_owner.has(el):
-				var hc: Dictionary = cave_by_owner[el]
-				if twin.pos.distance_to(Vector3(hc["x"], 0, hc["z"])) < RESCUE_WIN_DIST:
-					_server_end_match("rescued", el)
-					return
+			var hs := _home_spot(el)
+			if not hs.is_empty() and twin.pos.distance_to(Vector3(hs["x"], 0, hs["z"])) < hs["r"]:
+				_server_end_match("rescued", el)
+				return
 
 # SERVER: the human actor currently holding `el`'s key (the rescuer), or null.
 func _holder_avatar(el: String) -> GameChar:
@@ -4167,7 +4192,7 @@ func _client_update_status() -> void:
 func _client_update_hud() -> void:
 	ui.set_hearts(player.hp, maxi(player.max_hp, player.hp))
 	if bool(_net_rt.get(local_el, false)):
-		ui.set_objective("Escort your twin home to your castle!")
+		ui.set_objective("Escort your twin to the glowing circle behind your tower!")
 	elif bool(_net_rk.get(local_el, false)):
 		ui.set_objective("Free your twin at the dungeon yard")
 	else:

@@ -179,7 +179,7 @@ func _build_start() -> void:
 		"Hearts: a touch from your rival or CO₂ costs a heart — at zero you're sent home (you're never out)\n"
 		+ "Training totem in your garden: earn an extra heart   ·   Clan hall in your courtyard: teach to summon a clan, then click them to assign tasks\n"
 		+ "Whoever hits you (or your clan) is slowed 5s   ·   your key sits on the treasury pedestal inside the castle of the element that EATS you\n"
-		+ "Steal your key → free your twin at the dungeon yard → lead it into your keep to WIN\n"
+		+ "Steal your key → free your twin at the dungeon yard → bring them to the glowing circle behind your tower to WIN\n"
 		+ "Grab a black stone (Pac-Man power-up): chase & eat your predator, CO₂ ignore you — but O₂ hunt you\n"
 		+ "Sip white O₂ to supercharge your sprint (slower drain, faster recovery)\n"
 		+ "WASD move   ·   Shift sprint   ·   drag mouse to look",

@@ -726,6 +726,62 @@ static func add_blob_shadow(g: Node3D, r: float = 1.4) -> void:
 	n.position.y = 0.05
 	g.add_child(n)
 
+# The rescue "homecoming" marker: a painted parent-and-child (holding hands,
+# a little heart above them) inside a glowing element-coloured ring. Laid flat
+# on the ground behind each keep — bring the freed twin onto it to win.
+static var _home_marker_cache: Dictionary = {}
+
+static func _dseg(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+	var dx := bx - ax
+	var dy := by - ay
+	var l2 := dx * dx + dy * dy
+	var t := 0.0 if l2 < 1e-9 else clampf(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0)
+	return Vector2(px - (ax + dx * t), py - (ay + dy * t)).length()
+
+static func home_marker_tex(col: Color) -> ImageTexture:
+	var key := col.to_html()
+	if _home_marker_cache.has(key):
+		return _home_marker_cache[key]
+	var size := 160
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var cream := Color8(255, 246, 230)
+	var heart := Color8(255, 96, 110)
+	for py in size:
+		for px in size:
+			var u := (px - size / 2.0) / (size / 2.0)
+			var v := (py - size / 2.0) / (size / 2.0)
+			var r := sqrt(u * u + v * v)
+			# glowing ring + faint inner fill
+			var band := smoothstep(1.0, 0.96, r) * smoothstep(0.76, 0.80, r)
+			var fill := 0.16 * smoothstep(0.80, 0.74, r)
+			var out := Color(col.r, col.g, col.b, maxf(0.92 * band, fill))
+			# the pair, holding hands (distance-field union, cream)
+			var d := Vector2(u + 0.26, v + 0.34).length() - 0.115            # adult head
+			d = minf(d, _dseg(u, v, -0.26, -0.20, -0.26, 0.16) - 0.085)      # adult body
+			d = minf(d, _dseg(u, v, -0.26, 0.16, -0.36, 0.46) - 0.045)      # adult legs
+			d = minf(d, _dseg(u, v, -0.26, 0.16, -0.16, 0.46) - 0.045)
+			d = minf(d, _dseg(u, v, -0.19, -0.06, 0.02, 0.06) - 0.04)       # adult arm
+			d = minf(d, Vector2(u - 0.24, v + 0.10).length() - 0.085)       # child head
+			d = minf(d, _dseg(u, v, 0.24, 0.0, 0.24, 0.26) - 0.06)          # child body
+			d = minf(d, _dseg(u, v, 0.24, 0.26, 0.16, 0.46) - 0.035)        # child legs
+			d = minf(d, _dseg(u, v, 0.24, 0.26, 0.32, 0.46) - 0.035)
+			d = minf(d, _dseg(u, v, 0.17, 0.04, 0.02, 0.06) - 0.035)        # child arm
+			d = minf(d, Vector2(u - 0.02, v - 0.06).length() - 0.055)       # clasped hands
+			# small heart floating above the pair
+			var hd := minf(Vector2(u + 0.04, v + 0.52).length() - 0.055,
+				Vector2(u - 0.07, v + 0.52).length() - 0.055)
+			hd = minf(hd, (absf(u - 0.015) + absf(v + 0.46)) - 0.10)
+			var ah := clampf((0.012 - hd) / 0.024, 0.0, 1.0)
+			if ah > 0.0:
+				out = out.lerp(Color(heart.r, heart.g, heart.b, maxf(out.a, 0.95)), ah)
+			var af := clampf((0.012 - d) / 0.024, 0.0, 1.0)
+			if af > 0.0:
+				out = out.lerp(Color(cream.r, cream.g, cream.b, maxf(out.a, 0.97)), af)
+			img.set_pixel(px, py, out)
+	var tex := ImageTexture.create_from_image(img)
+	_home_marker_cache[key] = tex
+	return tex
+
 static var _moon_tex: ImageTexture
 
 static func moon_tex() -> ImageTexture:
