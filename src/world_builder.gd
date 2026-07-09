@@ -1283,7 +1283,7 @@ static func _build_home_shrine(el: String, cd: Dictionary, col: Color) -> void:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_texture = MeshLib.home_marker_tex(col)
+	mat.albedo_texture = MeshLib.home_marker_tex(el, col)
 	var decal := MeshLib.mi(pm, mat)
 	decal.position = Vector3(w.x, 0.12, w.y)
 	_add(decal)

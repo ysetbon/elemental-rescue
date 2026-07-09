@@ -738,14 +738,48 @@ static func _dseg(px: float, py: float, ax: float, ay: float, bx: float, by: flo
 	var t := 0.0 if l2 < 1e-9 else clampf(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0)
 	return Vector2(px - (ax + dx * t), py - (ay + dy * t)).length()
 
-static func home_marker_tex(col: Color) -> ImageTexture:
-	var key := col.to_html()
+# distance to an "uneven capsule": a stroke from a→b whose radius tapers ra→rb
+static func _dcone(px: float, py: float, ax: float, ay: float, ra: float, bx: float, by: float, rb: float) -> float:
+	var dx := bx - ax
+	var dy := by - ay
+	var l2 := dx * dx + dy * dy
+	var t := 0.0 if l2 < 1e-9 else clampf(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0)
+	return Vector2(px - (ax + dx * t), py - (ay + dy * t)).length() - lerpf(ra, rb, t)
+
+# The element character's body silhouette (matches the in-game look): a flame
+# for fire, a droplet for water, a pointed leaf blade for grass. Centred at
+# (cx, cy) — cy is the body's belly line — scaled by s. Negative = inside.
+static func _char_body_sdf(el: String, x: float, y: float, cx: float, cy: float, s: float) -> float:
+	match el:
+		"fire":
+			# plump flame: round belly narrowing to a wind-blown tip + a side lick
+			var d := _dcone(x, y, cx, cy + 0.08 * s, 0.16 * s, cx + 0.04 * s, cy - 0.30 * s, 0.012 * s)
+			d = minf(d, _dcone(x, y, cx - 0.09 * s, cy - 0.02 * s, 0.06 * s, cx - 0.15 * s, cy - 0.17 * s, 0.008 * s))
+			return d
+		"water":
+			# droplet: round belly to a short centred point
+			return _dcone(x, y, cx, cy + 0.07 * s, 0.165 * s, cx, cy - 0.26 * s, 0.015 * s)
+		_:
+			# leaf blade: pointed at both ends, widest at the middle, plus a stem
+			var mid_y := cy - 0.04 * s
+			var d := _dcone(x, y, cx, cy + 0.19 * s, 0.02 * s, cx, mid_y, 0.145 * s)
+			d = minf(d, _dcone(x, y, cx, mid_y, 0.145 * s, cx + 0.05 * s, cy - 0.27 * s, 0.015 * s))
+			return d
+
+static func home_marker_tex(el: String, col: Color) -> ImageTexture:
+	var key := el + "_" + col.to_html()
 	if _home_marker_cache.has(key):
 		return _home_marker_cache[key]
 	var size := 160
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var cream := Color8(255, 246, 230)
+	var ink := Color8(42, 39, 51)
+	var eye := Color8(23, 21, 31)
 	var heart := Color8(255, 96, 110)
+	# adult on the left, child (62%) on the right, hands meeting between them
+	var acx := -0.24; var acy := -0.04
+	var ccx := 0.28; var ccy := 0.12
+	var cs := 0.62
+	var hand := Vector2(0.03, 0.10)
 	for py in size:
 		for px in size:
 			var u := (px - size / 2.0) / (size / 2.0)
@@ -755,28 +789,39 @@ static func home_marker_tex(col: Color) -> ImageTexture:
 			var band := smoothstep(1.0, 0.96, r) * smoothstep(0.76, 0.80, r)
 			var fill := 0.16 * smoothstep(0.80, 0.74, r)
 			var out := Color(col.r, col.g, col.b, maxf(0.92 * band, fill))
-			# the pair, holding hands (distance-field union, cream)
-			var d := Vector2(u + 0.26, v + 0.34).length() - 0.115            # adult head
-			d = minf(d, _dseg(u, v, -0.26, -0.20, -0.26, 0.16) - 0.085)      # adult body
-			d = minf(d, _dseg(u, v, -0.26, 0.16, -0.36, 0.46) - 0.045)      # adult legs
-			d = minf(d, _dseg(u, v, -0.26, 0.16, -0.16, 0.46) - 0.045)
-			d = minf(d, _dseg(u, v, -0.19, -0.06, 0.02, 0.06) - 0.04)       # adult arm
-			d = minf(d, Vector2(u - 0.24, v + 0.10).length() - 0.085)       # child head
-			d = minf(d, _dseg(u, v, 0.24, 0.0, 0.24, 0.26) - 0.06)          # child body
-			d = minf(d, _dseg(u, v, 0.24, 0.26, 0.16, 0.46) - 0.035)        # child legs
-			d = minf(d, _dseg(u, v, 0.24, 0.26, 0.32, 0.46) - 0.035)
-			d = minf(d, _dseg(u, v, 0.17, 0.04, 0.02, 0.06) - 0.035)        # child arm
-			d = minf(d, Vector2(u - 0.02, v - 0.06).length() - 0.055)       # clasped hands
 			# small heart floating above the pair
-			var hd := minf(Vector2(u + 0.04, v + 0.52).length() - 0.055,
-				Vector2(u - 0.07, v + 0.52).length() - 0.055)
-			hd = minf(hd, (absf(u - 0.015) + absf(v + 0.46)) - 0.10)
+			var hd := minf(Vector2(u + 0.02, v + 0.52).length() - 0.055,
+				Vector2(u - 0.09, v + 0.52).length() - 0.055)
+			hd = minf(hd, (absf(u - 0.035) + absf(v + 0.46)) - 0.10)
 			var ah := clampf((0.012 - hd) / 0.024, 0.0, 1.0)
 			if ah > 0.0:
 				out = out.lerp(Color(heart.r, heart.g, heart.b, maxf(out.a, 0.95)), ah)
-			var af := clampf((0.012 - d) / 0.024, 0.0, 1.0)
-			if af > 0.0:
-				out = out.lerp(Color(cream.r, cream.g, cream.b, maxf(out.a, 0.97)), af)
+			# ink limbs: stick legs under each body + the linked arms
+			var di := _dseg(u, v, acx - 0.06, acy + 0.20, acx - 0.09, acy + 0.42) - 0.024
+			di = minf(di, _dseg(u, v, acx + 0.06, acy + 0.20, acx + 0.04, acy + 0.42) - 0.024)
+			di = minf(di, _dseg(u, v, ccx - 0.04, ccy + 0.13, ccx - 0.06, ccy + 0.28) - 0.018)
+			di = minf(di, _dseg(u, v, ccx + 0.04, ccy + 0.13, ccx + 0.06, ccy + 0.28) - 0.018)
+			di = minf(di, _dseg(u, v, acx + 0.13, acy + 0.04, hand.x, hand.y) - 0.026)   # adult arm
+			di = minf(di, _dseg(u, v, ccx - 0.09, ccy + 0.04, hand.x, hand.y) - 0.022)   # child arm
+			di = minf(di, Vector2(u - hand.x, v - hand.y).length() - 0.042)              # clasped hands
+			var ai := clampf((0.010 - di) / 0.020, 0.0, 1.0)
+			if ai > 0.0:
+				out = out.lerp(Color(ink.r, ink.g, ink.b, maxf(out.a, 0.96)), ai)
+			# the element bodies themselves (drawn over the limb roots)
+			var db := minf(_char_body_sdf(el, u, v, acx, acy, 1.0), _char_body_sdf(el, u, v, ccx, ccy, cs))
+			var ab := clampf((0.012 - db) / 0.024, 0.0, 1.0)
+			if ab > 0.0:
+				# storybook vertical glow: lighter toward the tips
+				var bodyc := col.lightened(clampf((0.16 - v) * 0.9, 0.0, 0.5))
+				out = out.lerp(Color(bodyc.r, bodyc.g, bodyc.b, maxf(out.a, 0.97)), ab)
+			# little dark eyes on both figures
+			var de := minf(Vector2(u - (acx - 0.05), v - (acy - 0.05)).length() - 0.021,
+				Vector2(u - (acx + 0.05), v - (acy - 0.05)).length() - 0.021)
+			de = minf(de, Vector2(u - (ccx - 0.032), v - (ccy - 0.02)).length() - 0.015)
+			de = minf(de, Vector2(u - (ccx + 0.032), v - (ccy - 0.02)).length() - 0.015)
+			var ae := clampf((0.008 - de) / 0.016, 0.0, 1.0)
+			if ae > 0.0:
+				out = out.lerp(Color(eye.r, eye.g, eye.b, maxf(out.a, 0.97)), ae)
 			img.set_pixel(px, py, out)
 	var tex := ImageTexture.create_from_image(img)
 	_home_marker_cache[key] = tex

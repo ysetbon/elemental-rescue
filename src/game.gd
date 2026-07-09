@@ -500,7 +500,9 @@ func _perftest_tick() -> void:
 var _cam_freeze := false
 
 func _setup_drawcalls_probe() -> void:
-	get_tree().create_timer(2.0).timeout.connect(func() -> void:
+	# homeshot waits out the 3-2-1-GO countdown overlay so the shot is clean
+	var delay := 4.5 if OS.get_cmdline_user_args().has("homeshot") else 2.0
+	get_tree().create_timer(delay).timeout.connect(func() -> void:
 		if OS.get_cmdline_user_args().has("towerfloor2") and player:
 			var t := _tower()
 			if not t.is_empty():
