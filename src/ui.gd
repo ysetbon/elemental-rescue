@@ -4,6 +4,7 @@ extends CanvasLayer
 # countdown and the end-of-round standings. Built entirely in code.
 
 signal element_selected(el: String)
+signal world_selected(kind: String)      # intro page: "castle" | "town"
 signal play_again()
 signal task_assigned(task: String)
 
@@ -21,6 +22,8 @@ const TEXT := Color(0.227, 0.208, 0.314)
 
 var bg: TextureRect
 var start_root: Control
+var worlds_root: Control                 # intro page 1: pick a world (then start_root picks the element)
+var _tag_label: Label = null             # element-page tagline (world-specific wording)
 var end_root: Control
 var hud_root: Control
 var radar: RadarControl
@@ -144,7 +147,84 @@ func _make_label(text: String, size: int, col: Color = TEXT) -> Label:
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	return l
 
+const TAGLINES := {
+	"castle": "Your twin is caged in the old dungeon yard. Your key is locked in your rival's castle:\nraid it, free your twin, and walk them home to your keep. Pick your element:",
+	"town": "Your twin is caged at the old zoo. Your key lies near your rival's camp:\nsteal it, free your twin, and walk them home to your cave. Pick your element:",
+}
+
+# Intro page 1 — pick one of the two worlds (aerial snapshot on each card).
+func _build_worlds() -> void:
+	worlds_root = Control.new()
+	worlds_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(worlds_root)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	worlds_root.add_child(center)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 20)
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(v)
+	v.add_child(_make_label("ELEMENTAL RESCUE", 54, _c(0xfff1e0)))
+	v.add_child(_make_label("Choose your world:", 20, Color(1, 1, 1, 0.92)))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 24)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	v.add_child(row)
+	# NOTE: the card images live in art/ (not docs/) — the Web export preset excludes docs/*
+	_add_world_card(row, "castle", "CASTLE KINGDOM",
+		"Three huge walled castles — raid the treasury,\nfree your twin, escort them home to your keep",
+		"res://art/world_castle.png")
+	_add_world_card(row, "town", "TWILIGHT TOWN",
+		"The original cozy map — school, playground\nand the old zoo where your twin waits",
+		"res://art/world_town.png")
+
+func _add_world_card(parent: Node, kind: String, name_: String, desc: String, img_path: String) -> void:
+	var s := 1.6 if mobile else 1.0
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(340, 292) * s
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(1, 1, 1, 0.93)
+	sb.set_corner_radius_all(18)
+	sb.set_border_width_all(3)
+	sb.border_color = _c(0xf2a55a)
+	btn.add_theme_stylebox_override("normal", sb)
+	var sb_h := sb.duplicate()
+	sb_h.bg_color = Color(1, 1, 1, 1.0)
+	sb_h.border_color = _c(0xf2a55a).lightened(0.15)
+	btn.add_theme_stylebox_override("hover", sb_h)
+	btn.add_theme_stylebox_override("pressed", sb_h)
+	var v := VBoxContainer.new()
+	v.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	v.offset_left = 12; v.offset_right = -12; v.offset_top = 12; v.offset_bottom = -12
+	v.add_theme_constant_override("separation", 8)
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(v)
+	if ResourceLoader.exists(img_path):
+		var tr := TextureRect.new()
+		tr.texture = load(img_path)
+		tr.custom_minimum_size = Vector2(316, 172) * s
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		v.add_child(tr)
+	v.add_child(_make_label(name_, int(24 * s), _c(0x5a3a20)))
+	v.add_child(_make_label(desc, int(13 * s), Color(0.28, 0.24, 0.3, 0.95)))
+	btn.pressed.connect(func() -> void:
+		world_selected.emit(kind)
+		_show_element_page(kind))
+	parent.add_child(btn)
+
+# Intro page 2 — the world is chosen; pick your element (or go online).
+func _show_element_page(kind: String) -> void:
+	_hide_all()
+	bg.visible = true
+	start_root.visible = true
+	countdown_label.text = ""
+	if _tag_label != null:
+		_tag_label.text = TAGLINES.get(kind, TAGLINES["castle"])
+
 func _build_start() -> void:
+	_build_worlds()
 	start_root = Control.new()
 	start_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(start_root)
@@ -158,9 +238,8 @@ func _build_start() -> void:
 
 	var title := _make_label("ELEMENTAL RESCUE", 54, _c(0xfff1e0))
 	v.add_child(title)
-	var tag := _make_label(
-		"Your twin is locked in a zoo cage. Find your key, free them, and walk them home\nto your cave — while your rival and CO₂ try to send you back. Pick your element:",
-		16, Color(1, 1, 1, 0.92))
+	var tag := _make_label(TAGLINES["castle"], 16, Color(1, 1, 1, 0.92))
+	_tag_label = tag
 	v.add_child(tag)
 
 	var cards := HBoxContainer.new()
@@ -175,11 +254,20 @@ func _build_start() -> void:
 	online_btn.pressed.connect(func() -> void: online_pressed.emit())
 	v.add_child(_center(online_btn))
 
+	var back_btn := Button.new()
+	back_btn.flat = true
+	back_btn.text = "←  change world"
+	back_btn.add_theme_font_size_override("font_size", 14)
+	back_btn.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
+	back_btn.add_theme_color_override("font_hover_color", Color(1, 1, 1, 1.0))
+	back_btn.pressed.connect(func() -> void: show_start())
+	v.add_child(_center(back_btn))
+
 	var hint := _make_label(
 		"Hearts: a touch from your rival or CO₂ costs a heart — at zero you're sent home (you're never out)\n"
-		+ "Training totem by your cave: earn an extra heart   ·   Clan hall: teach 20s for a clan of 10, then click them to assign tasks\n"
-		+ "Whoever hits you (or your clan) is slowed 5s   ·   each element has its own colour-matched key — only you can take yours\n"
-		+ "Find your key → free your twin at its cage → lead it into your cave to WIN\n"
+		+ "Training totem in your garden: earn an extra heart   ·   Clan hall in your courtyard: teach to summon a clan, then click them to assign tasks\n"
+		+ "Whoever hits you (or your clan) is slowed 5s   ·   your key sits on the treasury pedestal inside the castle of the element that EATS you\n"
+		+ "Steal your key → free your twin at the dungeon yard → bring them to the glowing circle behind your tower to WIN\n"
 		+ "Grab a black stone (Pac-Man power-up): chase & eat your predator, CO₂ ignore you — but O₂ hunt you\n"
 		+ "Sip white O₂ to supercharge your sprint (slower drain, faster recovery)\n"
 		+ "WASD move   ·   Shift sprint   ·   drag mouse to look",
@@ -355,7 +443,11 @@ func _build_hud() -> void:
 	hud_root.add_child(v)
 
 	timer_label = _pill(v)
-	timer_label.add_theme_font_size_override("font_size", 20)
+	timer_label.add_theme_font_size_override("font_size", 16)
+	# cap the objective's width so long lines wrap to two — otherwise this pill
+	# drags every pill below it out to the same width
+	timer_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	timer_label.custom_minimum_size = Vector2(190, 0)
 	timer_label.text = "Find your key"
 
 	# hearts = a row of little element-figure icons (filled = colour, empty = faded)
@@ -363,7 +455,7 @@ func _build_hud() -> void:
 	var hrow := HBoxContainer.new()
 	hrow.add_theme_constant_override("separation", 5)
 	hearts_pill.add_child(hrow)
-	var hlbl := _make_label_left("Lives", 15)
+	var hlbl := _make_label_left("Lives", 13)
 	hrow.add_child(hlbl)
 	hearts_box = HBoxContainer.new()
 	hearts_box.add_theme_constant_override("separation", 3)
@@ -374,7 +466,7 @@ func _build_hud() -> void:
 	board_box.add_theme_constant_override("separation", 12)
 	board_pill.add_child(board_box)
 	for el in ["fire", "water", "grass"]:
-		var lbl := _make_label("", 15, _c(UI_COLORS[el]))
+		var lbl := _make_label("", 13, _c(UI_COLORS[el]))
 		board_labels[el] = lbl
 		board_box.add_child(lbl)
 
@@ -390,11 +482,11 @@ func _build_hud() -> void:
 	channel_box.visible = false
 	var cv := VBoxContainer.new()
 	channel_box.add_child(cv)
-	channel_label = _make_label_left("", 13)
+	channel_label = _make_label_left("", 12)
 	cv.add_child(channel_label)
 	var ctrack := ColorRect.new()
 	ctrack.color = Color(0.227, 0.208, 0.314, 0.14)
-	ctrack.custom_minimum_size = Vector2(170, 8)
+	ctrack.custom_minimum_size = Vector2(150, 8)
 	cv.add_child(ctrack)
 	channel_fill = ColorRect.new()
 	channel_fill.color = _c(0x49b36a)
@@ -405,19 +497,23 @@ func _build_hud() -> void:
 	var stam_pill := _pill_panel(v)
 	var sv := VBoxContainer.new()
 	stam_pill.add_child(sv)
-	sv.add_child(_make_label_left("Sprint", 13))
+	sv.add_child(_make_label_left("Sprint", 12))
 	var track := ColorRect.new()
 	track.color = Color(0.227, 0.208, 0.314, 0.14)
-	track.custom_minimum_size = Vector2(170, 8)
+	track.custom_minimum_size = Vector2(150, 8)
 	sv.add_child(track)
 	stam_fill = ColorRect.new()
 	stam_fill.color = _c(0xf0541a)
 	stam_fill.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
-	stam_fill.size = Vector2(170, 8)
+	stam_fill.size = Vector2(150, 8)
 	track.add_child(stam_fill)
 
 	if mobile:
 		hud_root.scale = Vector2(2, 2)   # grows down-right from the top-left corner
+	else:
+		# desktop: the 1280×720 canvas stretches up to the window, which made the
+		# stat pills read oversized — render the whole stack at 3/4 size instead
+		hud_root.scale = Vector2(0.75, 0.75)
 
 func _make_label_left(text: String, size: int, col: Color = TEXT) -> Label:
 	var l := _make_label(text, size, col)
@@ -429,15 +525,16 @@ func _pill_panel(parent: Node) -> PanelContainer:
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(1, 1, 1, 0.9)
 	sb.set_corner_radius_all(12)
-	sb.content_margin_left = 14; sb.content_margin_right = 14
-	sb.content_margin_top = 8; sb.content_margin_bottom = 8
+	sb.content_margin_left = 12; sb.content_margin_right = 12
+	sb.content_margin_top = 6; sb.content_margin_bottom = 6
 	p.add_theme_stylebox_override("panel", sb)
+	p.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN   # hug content, don't match the widest pill
 	parent.add_child(p)
 	return p
 
 func _pill(parent: Node) -> Label:
 	var p := _pill_panel(parent)
-	var l := _make_label_left("", 14)
+	var l := _make_label_left("", 13)
 	p.add_child(l)
 	return l
 
@@ -631,6 +728,7 @@ func _strip_legs(m: Node3D) -> void:
 # --------------------------------------------------------------- screen state
 func _hide_all() -> void:
 	start_root.visible = false
+	if worlds_root: worlds_root.visible = false
 	end_root.visible = false
 	hud_root.visible = false
 	radar.visible = false
@@ -641,7 +739,7 @@ func _hide_all() -> void:
 func show_start() -> void:
 	_hide_all()
 	bg.visible = true
-	start_root.visible = true
+	worlds_root.visible = true    # page 1: pick a world; picking shows the element page
 	countdown_label.text = ""
 
 func show_online_panel() -> void:
@@ -763,14 +861,14 @@ func set_channel(label: String, pct: float) -> void:
 		return
 	channel_box.visible = true
 	channel_label.text = label + "  " + str(int(round(pct * 100.0))) + "%"
-	channel_fill.size.x = 170.0 * clampf(pct, 0.0, 1.0)
+	channel_fill.size.x = 150.0 * clampf(pct, 0.0, 1.0)
 
 func set_cave(text: String) -> void:
 	cave_label.visible = text != ""
 	cave_label.text = text
 
 func set_stamina(pct: float) -> void:
-	stam_fill.size.x = 170.0 * clampf(pct, 0.0, 100.0) / 100.0
+	stam_fill.size.x = 150.0 * clampf(pct, 0.0, 100.0) / 100.0
 
 func toast(msg: String) -> void:
 	toast_label.text = msg

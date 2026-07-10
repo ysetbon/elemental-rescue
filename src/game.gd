@@ -5,7 +5,28 @@ extends Node3D
 # hunts everyone and O₂ molecules hand out points. Most points when time runs out.
 
 # ------------------------------------------------------------------ constants
-const ARENA := 120.0
+# ---- the two selectable worlds (intro page) ----
+# Everything map-dependent lives in WORLDS and is applied by _set_world_kind().
+# Online, the HOST's pick rides the "start" message so every guest builds the
+# same world from the same seed.
+const WORLDS := {
+	"castle": {
+		"arena": 200.0, "pace": 1.2, "fog": 0.0046, "stones": 6,
+		"bridges": [
+			{ "z": -150.0, "half": 4.0 }, { "z": -75.0, "half": 4.0 }, { "z": 0.0, "half": 4.0 },
+			{ "z": 75.0, "half": 4.0 }, { "z": 150.0, "half": 4.0 },
+		],
+		"zoo": { "x": -52.0, "z": 22.0 },
+	},
+	"town": {
+		"arena": 120.0, "pace": 1.0, "fog": 0.0062, "stones": 4,
+		"bridges": [{ "z": -70.0, "half": 3.5 }, { "z": 0.0, "half": 3.5 }, { "z": 70.0, "half": 3.5 }],
+		"zoo": { "x": -34.0, "z": 24.0 },
+	},
+}
+var world_kind := "castle"
+var ARENA := 200.0       # castle world — much larger than the 120 twilight town
+var PACE := 1.2          # uniform speed-up of every character to match the bigger map
 const CATCH_DIST := 2.4
 # Online only: a guest is DRAWN ~(½RTT + INTERP_DELAY)·speed from where the host authoritatively
 # has it (guest prioritises its own smoothness over matching the host — see _render_off). So
@@ -15,14 +36,17 @@ const CATCH_DIST := 2.4
 # their true position at ~140ms RTT, ~3–4u at ~300ms RTT + sprint. 1.6 → a 4.0u effective
 # catch, which cleared the typical gap in-test (note: own-avatar reconcile skew is a separate,
 # tiny ~0.1–0.5u — the input-seq reconciliation removes the latency lead).
-const NET_CATCH_PAD := 1.6
+# The render gap is (½RTT + INTERP_DELAY) · speed, so both pads scale with PACE: the
+# empirical numbers above were measured at pre-PACE speeds. (vars: PACE is per-world.)
+var NET_CATCH_PAD := 1.6 * 1.2
+var NET_REPORT_PAD := 4.0 * 1.2   # range guard on guest-reported catches/hits/sips
 const SIGHT_RANGE := 55.0
 const CO2_SIGHT := 28.0
 const PTS_O2 := 5
 const PTS_PREY := 15
 const ROUND_TIME := 240.0
-const N_O2 := 8
-const N_CO2 := 3
+const N_O2 := 14              # the wilderness between the castles is where the gases roam
+const N_CO2 := 6
 const N_O2_ONLINE := 6        # lighter molecule set online (snapshot bandwidth + host load)
 const N_CO2_ONLINE := 2
 const RIVER_X1 := 2.0
@@ -51,15 +75,17 @@ const CLAN_SCALE := 0.77      # ~40% bigger than the caged twin (0.55), smaller 
 const CLAN_COOLDOWN := 8.0    # delay before you can re-teach after losing allies
 const ALLY_HELP_RANGE := 30.0 # (unused now — clan hunt the prey across the whole map)
 const KEY_PICK_DIST := 2.6
-const CAGE_RELEASE_DIST := 3.4
-const RESCUE_WIN_DIST := 4.2  # twin this close to your cave centre = win
+const CAGE_RELEASE_DIST := 4.2   # must clear the cage's contact ring: obstacle (r 2.3 + 0.2)
+                                 # + body radius 0.9 pushes you out to exactly 3.4, so a 3.4
+                                 # threshold was a float-rounding knife-edge that often failed
+const RESCUE_WIN_DIST := 4.2  # fallback win radius when a world has no homecoming circle
 const TWIN_LEASH := 18.0      # twin only follows while you're within this
 
 # ------------------------------------------------------ smart-AI (context steering)
 const STEER_SLOTS := 16       # candidate directions each NPC weighs every tick
 const PROBE_DIST := 7.5       # how far ahead a direction is checked for walls/dead-ends
 const DISGUISE_TIME := 15.0   # seconds you stay a black figure after a black stone
-const N_BLACK_STONES := 4
+var N_BLACK_STONES := 6       # per-world: a couple more on the big castle map
 const CO_REVERT_TIME := 15.0  # a spent CO₂ (now CO, gray, harmless) auto-recharges after this
 const O2_RESPAWN := 10.0      # a consumed O₂ molecule reappears elsewhere after this
 const O2_CHARGE_CAP := 8      # how many O₂ sips the player can bank for sprint stamina
@@ -71,13 +97,16 @@ const SUN_COLOR := 0xffeccb
 const SUN_ENERGY := 0.60
 const SUN_FROM := Vector3(-95.0, 52.0, 38.0)
 const FOG_COLOR := 0xeec7b7
-const FOG_DENSITY := 0.0062
+var FOG_DENSITY := 0.0046     # per-world: thinner haze so far-off castles read on the big map
 const EXPOSURE := 1.0
 
-const BRIDGES := [{ "z": -70.0, "half": 3.5 }, { "z": 0.0, "half": 3.5 }, { "z": 70.0, "half": 3.5 }]
+var BRIDGES: Array = WORLDS["castle"]["bridges"]   # per-world (see _set_world_kind)
+# The old zoo is a medieval dungeon yard on the castle map — same cages, same
+# rescue rules, different dressing and spot per world.
+var ZOO: Dictionary = WORLDS["castle"]["zoo"]
+# town-world landmarks (only TownBuilder reads these)
 const SCHOOL := { "x": 80.0, "z": -60.0, "w": 28.0, "d": 20.0 }
 const PLAYGROUND := { "x": -70.0, "z": 70.0 }
-const ZOO := { "x": -34.0, "z": 24.0 }
 
 const ELEMENTS := {
 	"fire": { "color": 0xf0662a, "glow": 0xffc878, "prey": "grass", "predator": "water", "label": "Fire" },
@@ -95,6 +124,14 @@ var cages: Array = []            # zoo cages [{ "x","z","r","ident","node" }]
 var cage_by_el: Dictionary = {}  # el -> cage dict (the twin you must free)
 var clan_hall_by_owner: Dictionary = {}   # el -> { "x","z","r" }
 var train_pad_by_owner: Dictionary = {}   # el -> { "x","z","r" }
+var home_spot_by_owner: Dictionary = {}   # el -> { "x","z","r" } — the homecoming circle
+                                          # behind the keep; bring the freed twin here to win
+var castle_grounds: Array = []            # [{ "x","z","r" }] — everything inside a curtain wall;
+                                          # molecules / stones / wander targets stay OUT (wilderness)
+var key_spot_by_owner: Dictionary = {}    # el -> Vector3 treasury pedestal INSIDE that element's keep
+var tower_by_owner: Dictionary = {}       # el -> home-tower dict (see WorldBuilder._build_tower):
+                                          # 6 walkable floors + roof, spiral stair, furniture circles,
+                                          # sliding-bookshelf secret and portrait passage
 var deco_anims: Array = []       # [Callable(t_ms)]
 var wind_leaves: Array = []
 
@@ -197,6 +234,16 @@ var _nt_picked := false
 var _nt_started := false
 var _nt_run_t := 0.0             # seconds since this side's match actually went live
 var _nt_cmd_sent := false        # NETTEST_CLAN: guest has issued its scripted task command
+var _nt_wp: Array = []           # scripted waypoints (world positions) still ahead of this side
+var _nt_wp_stuck := 0.0          # seconds since the last stuck check
+var _nt_wp_last := Vector3.ZERO  # position at the last stuck check / waypoint hit
+var _nt_detour := 0.0            # seconds left of sidestepping away from a wall pin
+var _nt_detour_sign := 1.0       # alternate the sidestep direction on repeated pins
+var _nt_detour_len := 1.4        # grows while re-pinned at the same spot (corner escape)
+var _nt_stuck_at := Vector3.ZERO # where the last pin happened
+var _nt_prev_pos := Vector3.ZERO # last tick's position (teleport = respawn detector)
+var _nt_beat := 0                # NETTEST_RESCUE: next scripted rescue beat (key → cage → home)
+var _nt_beat_t := 0.0            # seconds since the last rescue beat
 var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
 var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
@@ -227,9 +274,21 @@ const DECO_LITE_HZ := 20.0       # lite: run décor / wind-leaf animation at thi
 const PERF_SCALE_LITE := 0.75    # lite: render the 3D world at 75% then upscale (HUD stays sharp)
 const PERF_SCALE_GUEST := 0.60   # guests prioritize local responsiveness over visual sharpness
 var cam_yaw := 0.0
+var cam_pitch := 0.0             # first-person look pitch — only used inside the home tower
 var dragging := false
 var _press_pos := Vector2.ZERO
 var _press_moved := false
+
+# --------------------------------------------------------- home-tower state
+# Walking through your tower door switches to a first-person view of the
+# interior (6 floors + roof); walking out the door restores the chase camera.
+var tower_mode := false
+var _tower_shelf_t := 0.0        # 0..1 — the library's secret bookshelf sliding open
+var _tower_heart_claimed := false # the hidden nook's treasure: one bonus heart per round
+const TOWER_EYE := 1.55          # first-person eye height
+const TOWER_SPEED := 7.5         # indoor walk speed (sprint ×1.35, no stamina cost at home)
+const TOWER_STAIR_R := 2.55      # inside this radius of the tower centre you're on the spiral
+const TOWER_COL_R := 0.95        # central column keep-out
 
 # --------------------------------------------------------- rescue-mode state
 var allies: Array = []           # [GameChar] recruited clan members (every player's, tagged by owner_peer online)
@@ -381,6 +440,8 @@ func _ready_visual() -> void:
 	var is_banner := OS.get_cmdline_user_args().has("banner")
 	randomize()
 	_read_net_log_flag()
+	if OS.get_cmdline_user_args().has("town"):
+		_set_world_kind("town")   # debug probes/tests: boot straight into the town world
 	mobile = TouchControls.is_touch_session()
 	lite = mobile   # phones get the lighter renderer (set before the world is built)
 	_apply_perf_scale()
@@ -399,6 +460,7 @@ func _ready_visual() -> void:
 	touch.game = self
 	add_child(touch)
 	ui.element_selected.connect(start_game)
+	ui.world_selected.connect(_on_world_selected)
 	ui.play_again.connect(_on_play_again)
 	ui.task_assigned.connect(_assign_task)
 	_sync_radar_world()
@@ -418,6 +480,113 @@ func _ready_visual() -> void:
 		elif OS.get_cmdline_user_args().has("grass"): _el = "grass"
 		start_game(_el)
 		running = true
+	# debug: `-- autostart perftest` — headless sim-cost probe: worst-case actor load
+	# (full clan on attack), then print per-frame sim-time stats and quit.
+	if OS.get_cmdline_user_args().has("perftest"):
+		call_deferred("_setup_perftest")
+	# debug: `-- autostart drawcalls` (windowed) — print the frame's draw-call count,
+	# save a viewport screenshot to user://drawcalls.png, then quit.
+	if OS.get_cmdline_user_args().has("drawcalls"):
+		call_deferred("_setup_drawcalls_probe")
+	# debug: `-- menushot [page2]` (windowed) — screenshot the intro page after a beat, then
+	# quit (visual check of the world-select page; `page2` clicks through to the element page).
+	if OS.get_cmdline_user_args().has("menushot"):
+		get_tree().create_timer(1.0).timeout.connect(func() -> void:
+			if OS.get_cmdline_user_args().has("page2"):
+				_on_world_selected("town")
+				ui._show_element_page("town")
+			get_tree().create_timer(0.8).timeout.connect(func() -> void:
+				var img := get_viewport().get_texture().get_image()
+				img.save_png("user://menushot.png")
+				print("[menushot] saved %s/menushot.png" % OS.get_user_data_dir())
+				get_tree().quit()))
+
+# ---- `-- autostart perftest` probe: measures raw main-loop cost per frame while the
+# sim runs a worst-case load (full clan on attack + all molecules). Headless frames are
+# uncapped, so frame-to-frame wall time ≈ pure sim CPU cost (no render).
+const PT_WARMUP := 120
+const PT_FRAMES := 600
+var _pt_samples := PackedFloat64Array()
+var _pt_last := 0
+var _pt_seen := 0
+
+func _setup_perftest() -> void:
+	var hall: Dictionary = clan_hall_by_owner.get("fire", {})
+	if not hall.is_empty():
+		_summon_clan(hall, 0, "fire")
+	if not OS.get_cmdline_user_args().has("idle"):   # `idle` = clan stays on the cheap path
+		for a in allies:
+			a.role = "attack"
+	if OS.get_cmdline_user_args().has("simoff"):     # `simoff` = cosmetics/animate floor only
+		running = false
+	_pt_last = Time.get_ticks_usec()
+	get_tree().process_frame.connect(_perftest_tick)
+
+func _perftest_tick() -> void:
+	var now := Time.get_ticks_usec()
+	var dtus := now - _pt_last
+	_pt_last = now
+	_pt_seen += 1
+	if _pt_seen <= PT_WARMUP:
+		return
+	_pt_samples.append(float(dtus))
+	if _pt_samples.size() < PT_FRAMES:
+		return
+	_pt_samples.sort()
+	var sum := 0.0
+	for s in _pt_samples:
+		sum += s
+	var n := _pt_samples.size()
+	print("[perftest] frames=%d actors=%d allies=%d npcs=%d obstacles=%d rects=%d" % [
+		n, actors.size(), allies.size(), npcs.size(), obstacles.size(), rects.size()])
+	print("[perftest] sim ms/frame mean=%.3f p50=%.3f p95=%.3f max=%.3f" % [
+		sum / n / 1000.0, _pt_samples[n / 2] / 1000.0,
+		_pt_samples[int(n * 0.95)] / 1000.0, _pt_samples[n - 1] / 1000.0])
+	get_tree().quit()
+
+# ---- `-- autostart drawcalls` probe: report GPU draw calls + a screenshot (windowed).
+# Add `towerfloor2` to park the camera inside the player's home tower on the
+# bedchamber floor instead of the spawn view (interior inspection shots).
+var _cam_freeze := false
+
+func _setup_drawcalls_probe() -> void:
+	# homeshot/worldshot wait out the 3-2-1-GO countdown overlay so the shot is clean
+	var args := OS.get_cmdline_user_args()
+	var delay := 4.5 if (args.has("homeshot") or args.has("worldshot")) else 2.0
+	get_tree().create_timer(delay).timeout.connect(func() -> void:
+		if OS.get_cmdline_user_args().has("worldshot"):
+			# vista for the intro world cards: HUD off, fog thinned, framed per world
+			_cam_freeze = true
+			ui.visible = false
+			if world_env != null and world_env.environment != null:
+				world_env.environment.fog_density = FOG_DENSITY * 0.3
+			if world_kind == "castle":
+				camera.position = Vector3(30.0, 34.0, -70.0)
+				camera.look_at(Vector3(132.0, 6.0, 0.0), Vector3.UP)    # the water castle across the wilds
+			else:
+				camera.position = Vector3(62.0, 32.0, 62.0)
+				camera.look_at(Vector3(-24.0, 0.0, 8.0), Vector3.UP)    # over the river toward the zoo
+		if OS.get_cmdline_user_args().has("towerfloor2") and player:
+			var t := _tower()
+			if not t.is_empty():
+				var fh: float = t["floor_h"]
+				var a: float = float(t["door_ang"]) + 5.6   # aim across where the old rug sat
+				_cam_freeze = true
+				camera.position = Vector3(t["x"] + cos(a) * 0.9, 2.0 * fh + 1.7, t["z"] + sin(a) * 0.9)
+				camera.look_at(Vector3(t["x"] + cos(a) * 4.2, 2.0 * fh + 0.6, t["z"] + sin(a) * 4.2), Vector3.UP)
+		if OS.get_cmdline_user_args().has("homeshot") and player:
+			var hs := _home_spot(player.el)
+			if not hs.is_empty():
+				_cam_freeze = true
+				camera.position = Vector3(hs["x"], 16.0, hs["z"] + 0.5)
+				camera.look_at(Vector3(hs["x"], 0.0, hs["z"]), Vector3.UP)
+		get_tree().create_timer(0.4).timeout.connect(func() -> void:
+			var dc := RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME)
+			print("[drawcalls] %d" % dc)
+			var img := get_viewport().get_texture().get_image()
+			img.save_png("user://drawcalls.png")
+			print("[drawcalls] saved %s/drawcalls.png" % OS.get_user_data_dir())
+			get_tree().quit()))
 
 # 3D render-scale is the single biggest phone FPS lever: render the 3D world at a
 # lower internal resolution and upscale it; the 2D HUD / joystick stay crisp. Tune
@@ -503,11 +672,35 @@ func _rebuild_world(world_seed: int) -> void:
 	cage_by_el.clear()
 	clan_hall_by_owner.clear()
 	train_pad_by_owner.clear()
+	home_spot_by_owner.clear()
+	castle_grounds.clear()
+	key_spot_by_owner.clear()
+	tower_by_owner.clear()
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
-	WorldBuilder.build(self)
+	if world_kind == "town":
+		TownBuilder.build(self)
+	else:
+		WorldBuilder.build(self)
+	_sg_nobs = -1   # world changed — lazily rebuild the spatial index on first query
 	_sync_radar_world()
+
+# Apply one of the two selectable worlds (intro page pick; online, the host's pick
+# arrives with the "start" message). Must run BEFORE _rebuild_world for that world.
+func _set_world_kind(kind: String) -> void:
+	world_kind = kind if WORLDS.has(kind) else "castle"
+	var w: Dictionary = WORLDS[world_kind]
+	ARENA = w["arena"]
+	PACE = w["pace"]
+	FOG_DENSITY = w["fog"]
+	N_BLACK_STONES = w["stones"]
+	BRIDGES = w["bridges"]
+	ZOO = w["zoo"]
+	NET_CATCH_PAD = 1.6 * PACE
+	NET_REPORT_PAD = 4.0 * PACE
+	if world_env != null and world_env.environment != null:
+		world_env.environment.fog_density = FOG_DENSITY
 
 func _sync_radar_world() -> void:
 	if ui == null:
@@ -596,7 +789,7 @@ func _process(delta: float) -> void:
 			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
 		ch.group.animate(time_ms, ch.vel.length())
 	# drive the black-figure disguise model so it mirrors the (now-hidden) player
-	if disguise_node and is_instance_valid(disguise_node) and player and _is_disguised():
+	if disguise_node and is_instance_valid(disguise_node) and player and _is_disguised() and not tower_mode:
 		disguise_node.position = player.pos
 		disguise_node.rotation.y = player.group.rotation.y
 		disguise_node.animate(time_ms, player.vel.length())
@@ -647,6 +840,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_click_select(event.position)
 	elif event is InputEventMouseMotion and dragging:
 		cam_yaw -= event.relative.x * 0.0052
+		if tower_mode:
+			cam_pitch = clampf(cam_pitch - event.relative.y * 0.0042, -1.15, 1.15)
 		if event.position.distance_to(_press_pos) > 6.0:
 			_press_moved = true
 
@@ -779,8 +974,16 @@ func server_assign_clan_task(peer: int, ids: Array, task: String) -> void:
 
 # ------------------------------------------------------------------ camera
 func _update_camera(dt: float) -> void:
+	if _cam_freeze:
+		return   # debug capture (see _setup_drawcalls_probe) has parked the camera
 	if player:
-		if _clan_assign_active():
+		if tower_mode:
+			# first person: the world through your character's eyes
+			var eye := player.pos + Vector3(0, TOWER_EYE, 0)
+			camera.position = eye
+			var fwd := Vector3(-sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), -cos(cam_yaw) * cos(cam_pitch))
+			camera.look_at(eye + fwd, Vector3.UP)
+		elif _clan_assign_active():
 			# top-down command view, raised enough that the whole clan ring stays in frame
 			var hall: Dictionary = clan_hall_by_owner[player.el]
 			var cam_h := _assign_cam_height()
@@ -803,21 +1006,29 @@ func _update_camera(dt: float) -> void:
 			camera.position = camera.position.lerp(Vector3(tx, cam_h, tz), 1.0 - pow(snap, dt))
 			camera.look_at(Vector3(cp.x, look_y, cp.z), Vector3.UP)
 		var blips: Array = []
-		for ch in all_chars():
-			if not ch.alive or ch == player:
-				continue
-			blips.append({ "pos": Vector2(ch.pos.x, ch.pos.z), "color": ch.radar_color, "o2": ch.kind == "o2" })
-		# objective markers: your colour-matched key, then the cage to free your twin
-		if not has_key and keys.has(player.el):
-			var mk: Dictionary = keys[player.el]
-			blips.append({ "pos": Vector2(mk["pos"].x, mk["pos"].z), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
-		elif has_key and freed_twin == null and cage_by_el.has(player.el):
-			var cg: Dictionary = cage_by_el[player.el]
-			blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
-		# available black stones (disguise pickups)
-		for s in black_stones:
-			if s["cooldown"] <= 0.0:
-				blips.append({ "pos": Vector2(s["pos"].x, s["pos"].z), "color": Color(0.35, 0.3, 0.45), "o2": false })
+		if mode == Mode.CLIENT:
+			_client_radar_blips(blips)   # guests: actors/objectives come from the net mirrors
+		else:
+			for ch in all_chars():
+				if not ch.alive or ch == player:
+					continue
+				blips.append({ "pos": Vector2(ch.pos.x, ch.pos.z), "color": ch.radar_color, "o2": ch.kind == "o2" })
+			# objective markers: your colour-matched key, then the cage to free your twin
+			if not has_key and keys.has(player.el):
+				var mk: Dictionary = keys[player.el]
+				blips.append({ "pos": Vector2(mk["pos"].x, mk["pos"].z), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
+			elif has_key and freed_twin == null and cage_by_el.has(player.el):
+				var cg: Dictionary = cage_by_el[player.el]
+				blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
+			elif freed_twin:
+				# twin is out — point at the homecoming circle behind your keep
+				var hs := _home_spot(player.el)
+				if not hs.is_empty():
+					blips.append({ "pos": Vector2(hs["x"], hs["z"]), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
+			# available black stones (disguise pickups)
+			for s in black_stones:
+				if s["cooldown"] <= 0.0:
+					blips.append({ "pos": Vector2(s["pos"].x, s["pos"].z), "color": Color(0.35, 0.3, 0.45), "o2": false })
 		ui.radar.update_data(Vector2(player.pos.x, player.pos.z), player.group.rotation.y, blips)
 	else:
 		var a := time_ms * 0.00006
@@ -836,22 +1047,204 @@ func _assign_cam_height() -> float:
 	var fit := 7.0 / (half_v * minf(1.0, aspect))   # clan ring radius + margin
 	return maxf(ASSIGN_CAM_H, fit)
 
+# GUEST: radar blips from the replication mirrors. The host-side sources the radar
+# normally reads (all_chars() / has_key / freed_twin / keys) are empty on a client,
+# so online the radar showed nothing at all — no actors and no objective markers.
+func _client_radar_blips(blips: Array) -> void:
+	for nid in _net_actors:
+		if int(nid) == local_net_id:
+			continue
+		var a: Dictionary = _net_actors[nid]
+		var fl := int(a.get("flags", 0))
+		if (fl & (1 << 4)) == 0:
+			continue                             # dead / consumed
+		var g = ghosts.get(nid)
+		if g == null or not is_instance_valid(g):
+			continue
+		var kind: String = _KIND_NAME[fl & 3]
+		var col: Color
+		if kind == "o2":
+			col = MeshLib.rgb(0xeceef6)
+		elif kind == "co2":
+			col = MeshLib.rgb(0x3a3744)
+		else:
+			col = MeshLib.rgb(ELEMENTS[_EL_NAME[(fl >> 2) & 3]]["color"])
+		blips.append({ "pos": Vector2(g.position.x, g.position.z), "color": col, "o2": kind == "o2" })
+	# objective markers, mirroring the host branch: key → cage → homecoming circle
+	if bool(_net_rt.get(local_el, false)):
+		var hs := _home_spot(local_el)
+		if not hs.is_empty():
+			blips.append({ "pos": Vector2(hs["x"], hs["z"]), "color": MeshLib.rgb(ELEMENTS[local_el]["color"]), "o2": false })
+	elif bool(_net_rk.get(local_el, false)):
+		if cage_by_el.has(local_el):
+			var cg: Dictionary = cage_by_el[local_el]
+			blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
+	elif key_nodes.has(local_el) and is_instance_valid(key_nodes[local_el]) and key_nodes[local_el].visible:
+		var kn: Node3D = key_nodes[local_el]
+		blips.append({ "pos": Vector2(kn.position.x, kn.position.z), "color": MeshLib.rgb(ELEMENTS[local_el]["color"]), "o2": false })
+
+# ------------------------------------------------------- spatial index (perf)
+# The castle world registers ~300 obstacles + ~80 rects, and the steering / LOS /
+# collision code used to scan ALL of them per query — with ~30 agents × 16 steer
+# slots per frame that was the main-thread hotspot (the "castle lag"). The world is
+# static after build, so everything is bucketed once into a uniform grid (+ packed
+# coordinate mirrors so the hot loops never touch Dictionaries), and each query only
+# tests the primitives near it. Rebuilt lazily whenever the array sizes change
+# (world rebuild, cage restore).
+const SG_CELL := 16.0
+const SG_PAD := 3.2    # insert inflation — must cover the largest query inflation
+                       # (avoidance rect pad 2.2, slot probe 0.9 + seg-sample slack 2.0)
+const SG_SEG_STEP := 4.0   # sample spacing along segment queries (slack covered by SG_PAD)
+var _sg_nobs := -1     # obstacle count at last build (-1 = dirty)
+var _sg_nrcs := -1
+var _sg_w := 1
+var _sg_min := 0.0
+var _sg_obs: Array = []    # per cell: PackedInt32Array of obstacle indices (or null)
+var _sg_rcs: Array = []    # per cell: PackedInt32Array of rect indices (or null)
+var _ob_x := PackedFloat32Array()
+var _ob_z := PackedFloat32Array()
+var _ob_r := PackedFloat32Array()
+var _rc_x := PackedFloat32Array()
+var _rc_z := PackedFloat32Array()
+var _rc_hw := PackedFloat32Array()
+var _rc_hd := PackedFloat32Array()
+var _ob_stamp := PackedInt32Array()   # last query id that already collected index i
+var _rc_stamp := PackedInt32Array()
+var _sg_qid := 0
+var _q_obs := PackedInt32Array()      # scratch: candidates of the CURRENT gather
+var _q_rcs := PackedInt32Array()
+
+func _ensure_spatial() -> void:
+	if obstacles.size() != _sg_nobs or rects.size() != _sg_nrcs:
+		_build_spatial_index()
+
+func _build_spatial_index() -> void:
+	_sg_nobs = obstacles.size()
+	_sg_nrcs = rects.size()
+	var span := ARENA + 40.0
+	_sg_min = -span
+	_sg_w = maxi(1, int(ceil(span * 2.0 / SG_CELL)))
+	var ncell := _sg_w * _sg_w
+	_sg_obs = []
+	_sg_obs.resize(ncell)
+	_sg_rcs = []
+	_sg_rcs.resize(ncell)
+	_ob_x.resize(_sg_nobs); _ob_z.resize(_sg_nobs); _ob_r.resize(_sg_nobs)
+	_ob_stamp = PackedInt32Array()
+	_ob_stamp.resize(_sg_nobs)
+	for i in _sg_nobs:
+		var o: Dictionary = obstacles[i]
+		_ob_x[i] = o["x"]; _ob_z[i] = o["z"]; _ob_r[i] = o["r"]
+		_sg_insert(_sg_obs, o["x"], o["z"], o["r"] + SG_PAD, o["r"] + SG_PAD, i)
+	_rc_x.resize(_sg_nrcs); _rc_z.resize(_sg_nrcs); _rc_hw.resize(_sg_nrcs); _rc_hd.resize(_sg_nrcs)
+	_rc_stamp = PackedInt32Array()
+	_rc_stamp.resize(_sg_nrcs)
+	for i in _sg_nrcs:
+		var r: Dictionary = rects[i]
+		_rc_x[i] = r["x"]; _rc_z[i] = r["z"]; _rc_hw[i] = r["hw"]; _rc_hd[i] = r["hd"]
+		_sg_insert(_sg_rcs, r["x"], r["z"], r["hw"] + SG_PAD, r["hd"] + SG_PAD, i)
+	_sg_qid = 0
+
+func _sg_insert(grid: Array, x: float, z: float, hx: float, hz: float, idx: int) -> void:
+	var cx0 := clampi(int((x - hx - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cx1 := clampi(int((x + hx - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz0 := clampi(int((z - hz - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz1 := clampi(int((z + hz - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			var ci := cx * _sg_w + cz
+			if grid[ci] == null:
+				grid[ci] = PackedInt32Array()
+			grid[ci].append(idx)
+
+func _sg_cell(x: float, z: float) -> int:
+	var cx := clampi(int((x - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz := clampi(int((z - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	return cx * _sg_w + cz
+
+# collect into _q_obs/_q_rcs every primitive registered in a cell, dedup by stamp
+func _sg_take_cell(ci: int, qid: int) -> void:
+	var cell = _sg_obs[ci]
+	if cell != null:
+		for i in cell:
+			if _ob_stamp[i] != qid:
+				_ob_stamp[i] = qid
+				_q_obs.append(i)
+	cell = _sg_rcs[ci]
+	if cell != null:
+		for i in cell:
+			if _rc_stamp[i] != qid:
+				_rc_stamp[i] = qid
+				_q_rcs.append(i)
+
+# candidates within a half×half box around (x,z) → _q_obs/_q_rcs
+func _sg_gather_disc(x: float, z: float, half: float) -> void:
+	_sg_qid += 1
+	_q_obs.resize(0)
+	_q_rcs.resize(0)
+	var cx0 := clampi(int((x - half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cx1 := clampi(int((x + half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz0 := clampi(int((z - half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	var cz1 := clampi(int((z + half - _sg_min) / SG_CELL), 0, _sg_w - 1)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			_sg_take_cell(cx * _sg_w + cz, _sg_qid)
+
+# candidates near the segment a→b → _q_obs/_q_rcs (samples every SG_SEG_STEP; the
+# ≤ SG_SEG_STEP/2 gap between samples is covered by SG_PAD at insert time)
+func _sg_gather_seg(ax: float, az: float, bx: float, bz: float) -> void:
+	_sg_qid += 1
+	_q_obs.resize(0)
+	_q_rcs.resize(0)
+	var dx := bx - ax
+	var dz := bz - az
+	var len_ := sqrt(dx * dx + dz * dz)
+	var steps := maxi(1, int(ceil(len_ / SG_SEG_STEP)))
+	var last_ci := -1
+	for s in steps + 1:
+		var t := float(s) / float(steps)
+		var ci := _sg_cell(ax + dx * t, az + dz * t)
+		if ci != last_ci:
+			last_ci = ci
+			_sg_take_cell(ci, _sg_qid)
+
 func _cam_obstruction(px: float, pz: float, dx: float, dz: float, maxd: float) -> float:
+	_ensure_spatial()
+	_sg_gather_seg(px, pz, px + dx * maxd, pz + dz * maxd)
 	var best := maxd
-	for o in obstacles:
-		var ox: float = px - o["x"]
-		var oz: float = pz - o["z"]
+	for i in _q_obs:
+		var ox: float = px - _ob_x[i]
+		var oz: float = pz - _ob_z[i]
 		var b: float = ox * dx + oz * dz
-		var c: float = ox * ox + oz * oz - o["r"] * o["r"]
+		var c: float = ox * ox + oz * oz - _ob_r[i] * _ob_r[i]
 		var disc: float = b * b - c
 		if disc < 0.0:
 			continue
 		var t: float = -b - sqrt(disc)
 		if t > 0.0 and t < best:
 			best = t
-	for r in rects:
-		var t: float = _ray_aabb(px, pz, dx, dz, r["x"] - r["hw"], r["z"] - r["hd"], r["x"] + r["hw"], r["z"] + r["hd"])
+	for i in _q_rcs:
+		var t: float = _ray_aabb(px, pz, dx, dz, _rc_x[i] - _rc_hw[i], _rc_z[i] - _rc_hd[i], _rc_x[i] + _rc_hw[i], _rc_z[i] + _rc_hd[i])
 		if t >= 0.0 and t < best:
+			best = t
+	# Buildings read as SOLID to the camera. Their collision shells are rings of
+	# small circles with gaps (plus uncollided glass storeys), so the dolly ray can
+	# slip between them and film the interior. While the player is OUTSIDE a
+	# shelter circle (home-tower sanctum or cave), the camera stops at its wall
+	# and slides closer to the character instead of peeking inside.
+	for c in caves:
+		var ox: float = px - c["x"]
+		var oz: float = pz - c["z"]
+		var rr: float = c["r"] + 0.4
+		var c2: float = ox * ox + oz * oz - rr * rr
+		if c2 < 0.0:
+			continue   # player is inside this shelter — the camera may see in
+		var b: float = ox * dx + oz * dz
+		var disc: float = b * b - c2
+		if disc < 0.0:
+			continue
+		var t: float = -b - sqrt(disc)
+		if t > 0.0 and t < best:
 			best = t
 	return maxf(2.6, best - 0.5) if best < maxd else maxd
 
@@ -943,7 +1336,7 @@ func _eject_from_cave(ch: GameChar) -> void:
 	ch.vel = Vector3(cos(a), 0, sin(a)) * 6.0
 	ch.cave_cooldown = CAVE_LOCKOUT
 	if ch.is_player:
-		ui.toast("Ejected! Cave locked for %ds" % int(CAVE_LOCKOUT))
+		ui.toast("Ejected! Keep locked for %ds" % int(CAVE_LOCKOUT))
 
 func _update_cave_timers(dt: float) -> void:
 	for ch in actors:
@@ -952,18 +1345,23 @@ func _update_cave_timers(dt: float) -> void:
 		if ch.cave_cooldown > 0.0:
 			ch.cave_cooldown = maxf(0.0, ch.cave_cooldown - dt)
 		if inside_own_cave(ch):
-			ch.cave_time += dt
-			if ch.cave_time >= CAVE_MAX_STAY:
-				ch.cave_time = 0.0
-				_eject_from_cave(ch)
+			if ch.is_player and tower_mode:
+				ch.cave_time = 0.0   # at home in your own tower — stay as long as you like
+			else:
+				ch.cave_time += dt
+				if ch.cave_time >= CAVE_MAX_STAY:
+					ch.cave_time = 0.0
+					_eject_from_cave(ch)
 		else:
 			ch.cave_time = 0.0
 	if mode == Mode.SERVER:
 		return
-	if player and player.alive and inside_own_cave(player):
-		ui.set_cave("Home — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
+	if player and player.alive and tower_mode:
+		ui.set_cave(_tower_floor_label(_tower()))
+	elif player and player.alive and inside_own_cave(player):
+		ui.set_cave("Home keep — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
 	elif player and player.cave_cooldown > 0.0:
-		ui.set_cave("Cave lockout %ds" % int(ceil(player.cave_cooldown)))
+		ui.set_cave("Keep lockout %ds" % int(ceil(player.cave_cooldown)))
 	else:
 		ui.set_cave("")
 
@@ -976,11 +1374,13 @@ func can_see(a: GameChar, b: GameChar, range_: float = SIGHT_RANGE) -> bool:
 		return false
 	if dist < 0.01:
 		return true
-	for o in obstacles:
-		if _seg_circle(a.pos.x, a.pos.z, b.pos.x, b.pos.z, o["x"], o["z"], o["r"]):
+	_ensure_spatial()
+	_sg_gather_seg(a.pos.x, a.pos.z, b.pos.x, b.pos.z)
+	for i in _q_obs:
+		if _seg_circle(a.pos.x, a.pos.z, b.pos.x, b.pos.z, _ob_x[i], _ob_z[i], _ob_r[i]):
 			return false
-	for r in rects:
-		if _seg_aabb(a.pos.x, a.pos.z, b.pos.x, b.pos.z, r["x"] - r["hw"], r["z"] - r["hd"], r["x"] + r["hw"], r["z"] + r["hd"]):
+	for i in _q_rcs:
+		if _seg_aabb(a.pos.x, a.pos.z, b.pos.x, b.pos.z, _rc_x[i] - _rc_hw[i], _rc_z[i] - _rc_hd[i], _rc_x[i] + _rc_hw[i], _rc_z[i] + _rc_hd[i]):
 			return false
 	return true
 
@@ -1039,24 +1439,30 @@ func _block_circle(ch: GameChar, room: Dictionary) -> void:
 
 func resolve_collisions(ch: GameChar) -> void:
 	var R := 0.9
-	for o in obstacles:
-		var dx: float = ch.pos.x - o["x"]
-		var dz: float = ch.pos.z - o["z"]
-		var dist := sqrt(dx * dx + dz * dz)
-		var mn: float = o["r"] + R
-		if dist < mn and dist > 0.001:
-			var k := (mn - dist) / dist
-			ch.pos.x += dx * k; ch.pos.z += dz * k
-	for r in rects:
-		var dx: float = ch.pos.x - r["x"]
-		var dz: float = ch.pos.z - r["z"]
-		if absf(dx) < r["hw"] + R and absf(dz) < r["hd"] + R:
-			var ox: float = r["hw"] + R - absf(dx)
-			var oz: float = r["hd"] + R - absf(dz)
-			if ox < oz:
-				ch.pos.x += signf(dx if dx != 0.0 else 1.0) * ox
-			else:
-				ch.pos.z += signf(dz if dz != 0.0 else 1.0) * oz
+	_ensure_spatial()
+	var ci := _sg_cell(ch.pos.x, ch.pos.z)   # SG_PAD covers every primitive within reach
+	var obs_cell = _sg_obs[ci]
+	if obs_cell != null:
+		for i in obs_cell:
+			var dx: float = ch.pos.x - _ob_x[i]
+			var dz: float = ch.pos.z - _ob_z[i]
+			var dist := sqrt(dx * dx + dz * dz)
+			var mn: float = _ob_r[i] + R
+			if dist < mn and dist > 0.001:
+				var k := (mn - dist) / dist
+				ch.pos.x += dx * k; ch.pos.z += dz * k
+	var rc_cell = _sg_rcs[ci]
+	if rc_cell != null:
+		for i in rc_cell:
+			var dx: float = ch.pos.x - _rc_x[i]
+			var dz: float = ch.pos.z - _rc_z[i]
+			if absf(dx) < _rc_hw[i] + R and absf(dz) < _rc_hd[i] + R:
+				var ox: float = _rc_hw[i] + R - absf(dx)
+				var oz: float = _rc_hd[i] + R - absf(dz)
+				if ox < oz:
+					ch.pos.x += signf(dx if dx != 0.0 else 1.0) * ox
+				else:
+					ch.pos.z += signf(dz if dz != 0.0 else 1.0) * oz
 	for c in caves:
 		if not cave_blocks(ch, c):
 			continue
@@ -1088,12 +1494,33 @@ func random_spot(min_r: float = 0.0) -> Vector3:
 			continue
 		if caves.any(func(c): return Vector2(c["x"] - x, c["z"] - z).length() < c["r"] + 3):
 			continue
-		if rects.any(func(r): return absf(x - r["x"]) < r["hw"] + 2 and absf(z - r["z"]) < r["hd"] + 2):
+		# the wilds only: nothing random spawns or wanders inside a castle's curtain wall
+		if castle_grounds.any(func(g): return Vector2(g["x"] - x, g["z"] - z).length() < g["r"]):
 			continue
-		if obstacles.any(func(o): return Vector2(o["x"] - x, o["z"] - z).length() < o["r"] + 1.5):
+		if _spot_blocked(x, z):
 			continue
 		return Vector3(x, 0, z)
 	return Vector3(-30, 0, -30)
+
+# grid-backed "is anything solid near this point" (rect pad 2.0 / obstacle pad 1.5,
+# both within SG_PAD so the point's own cell sees every candidate)
+func _spot_blocked(x: float, z: float) -> bool:
+	_ensure_spatial()
+	var ci := _sg_cell(x, z)
+	var rc_cell = _sg_rcs[ci]
+	if rc_cell != null:
+		for i in rc_cell:
+			if absf(x - _rc_x[i]) < _rc_hw[i] + 2.0 and absf(z - _rc_z[i]) < _rc_hd[i] + 2.0:
+				return true
+	var obs_cell = _sg_obs[ci]
+	if obs_cell != null:
+		for i in obs_cell:
+			var dx := x - _ob_x[i]
+			var dz := z - _ob_z[i]
+			var rr: float = _ob_r[i] + 1.5
+			if dx * dx + dz * dz < rr * rr:
+				return true
+	return false
 
 # ------------------------------------------------------------------ steering
 func _avoidance_and_walls(ch: GameChar, desired: Vector3) -> Vector3:
@@ -1103,24 +1530,30 @@ func _avoidance_and_walls(ch: GameChar, desired: Vector3) -> Vector3:
 	if ch.pos.x < -m: d.x += (-m - ch.pos.x) * 0.25
 	if ch.pos.z > m: d.z -= (ch.pos.z - m) * 0.25
 	if ch.pos.z < -m: d.z += (-m - ch.pos.z) * 0.25
-	for o in obstacles:
-		var dx: float = ch.pos.x - o["x"]
-		var dz: float = ch.pos.z - o["z"]
-		var dist := sqrt(dx * dx + dz * dz)
-		var rr: float = o["r"] + 1.8
-		if dist < rr and dist > 0.01:
-			var w := (rr - dist) / rr
-			d.x += dx / dist * w * 1.7; d.z += dz / dist * w * 1.7
-	for r in rects:
-		var dx: float = ch.pos.x - r["x"]
-		var dz: float = ch.pos.z - r["z"]
-		if absf(dx) < r["hw"] + 2.2 and absf(dz) < r["hd"] + 2.2:
-			var px: float = absf(dx) - r["hw"]
-			var pz: float = absf(dz) - r["hd"]
-			if px > pz:
-				d.x += signf(dx if dx != 0.0 else 1.0) * 1.5
-			else:
-				d.z += signf(dz if dz != 0.0 else 1.0) * 1.5
+	_ensure_spatial()
+	var ci := _sg_cell(ch.pos.x, ch.pos.z)   # SG_PAD covers every primitive within reach
+	var obs_cell = _sg_obs[ci]
+	if obs_cell != null:
+		for i in obs_cell:
+			var dx: float = ch.pos.x - _ob_x[i]
+			var dz: float = ch.pos.z - _ob_z[i]
+			var dist := sqrt(dx * dx + dz * dz)
+			var rr: float = _ob_r[i] + 1.8
+			if dist < rr and dist > 0.01:
+				var w := (rr - dist) / rr
+				d.x += dx / dist * w * 1.7; d.z += dz / dist * w * 1.7
+	var rc_cell = _sg_rcs[ci]
+	if rc_cell != null:
+		for i in rc_cell:
+			var dx: float = ch.pos.x - _rc_x[i]
+			var dz: float = ch.pos.z - _rc_z[i]
+			if absf(dx) < _rc_hw[i] + 2.2 and absf(dz) < _rc_hd[i] + 2.2:
+				var px: float = absf(dx) - _rc_hw[i]
+				var pz: float = absf(dz) - _rc_hd[i]
+				if px > pz:
+					d.x += signf(dx if dx != 0.0 else 1.0) * 1.5
+				else:
+					d.z += signf(dz if dz != 0.0 else 1.0) * 1.5
 	for c in caves:
 		if not cave_blocks(ch, c):
 			continue
@@ -1186,15 +1619,17 @@ func _lead_point(from: Vector3, target: GameChar, chaser_speed: float) -> Vector
 	var lead: float = clampf(from.distance_to(target.pos) / maxf(chaser_speed, 1.0), 0.0, 1.3)
 	return target.pos + target.vel * lead
 
-# how clear a heading is: 1 = open, 0 = wall/obstacle just ahead
+# how clear a heading is: 1 = open, 0 = wall/obstacle just ahead.
+# Reads the candidates _smart_move gathered into _q_obs/_q_rcs for this agent —
+# one grid gather serves all STEER_SLOTS probes (they share the same origin).
 func _slot_openness(ch: GameChar, dir: Vector3) -> float:
 	var ax := ch.pos.x; var az := ch.pos.z
 	var bx := ax + dir.x * PROBE_DIST; var bz := az + dir.z * PROBE_DIST
-	for o in obstacles:
-		if _seg_circle(ax, az, bx, bz, o["x"], o["z"], o["r"] + 0.9):
+	for i in _q_obs:
+		if _seg_circle(ax, az, bx, bz, _ob_x[i], _ob_z[i], _ob_r[i] + 0.9):
 			return 0.0
-	for r in rects:
-		if _seg_aabb(ax, az, bx, bz, r["x"] - r["hw"] - 0.9, r["z"] - r["hd"] - 0.9, r["x"] + r["hw"] + 0.9, r["z"] + r["hd"] + 0.9):
+	for i in _q_rcs:
+		if _seg_aabb(ax, az, bx, bz, _rc_x[i] - _rc_hw[i] - 0.9, _rc_z[i] - _rc_hd[i] - 0.9, _rc_x[i] + _rc_hw[i] + 0.9, _rc_z[i] + _rc_hd[i] + 0.9):
 			return 0.0
 	var m := ARENA - 4.0
 	if absf(bx) > m or absf(bz) > m:
@@ -1203,9 +1638,16 @@ func _slot_openness(ch: GameChar, dir: Vector3) -> float:
 
 # attracts / repels: arrays of { "pos": Vector3, "weight": float, "range": float }
 func _smart_move(ch: GameChar, attracts: Array, repels: Array, dt: float, speed_mult: float) -> void:
+	# the full slot scan is the priciest AI step — re-plan every other frame (phase
+	# spreads agents across frames) and hold the cached heading in between
+	if (Engine.get_process_frames() + ch.steer_phase) & 1 == 1 and ch.steer_dir != Vector3.ZERO:
+		_steer(ch, ch.steer_dir, dt, speed_mult)
+		return
 	var best := -1e20
 	var best_dir := Vector3.ZERO
 	var vdir := ch.vel.normalized() if ch.vel.length() > 0.1 else Vector3.ZERO
+	_ensure_spatial()
+	_sg_gather_disc(ch.pos.x, ch.pos.z, PROBE_DIST)   # candidates for all _slot_openness probes
 	for i in STEER_SLOTS:
 		var a := TAU * float(i) / float(STEER_SLOTS)
 		var dir := Vector3(sin(a), 0, cos(a))
@@ -1224,6 +1666,7 @@ func _smart_move(ch: GameChar, attracts: Array, repels: Array, dt: float, speed_
 		score += dir.dot(vdir) * 0.2                          # momentum — less jitter
 		if score > best:
 			best = score; best_dir = dir
+	ch.steer_dir = best_dir
 	_steer(ch, best_dir, dt, speed_mult)
 
 # nearest ALIVE actor of a group (the per-element array in by_el) to a point.
@@ -1367,6 +1810,12 @@ func _update_o2(ch: GameChar, dt: float) -> void:
 func _update_player(dt: float) -> void:
 	if not player or not player.alive:
 		return
+	if tower_mode:
+		_update_tower_player(dt)
+		return
+	_check_tower_gate()
+	if tower_mode:
+		return
 	var mx := 0.0
 	var mz := 0.0
 	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
@@ -1399,6 +1848,187 @@ func _update_player(dt: float) -> void:
 	resolve_collisions(player)
 	if sprint and player.vel.length_squared() > 40.0 and randf() < dt * 26.0:
 		_spawn_trail(player)
+
+# ------------------------------------------------------------ the home tower
+# Your castle's central tower is a private, walkable house: 6 floors joined by
+# a spiral staircase around the light column, and a roof terrace on top. Inside
+# it the game switches to a first-person view. Movement here uses the tower's
+# own collision (floor plates, the helix, furniture) instead of the world's 2D
+# sets, because the tower is the one place with real height.
+func _tower() -> Dictionary:
+	if player == null:
+		return {}
+	return tower_by_owner.get(player.el, {})
+
+# Cross the tower doorway (only reachable by the owner — the sanctum circle
+# walls everyone else out) and the view drops into your character's eyes.
+func _check_tower_gate() -> void:
+	if mode != Mode.SINGLE:
+		return   # single-player only for now — online movement is host-replayed in 2D
+	var t := _tower()
+	if t.is_empty():
+		return
+	if Vector2(player.pos.x - t["x"], player.pos.z - t["z"]).length() < float(t["r_in"]) - 0.15:
+		_enter_tower()
+
+func _enter_tower() -> void:
+	tower_mode = true
+	cam_pitch = 0.05
+	player.vel = Vector3.ZERO
+	player.group.visible = false
+	ui.toast("Home sweet tower! Spiral stairs, three floors, a roof — and a secret or two…")
+
+func _exit_tower(quiet: bool = false) -> void:
+	tower_mode = false
+	cam_pitch = 0.0
+	if player:
+		player.pos.y = 0.0
+		player.group.visible = true
+		player.group.position = player.pos
+	if not quiet:
+		ui.toast("Back outside — the rescue continues!")
+
+func _update_tower_player(dt: float) -> void:
+	var t := _tower()
+	if t.is_empty():
+		_exit_tower(true)
+		return
+	# --- input: WASD relative to where you're looking, like outdoors
+	var mx := 0.0
+	var mz := 0.0
+	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
+	if Input.is_physical_key_pressed(KEY_S) or Input.is_physical_key_pressed(KEY_DOWN): mz -= 1.0
+	if Input.is_physical_key_pressed(KEY_D) or Input.is_physical_key_pressed(KEY_RIGHT): mx += 1.0
+	if Input.is_physical_key_pressed(KEY_A) or Input.is_physical_key_pressed(KEY_LEFT): mx -= 1.0
+	mx += touch_move.x
+	mz += touch_move.y
+	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
+	var target := Vector3.ZERO
+	if ln > 0.05:
+		var fx := -sin(cam_yaw)
+		var fz := -cos(cam_yaw)
+		var sprint := Input.is_key_pressed(KEY_SHIFT) or touch_sprint
+		target = Vector3(fx * mz - fz * mx, 0, fz * mz + fx * mx).normalized() \
+			* TOWER_SPEED * (1.35 if sprint else 1.0) * ln
+	player.vel = player.vel.lerp(target, 1.0 - pow(0.0003, dt))
+	var fh: float = t["floor_h"]
+	var top: float = float(t["levels"]) * fh
+	var p := player.pos + player.vel * dt
+	var rel := Vector2(p.x - t["x"], p.z - t["z"])
+	var r := rel.length()
+	var y := player.pos.y
+	if r < TOWER_STAIR_R:
+		# --- on the spiral: height follows the helix (one full turn per floor)
+		if r < TOWER_COL_R:
+			if r > 0.001:
+				rel = rel * (TOWER_COL_R / r)
+			else:
+				rel = Vector2(TOWER_COL_R, 0)
+			r = TOWER_COL_R
+		var ang := fposmod(atan2(rel.y, rel.x) - float(t["door_ang"]), TAU)
+		var base := ang / TAU * fh
+		var best := base
+		for k in range(1, int(t["levels"]) + 1):
+			if absf(base + k * fh - y) < absf(best - y):
+				best = base + k * fh
+		best = clampf(best, 0.0, top)
+		if absf(best - y) < 1.2:
+			y = best
+		else:
+			# stepping over the stairwell edge mid-air — stay on the floor plate
+			p = player.pos
+			rel = Vector2(p.x - t["x"], p.z - t["z"])
+			r = maxf(rel.length(), 0.001)
+	else:
+		# --- on a floor plate (or the roof terrace)
+		var lvl := clampi(int(round(y / fh)), 0, int(t["levels"]))
+		var ly := lvl * fh
+		if absf(y - ly) > 0.45:
+			# mid-flight on the stairs: an invisible rail keeps you on the helix
+			rel = rel * ((TOWER_STAIR_R - 0.05) / r)
+			r = TOWER_STAIR_R - 0.05
+		else:
+			y = ly
+			var door_d := absf(angle_difference(atan2(rel.y, rel.x), float(t["door_ang"])))
+			if lvl == 0 and door_d < 0.42:
+				pass   # the ground-floor doorway — walking out is allowed
+			elif r > float(t["r_in"]):
+				rel = rel * (float(t["r_in"]) / r)
+				r = float(t["r_in"])
+			var furn: Array = t["furn"][mini(lvl, t["furn"].size() - 1)]
+			for o in furn:
+				var dx := (float(t["x"]) + rel.x) - float(o["x"])
+				var dz := (float(t["z"]) + rel.y) - float(o["z"])
+				var dd := sqrt(dx * dx + dz * dz)
+				var mn := float(o["r"]) + 0.5
+				if dd < mn and dd > 0.001:
+					rel.x += dx / dd * (mn - dd)
+					rel.y += dz / dd * (mn - dd)
+			# the library's secret door blocks its nook until it has slid open
+			var sh: Dictionary = t["shelf"]
+			if lvl == int(sh["level"]) and _tower_shelf_t < 0.7:
+				var bx := (float(t["x"]) + rel.x) - float(sh["block"]["x"])
+				var bz := (float(t["z"]) + rel.y) - float(sh["block"]["z"])
+				var bd := sqrt(bx * bx + bz * bz)
+				var bmn := float(sh["block"]["r"]) + 0.5
+				if bd < bmn and bd > 0.001:
+					rel.x += bx / bd * (bmn - bd)
+					rel.y += bz / bd * (bmn - bd)
+	player.pos = Vector3(t["x"] + rel.x, y, t["z"] + rel.y)
+	player.group.position = player.pos
+	# walked out the front door?
+	if y < 0.2 and Vector2(player.pos.x - t["x"], player.pos.z - t["z"]).length() > float(t["r_in"]) + 1.2:
+		_exit_tower()
+		return
+	_tower_secrets(t, dt)
+
+# The tower's two secrets, Hogwarts-style: a bookshelf that slides aside for a
+# hidden treasure room, and a portrait hiding a ladder straight to the roof.
+func _tower_secrets(t: Dictionary, dt: float) -> void:
+	var fh: float = t["floor_h"]
+	var lvl := int(round(player.pos.y / fh))
+	if absf(player.pos.y - lvl * fh) > 0.45:
+		return   # on the stairs
+	var sh: Dictionary = t["shelf"]
+	if lvl == int(sh["level"]) and _tower_shelf_t < 1.0 \
+			and Vector2(player.pos.x - float(sh["zone"]["x"]), player.pos.z - float(sh["zone"]["z"])).length() < float(sh["zone"]["r"]):
+		if _tower_shelf_t == 0.0:
+			ui.toast("The bookshelf rumbles aside — a hidden room!")
+		_tower_shelf_t = minf(1.0, _tower_shelf_t + dt * 1.3)
+	var shelf_node: Node3D = sh.get("node")
+	if shelf_node and is_instance_valid(shelf_node):
+		var k := _tower_shelf_t * _tower_shelf_t * (3.0 - 2.0 * _tower_shelf_t)
+		shelf_node.position = (sh["closed"] as Vector3).lerp(sh["open"] as Vector3, k)
+	var nk: Dictionary = t["nook"]
+	if lvl == int(nk["level"]) and not _tower_heart_claimed \
+			and Vector2(player.pos.x - float(nk["x"]), player.pos.z - float(nk["z"])).length() < float(nk["r"]):
+		_tower_heart_claimed = true
+		player.max_hp = mini(MAX_HP_CAP, player.max_hp + 1)
+		player.hp = player.max_hp
+		_update_hud_hearts()
+		ui.toast("Secret treasure! Hearts refilled — max hearts now %d" % player.max_hp)
+	var ps: Dictionary = t["passage"]
+	if lvl == 0 and Vector2(player.pos.x - float(ps["x"]), player.pos.z - float(ps["z"])).length() < float(ps["r"]):
+		# whoosh — a hidden ladder behind the portrait, straight up to the roof
+		var out := Vector2(float(ps["x"]) - t["x"], float(ps["z"]) - t["z"]).normalized() * 3.9
+		player.pos = Vector3(t["x"] + out.x, float(t["levels"]) * fh, t["z"] + out.y)
+		player.vel = Vector3.ZERO
+		ui.toast("A ladder behind the portrait — up you go, straight to the roof!")
+	# the reverse: a glowing rune shaft laid on the ROOF floor drops you straight home
+	var drop: Dictionary = t.get("roof_drop", {})
+	if not drop.is_empty() and lvl >= int(t["levels"]) \
+			and Vector2(player.pos.x - float(drop["x"]), player.pos.z - float(drop["z"])).length() < float(drop["r"]):
+		player.pos = Vector3(float(drop["lx"]), 0.0, float(drop["lz"]))
+		player.vel = Vector3.ZERO
+		ui.toast("Down the rune shaft — back to the throne hall!")
+
+func _tower_floor_label(t: Dictionary) -> String:
+	var fh: float = t["floor_h"]
+	var lvl := int(round(player.pos.y / fh))
+	if absf(player.pos.y - lvl * fh) > 0.45:
+		return "Home tower — on the spiral stairs"
+	var names := ["throne hall", "music & library", "bedchamber", "rooftop terrace"]
+	return "Home tower — %s" % names[clampi(lvl, 0, names.size() - 1)]
 
 # ------------------------------------------------------------------ trails
 func _spawn_trail(ch: GameChar) -> void:
@@ -1470,7 +2100,10 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 	ch.is_player = is_player
 	ch.net_id = _next_net_id
 	_next_net_id += 1
-	ch.speed = 10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)
+	# PACE scales EVERY character uniformly: the castle world is ~1.7× wider than the
+	# old 120-arena town, so everyone strides faster to keep travel times reasonable.
+	# Chase balance is untouched (all relative speeds preserved).
+	ch.speed = (10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)) * PACE
 	if kind == "element":
 		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
 	elif kind == "o2":
@@ -1634,7 +2267,7 @@ func server_guest_sip(peer: int, nid: int) -> void:
 	if who == null:
 		return
 	for n in npcs:
-		if n.kind == "o2" and n.alive and n.net_id == nid and n.pos.distance_to(who.pos) < CATCH_DIST + 4.0:
+		if n.kind == "o2" and n.alive and n.net_id == nid and n.pos.distance_to(who.pos) < CATCH_DIST + NET_REPORT_PAD:
 			_consume_o2(n)
 			return
 
@@ -1650,14 +2283,14 @@ func server_guest_caught(peer: int, by_nid: int) -> void:
 		if c.net_id == by_nid:
 			attacker = c
 			break
-	if attacker == null or not attacker.alive:
+	if attacker == null or not attacker.alive or attacker.is_twin:
 		return
 	var ok := false
 	if attacker.kind == "element" and attacker.el == ELEMENTS[prey.el]["predator"]:
 		ok = true
 	elif attacker.kind == "co2" and attacker.co_timer <= 0.0:
 		ok = true
-	if not ok or attacker.pos.distance_to(prey.pos) > CATCH_DIST + 4.0:   # generous range guard (ghost was ~½RTT behind)
+	if not ok or attacker.pos.distance_to(prey.pos) > CATCH_DIST + NET_REPORT_PAD:   # generous range guard (ghost was ~½RTT behind)
 		return
 	_take_hit(prey, attacker)
 	if attacker.kind == "co2":
@@ -1680,7 +2313,7 @@ func server_guest_catch(peer: int, prey_nid: int) -> void:
 		return
 	if prey.el != ELEMENTS[pred.el]["prey"]:
 		return
-	if pred.pos.distance_to(prey.pos) > CATCH_DIST + 4.0:   # generous (the prey ghost was ~½RTT behind)
+	if pred.pos.distance_to(prey.pos) > CATCH_DIST + NET_REPORT_PAD:   # generous (the prey ghost was ~½RTT behind)
 		return
 	_take_hit(prey, pred)
 
@@ -1715,6 +2348,9 @@ func _name_of(ch: GameChar) -> String:
 func _take_hit(victim: GameChar, attacker: GameChar) -> void:
 	if not victim.alive or victim.invuln_timer > 0.0:
 		return
+	if net_log and mode == Mode.HOST and _is_remote_human(victim):
+		print("[HOST] guest#%d (%s) hit by %s at %.0f,%.0f — hp %d -> %d" % [victim.peer_id,
+			_name_of(victim), _name_of(attacker), victim.pos.x, victim.pos.z, victim.hp, victim.hp - 1])
 	if victim.is_player or victim.ally:
 		attacker.slow_timer = SLOW_TIME
 	if victim.ally:
@@ -1765,7 +2401,9 @@ func _respawn(ch: GameChar) -> void:
 		if ch.group:
 			ch.group.position = ch.pos
 	if ch.is_player:
-		ui.toast("Caught! Back to your cave.")
+		if tower_mode:
+			_exit_tower(true)
+		ui.toast("Caught! Back to your castle.")
 		_update_hud_hearts()
 
 func _disperse_ally(a: GameChar) -> void:
@@ -2188,14 +2826,14 @@ func _update_key(dt: float) -> void:
 			if player and player.alive and key_carrier.pos.distance_to(player.pos) < 2.6:
 				has_key = true
 				key_carrier = null
-				ui.toast("Your clan brought you your key! Free your twin at the zoo cage.")
+				ui.toast("Your clan brought you your key! Free your twin at the dungeon yard.")
 				_update_objective()
 				_update_hud_status()
 			return
 	# the player walks onto their OWN key
 	if player and player.alive and player.pos.distance_to(mine["pos"]) < KEY_PICK_DIST:
 		has_key = true
-		ui.toast("Got your %s key! Free your twin at the zoo cage." % ELEMENTS[player.el]["label"])
+		ui.toast("Got your %s key! Free your twin at the dungeon yard." % ELEMENTS[player.el]["label"])
 		_update_objective()
 		_update_hud_status()
 		return
@@ -2232,7 +2870,8 @@ func _magnet_key_to(node: Node3D, ch: GameChar, dist: float, dt: float) -> void:
 	behind.y = 1.5 + sin(time_ms * 0.005) * 0.12
 	node.position = node.position.lerp(behind, 1.0 - pow(0.0008, dt))
 
-# Release the twin at your cage, then win by walking it into your home cave.
+# Release the twin at your cage, then win by leading it onto the homecoming
+# circle — the painted marker between the two braziers behind your keep.
 func _check_rescue() -> void:
 	if won or not player or not player.alive:
 		return
@@ -2240,11 +2879,22 @@ func _check_rescue() -> void:
 		var cage: Dictionary = cage_by_el.get(player.el, {})
 		if not cage.is_empty() and player.pos.distance_to(Vector3(cage["x"], 0, cage["z"])) < CAGE_RELEASE_DIST:
 			_release_twin(cage)
-	if freed_twin and cave_by_owner.has(player.el):
-		var c: Dictionary = cave_by_owner[player.el]
-		if Vector2(freed_twin.pos.x - c["x"], freed_twin.pos.z - c["z"]).length() < RESCUE_WIN_DIST:
+	if freed_twin:
+		var hs := _home_spot(player.el)
+		if not hs.is_empty() and Vector2(freed_twin.pos.x - hs["x"], freed_twin.pos.z - hs["z"]).length() < hs["r"]:
 			won = true
 			end_game("rescued")
+
+# The homecoming circle behind `el`'s keep (falls back to the tower centre if a
+# world somehow lacks one, e.g. the banner scene).
+func _home_spot(el: String) -> Dictionary:
+	var hs: Dictionary = home_spot_by_owner.get(el, {})
+	if not hs.is_empty():
+		return hs
+	var c: Dictionary = cave_by_owner.get(el, {})
+	if c.is_empty():
+		return {}
+	return { "x": c["x"], "z": c["z"], "r": RESCUE_WIN_DIST }
 
 func _release_twin(cage: Dictionary) -> void:
 	WorldBuilder.open_cage(cage)
@@ -2256,7 +2906,7 @@ func _release_twin(cage: Dictionary) -> void:
 	t.group.position = t.pos
 	t.group.scale = Vector3.ONE * 0.8
 	freed_twin = t
-	ui.toast("%s is free! Lead them home to your cave." % ELEMENTS[player.el]["label"])
+	ui.toast("%s is free! Lead them to the glowing circle behind your tower." % ELEMENTS[player.el]["label"])
 	_update_objective()
 
 func _free_keys() -> void:
@@ -2269,6 +2919,9 @@ func _free_keys() -> void:
 # --------------------------------------------------------- black-stone disguise
 func _spawn_black_stones() -> void:
 	_free_black_stones()
+	if mode != Mode.SINGLE:
+		return   # online the stones would exist only on the host (they never replicate), so the
+		         # disguise would be a host-only power invisible to guests — offline-only for now
 	var dark := MeshLib.unlit_mat(MeshLib.rgb(0x2a2733))
 	var glow := MeshLib.unlit_mat(MeshLib.rgb(0x6a5f86), 0.4)
 	for i in N_BLACK_STONES:
@@ -2358,10 +3011,14 @@ func _make_key_node(el: String) -> Node3D:
 	n.set_meta("beam", beam)
 	return n
 
-# Each element's key is parked in its PREDATOR's camp — out among that predator's
-# cave, clan hall and training pad. So claiming your key means a raid into the turf
-# of the element that hunts you (and every element's key follows the same rule).
+# Each element's key is locked in its PREDATOR's castle — on the treasury pedestal
+# inside the keep of the element that hunts you. So claiming your key means a raid
+# through their gate, across their garden and into their great hall (every element's
+# key follows the same rule).
 func _pick_key_spot(pred_el: String, used: Array) -> Vector3:
+	if key_spot_by_owner.has(pred_el):
+		return key_spot_by_owner[pred_el]
+	# legacy fallback (no castle registered): near the predator's camp
 	var c: Dictionary = cave_by_owner[pred_el]
 	var hall: Dictionary = clan_hall_by_owner.get(pred_el, c)
 	var pad: Dictionary = train_pad_by_owner.get(pred_el, c)
@@ -2408,19 +3065,44 @@ func _update_hud_status() -> void:
 	ui.set_status(s)
 
 func _update_objective() -> void:
-	var txt := "Find your %s key" % ELEMENTS[player.el]["label"]
+	var txt := "Steal your %s key from %s's castle" % [ELEMENTS[player.el]["label"], ELEMENTS[ELEMENTS[player.el]["predator"]]["label"]]
 	if won:
 		txt = "Rescued!"
 	elif freed_twin:
-		txt = "Escort %s home to your cave!" % ELEMENTS[player.el]["label"]
+		txt = "Escort %s to the glowing circle behind your tower!" % ELEMENTS[player.el]["label"]
 	elif has_key:
-		txt = "Free %s at the zoo cage" % ELEMENTS[player.el]["label"]
+		txt = "Free %s at the dungeon yard" % ELEMENTS[player.el]["label"]
 	ui.set_objective(txt)
 
 # ------------------------------------------------------------- game flow
 # Single-player entry: one local human + NPC fillers (the N=1 case of _spawn_match).
 func start_game(my_el: String) -> void:
 	_spawn_match([{ "peer": 1, "el": my_el, "local": true }], my_el)
+	_debug_tower_start()
+
+# Dev helper (web): ?tower=<level> starts you inside your home tower on that
+# floor — skips the walk across the map when playtesting the interiors.
+func _debug_tower_start() -> void:
+	if mode != Mode.SINGLE or not OS.has_feature("web"):
+		return
+	var v: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('tower')", true)
+	if v == null:
+		return
+	var t := _tower()
+	if t.is_empty():
+		return
+	var lvl := clampi(int(str(v)), 0, int(t["levels"]))
+	_enter_tower()
+	# spawn on a clear patch of floor, facing the stairwell's glass descent hatch
+	var da := float(t["door_ang"])
+	var c := Vector2(float(t["x"]), float(t["z"]))
+	var sp := c + Vector2(cos(da + 0.35), sin(da + 0.35)) * 4.5
+	var hp := c + Vector2(cos(da - 0.225), sin(da - 0.225)) * 3.03
+	player.pos = Vector3(sp.x, lvl * float(t["floor_h"]), sp.y)
+	player.group.position = player.pos
+	var d := (hp - sp).normalized()
+	cam_yaw = atan2(-d.x, -d.y)
+	cam_pitch = -0.55
 
 # Build a match from a list of humans [{peer, el, local?}]. Each element is filled
 # with NPC elementals up to the largest human team ("match the biggest team"), so
@@ -2447,6 +3129,16 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	clan_cooldown = 0.0
 	disguise_timer = 0.0
 	_next_net_id = 1
+	# fresh round: step out of the tower and re-arm its secrets
+	if tower_mode:
+		_exit_tower(true)
+	_tower_shelf_t = 0.0
+	_tower_heart_claimed = false
+	for el in tower_by_owner:
+		var sh: Dictionary = tower_by_owner[el]["shelf"]
+		var shn: Node3D = sh.get("node")
+		if shn and is_instance_valid(shn):
+			shn.position = sh["closed"]
 	WorldBuilder.reset_cages(self)
 	var human_count := { "fire": 0, "water": 0, "grass": 0 }
 	for h in humans:
@@ -2723,12 +3415,18 @@ func _on_join_failed(reason: String) -> void:
 func _on_lobby_changed(players: Array, my_id: int, admin_id: int, code: String) -> void:
 	ui.show_lobby(players, my_id, admin_id, code)
 
-func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
-	_client_start_match(world_seed, humans, net_ids)
+# The intro page picked a world — apply it and show it behind the menu right away.
+func _on_world_selected(kind: String) -> void:
+	_set_world_kind(kind)
+	_rebuild_world(randi())
+
+func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary, world: String) -> void:
+	_client_start_match(world_seed, humans, net_ids, world)
 
 # CLIENT: enter a networked match. Rebuild the static world from the host's seed so
 # prediction collides against the same map, then render remote actors as ghosts.
-func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary, world: String = "castle") -> void:
+	_set_world_kind(world)   # the HOST picked the world; every guest must build the same one
 	_set_lite(true)
 	_client_clear()
 	_clear_actors()
@@ -2771,6 +3469,8 @@ func _client_clear() -> void:
 			key_nodes[el].queue_free()
 	key_nodes.clear()
 	_net_keyhold.clear()
+	_net_rk = {}
+	_net_rt = {}   # stale twin-freed flags would suppress the next match's cage-open flip
 	_sipped.clear()
 	_hit_cooldown = 0.0
 	_catch_cooldown = 0.0
@@ -2889,7 +3589,12 @@ func client_on_meta(meta: Dictionary) -> void:
 	for el in ["fire", "water", "grass"]:
 		_scores[el] = int(sc.get(el, _scores[el]))
 	_net_rk = meta.get("rk", _net_rk)
-	_net_rt = meta.get("rt", _net_rt)
+	if meta.has("rt"):
+		var rt_prev := _net_rt
+		_net_rt = meta["rt"]
+		for el in _net_rt:
+			if bool(_net_rt[el]) and not bool(rt_prev.get(el, false)):
+				_client_open_cage(String(el))   # host freed this twin → mirror the cage opening
 	if meta.has("clan"):
 		_net_clan = meta["clan"]           # ally net_id -> owner peer (for own-clan selection)
 	if meta.has("kh"):
@@ -2905,12 +3610,27 @@ func client_on_meta(meta: Dictionary) -> void:
 	if meta.has("kp"):
 		_client_sync_keys(meta["kp"])
 
+# CLIENT: the host freed `el`'s twin — mirror the cage opening locally (visual + collider,
+# so the guest's collision world stays identical to the host's) and cheer for my own team.
+func _client_open_cage(el: String) -> void:
+	var cg: Dictionary = cage_by_el.get(el, {})
+	if cg.is_empty():
+		return
+	WorldBuilder.open_cage(cg)
+	obstacles = obstacles.filter(func(o): return absf(o["x"] - cg["x"]) > 0.01 or absf(o["z"] - cg["z"]) > 0.01)
+	if net_log:
+		print("[GUEST] cage opened for %s" % el)
+	if el == local_el:
+		ui.toast("%s is free! Lead them to the glowing circle behind your tower." % ELEMENTS[el]["label"])
+
 func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	if ghosts.has(nid):
 		return ghosts[nid]
 	var kind: String = _KIND_NAME[flags & 3]
 	var el: String = _EL_NAME[(flags >> 2) & 3]
 	var cv := _build_char_visual(kind, el)
+	if (flags & (1 << 9)) != 0:            # freed twin → the smaller rescued sibling (see _release_twin)
+		cv.scale = Vector3.ONE * 0.8
 	if (flags & (1 << 7)) != 0:            # clan ally → render at clan scale + a selection shroud
 		cv.scale = Vector3.ONE * CLAN_SCALE
 		var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
@@ -2959,6 +3679,13 @@ func host_remove_peer(peer: int) -> void:
 		_disperse_ally(a)
 	if peer_actor.has(peer):
 		var ch: GameChar = peer_actor[peer]
+		# a leaving rescuer DROPS its team key where its avatar stands — otherwise the key
+		# stays "held" by the AI filler forever and that team's rescue wedges (_holder_avatar
+		# only recognises humans, so the twin would wait for a holder that can never exist)
+		if bool(has_key_by_el.get(ch.el, false)) and int(key_holder_by_el.get(ch.el, 0)) == ch.net_id and keys.has(ch.el):
+			has_key_by_el[ch.el] = false
+			key_holder_by_el.erase(ch.el)
+			keys[ch.el]["pos"] = ch.pos
 		ch.is_human = false
 		ch.peer_id = 0
 		peer_actor.erase(peer)
@@ -2966,9 +3693,29 @@ func host_remove_peer(peer: int) -> void:
 # HOST: a guest joined AFTER the match started. Spawn it into the running match (fresh actor +
 # net_id, replicates via snapshots) and top up NPC fillers so the teams stay balanced.
 func host_late_join(peer: int, el: String) -> void:
-	if mode != Mode.HOST or not running or peer_actor.has(peer):
+	# NOT gated on `running`: a guest whose element pick lands during the 3s countdown must
+	# still spawn (its actor just idles until GO) — rejecting it here left the joiner a dead
+	# viewer with net_id 0, since the targeted start's netids never contained its peer.
+	if net_log:
+		print("[HOST] late-join peer %d el %s (mode=%d ending=%s actors=%d known=%s)" % [
+			peer, el, mode, str(ending), actors.size(), str(peer_actor.has(peer))])
+	if mode != Mode.HOST or ending or actors.is_empty() or peer_actor.has(peer):
 		return
-	_spawn_element_actor(el, peer, true, false)
+	var ch := _spawn_element_actor(el, peer, true, false)
+	# Spawn at the same fanned slot the joiner predicts locally: its index among the HUMANS
+	# of its element in lobby order (the "humans" list the targeted start carries is built by
+	# iterating net.lobby, and the guest can't see AI fillers when it picks its own slot —
+	# by_el.size() counts fillers too, which put the two sides ~9u apart).
+	var idx := 0
+	for pid in net.lobby:
+		if String(net.lobby[pid]["el"]) != el:
+			continue
+		if int(pid) == peer:
+			break
+		idx += 1
+	ch.pos = _element_spawn_pos(el, idx)
+	if ch.group:
+		ch.group.position = ch.pos
 	_rebalance_fillers()
 
 # Add NPC fillers so every element team matches the biggest human team ("match the biggest").
@@ -3180,6 +3927,8 @@ func _pack_flags(ch: GameChar) -> int:
 	if ch.slow_timer > 0.0: f |= 1 << 6          # slowed (predator hit) → clients predict at half speed too
 	if ch.ally: f |= 1 << 7                       # recruited clan ally → clients render it scaled-down
 	if ch.ally and ch.role == "": f |= 1 << 8     # idle (unassigned) ally → guest raises the command view
+	if ch.is_twin: f |= 1 << 9                    # freed twin → guests render the rescued sibling, never a threat/catch
+	if ch.cave_cooldown > 0.0: f |= 1 << 10       # keep-sanctum lockout → the guest predicts the same wall
 	return f
 
 func _broadcast_snapshot() -> void:
@@ -3301,11 +4050,10 @@ func _server_rescue(dt: float) -> void:
 					twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))
 			else:
 				twin.vel = twin.vel.lerp(Vector3.ZERO, 1.0 - pow(0.0006, dt))   # dropped key → wait where freed
-			if cave_by_owner.has(el):
-				var hc: Dictionary = cave_by_owner[el]
-				if twin.pos.distance_to(Vector3(hc["x"], 0, hc["z"])) < RESCUE_WIN_DIST:
-					_server_end_match("rescued", el)
-					return
+			var hs := _home_spot(el)
+			if not hs.is_empty() and twin.pos.distance_to(Vector3(hs["x"], 0, hs["z"])) < hs["r"]:
+				_server_end_match("rescued", el)
+				return
 
 # SERVER: the human actor currently holding `el`'s key (the rescuer), or null.
 func _holder_avatar(el: String) -> GameChar:
@@ -3340,13 +4088,23 @@ func _host_update_keys(dt: float) -> void:
 			if beam: beam.visible = true
 
 func _server_release_twin(el: String) -> void:
-	var t := make_character("element", el)   # group null on server
-	t.is_twin = true
-	t.max_hp = 1
-	t.hp = 1
+	# mirror the single-player release (_release_twin): open the cage visual and drop its
+	# collider so the twin can be escorted out. Guests do the same in _client_open_cage
+	# when the meta "rt" flag flips, keeping every collision world identical.
 	var cg: Dictionary = cage_by_el[el]
+	WorldBuilder.open_cage(cg)
+	obstacles = obstacles.filter(func(o): return absf(o["x"] - cg["x"]) > 0.01 or absf(o["z"] - cg["z"]) > 0.01)
+	var t := make_character("element", el)
+	t.is_twin = true
+	t.max_hp = 999   # the twin is an escort objective, not a combatant (same as single-player)
+	t.hp = 999
 	t.pos = Vector3(cg["x"], 0, cg["z"])
+	if t.group:
+		t.group.position = t.pos
+		t.group.scale = Vector3.ONE * 0.8
 	twin_by_el[el] = t
+	if player != null and player.el == el:
+		ui.toast("%s is free! Lead them to the glowing circle behind your tower." % ELEMENTS[el]["label"])
 
 func _nearest_human_of(el: String, from: Vector3) -> GameChar:
 	var best: GameChar = null
@@ -3434,6 +4192,8 @@ func _client_predict_local(dt: float) -> void:
 	else:
 		stamina = minf(100.0, stamina + dt * 13.0)
 	ui.set_stamina(stamina)
+	if player.cave_cooldown > 0.0:
+		player.cave_cooldown = maxf(0.0, player.cave_cooldown - dt)   # host re-asserts via flag bit 10
 	var seq := net.send_input(mx, mz, sprint, cam_yaw, dt)   # send this frame's command (+dt) for host replay; authoritative movement is the server's
 	# local prediction so it feels instant
 	_apply_human_move(player, mx, mz, sprint, cam_yaw, dt)
@@ -3451,8 +4211,19 @@ func _client_predict_local(dt: float) -> void:
 func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd: float, server_flags: int, server_hp: int, ack_seq: int) -> void:
 	if player == null:
 		return
+	var prev_hp := player.hp
 	player.hp = server_hp
+	if server_hp < prev_hp and server_hp > 0:
+		ui.toast("Hit!  %d hearts left" % server_hp)   # the host can't toast a guest directly
 	player.slow_timer = SLOW_TIME if (server_flags & (1 << 6)) != 0 else 0.0
+	# Keep-sanctum lockout mirrors the host (flag bit 10), so prediction collides with the
+	# same wall instead of rubber-banding against an invisible one for the whole lockout.
+	var locked := (server_flags & (1 << 10)) != 0
+	if locked and player.cave_cooldown <= 0.0:
+		player.cave_cooldown = CAVE_LOCKOUT
+		ui.toast("Ejected! Keep locked for %ds" % int(CAVE_LOCKOUT))
+	elif not locked and player.cave_cooldown > 0.0:
+		player.cave_cooldown = 0.0
 	var server_vel := Vector3.ZERO
 	if server_spd > 0.04:
 		server_vel = Vector3(sin(server_yaw), 0, cos(server_yaw)) * server_spd
@@ -3503,6 +4274,8 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 	_pred_hist = pending
 	if error.length() > REND_SNAP_DIST:
 		_render_off = Vector3.ZERO                       # teleport/respawn — let it snap
+		if inside_own_cave(player):
+			ui.toast("Caught! Back to your castle.")     # guests get the same respawn feedback
 	else:
 		_render_off = vis_before - player.pos
 		if _render_off.length() > REND_OFF_MAX:
@@ -3575,8 +4348,8 @@ func _client_render_remote(dt: float) -> void:
 			pos = (k0["pos"] as Vector3).lerp(k1["pos"], alpha)
 			yaw = lerp_angle(float(k0["yaw"]), float(k1["yaw"]), alpha)
 			spd = lerpf(float(k0["spd"]), float(k1["spd"]), alpha)
-		if net_log and player:
-			_nl_seen_min = minf(_nl_seen_min, _client_render_pos().distance_to(pos))
+		if net_log and player and (int(a["flags"]) & 3) == 0 and (int(a["flags"]) & (1 << 9)) == 0:
+			_nl_seen_min = minf(_nl_seen_min, _client_render_pos().distance_to(pos))   # elements only (catch-relevant)
 		var g := _client_get_ghost(nid, int(a["flags"]))
 		g.visible = ((int(a["flags"]) & (1 << 4)) != 0) and not _sipped.has(nid)   # I sipped this O₂ → keep it hidden until the host confirms
 		g.position = pos
@@ -3630,11 +4403,11 @@ func _client_update_status() -> void:
 func _client_update_hud() -> void:
 	ui.set_hearts(player.hp, maxi(player.max_hp, player.hp))
 	if bool(_net_rt.get(local_el, false)):
-		ui.set_objective("Escort your twin home to your cave!")
+		ui.set_objective("Escort your twin to the glowing circle behind your tower!")
 	elif bool(_net_rk.get(local_el, false)):
-		ui.set_objective("Free your twin at the zoo cage")
+		ui.set_objective("Free your twin at the dungeon yard")
 	else:
-		ui.set_objective("Find your %s key" % ELEMENTS[local_el]["label"])
+		ui.set_objective("Steal your %s key from %s's castle" % [ELEMENTS[local_el]["label"], ELEMENTS[ELEMENTS[local_el]["predator"]]["label"]])
 	var entries: Array = []
 	for el in ["fire", "water", "grass"]:
 		entries.append({ "el": el, "label": ELEMENTS[el]["label"], "score": _scores[el], "alive": true, "me": el == local_el })
@@ -3776,6 +4549,8 @@ func _client_threat_check(dt: float) -> void:
 		if node == null or not is_instance_valid(node):
 			continue
 		var flags := int((_net_actors[nid] as Dictionary).get("flags", 0))
+		if (flags & (1 << 9)) != 0:
+			continue                           # the freed twin is friendly — never a threat or a catch
 		var kind: String = _KIND_NAME[flags & 3]
 		var alive := (flags & (1 << 4)) != 0
 		var d := me.distance_to(node.position)
@@ -3804,6 +4579,8 @@ func _client_threat_check(dt: float) -> void:
 # GUEST: the host told us the round is over. Tear down the networked view, then show
 # the end screen.
 func _on_match_ended(reason: String, winner_el: String, standings: Array) -> void:
+	if net_log:
+		print("[GUEST] match ended: %s team wins (%s)" % [winner_el, reason])
 	_client_clear()
 	_show_end_screen(reason, winner_el, standings)
 
@@ -3856,7 +4633,7 @@ func _ready_testclient() -> void:
 			st["started"] = true
 			print("[%s] 2 players in lobby — starting match" % label)
 			net.start_match())
-	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary) -> void:
+	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary, _w: String) -> void:
 		var mine := net.my_id
 		local_net_id = int(ids.get(str(mine), ids.get(mine, 0)))
 		for pid in ids:
@@ -3905,9 +4682,12 @@ func _ready_nettest() -> void:
 	var is_host := not args.has("join")
 	net_log = true
 	mode = Mode.HOST if is_host else Mode.CLIENT
+	if OS.has_environment("NETTEST_WORLD"):
+		_set_world_kind(OS.get_environment("NETTEST_WORLD"))   # host-authoritative; guests follow the start msg
 	Engine.max_fps = 60                 # don't free-run headless at 1000s of fps
-	var label := "HOST" if is_host else "GUEST"
-	var my_el := "water" if is_host else "fire"   # water preys fire → catches actually fire
+	var idx := maxi(1, int(OS.get_environment("NETTEST_IDX")))   # guest number (1 = the chased one)
+	var label: String = "HOST" if is_host else (("GUEST%d" % idx) if idx > 1 else "GUEST")
+	var my_el: String = "water" if is_host else ("fire" if idx == 1 else "grass")   # water preys fire → catches actually fire
 	_ready_visual()                     # build world/camera/ui/net + wire online signals
 	var run_s := 24.0
 	if OS.has_environment("NETTEST_SECS"):
@@ -3918,16 +4698,21 @@ func _ready_nettest() -> void:
 		print("[%s] JOIN FAILED: %s" % [label, r]); get_tree().quit())
 	net.connection_lost.connect(func() -> void:
 		print("[%s] connection lost — quitting" % label); get_tree().quit())
+	# multi-guest runs: NETTEST_PLAYERS delays the auto-start until the whole party is in
+	# the lobby (a common start); without it, extra guests exercise the late-join path.
+	var need := maxi(2, int(OS.get_environment("NETTEST_PLAYERS")))
 	net.lobby_changed.connect(func(players: Array, _mi: int, _ai: int, _c: String) -> void:
 		if not _nt_picked:
 			_nt_picked = true
 			net.choose_element(my_el)
-		if is_host and not _nt_started and players.size() >= 2:
+		if is_host and not _nt_started and players.size() >= need:
 			_nt_started = true
-			print("[HOST] 2 players in lobby — starting match")
-			net.start_match())
-	net.match_starting.connect(func(_s: int, _h: Array, _ids: Dictionary) -> void:
-		print("[GUEST] match starting (my_net_id=%d)" % local_net_id))
+			# brief grace so the guests' element picks (one relay round-trip behind their
+			# join) land before the roster is frozen — else they all play the fire default
+			print("[HOST] %d players in lobby — starting match in 0.7s" % players.size())
+			get_tree().create_timer(0.7).timeout.connect(func() -> void: net.start_match()))
+	net.match_starting.connect(func(_s: int, _h: Array, _ids: Dictionary, _w: String) -> void:
+		print("[GUEST] match starting (my_net_id=%d world=%s)" % [local_net_id, _w]))
 	var drive := Timer.new()
 	drive.wait_time = 1.0 / 30.0
 	drive.autostart = true
@@ -3947,17 +4732,38 @@ func _nt_drive(is_host: bool) -> void:
 	if not running:
 		return
 	_nt_run_t += 1.0 / 30.0
+	if player != null and fmod(_nt_run_t, 2.0) < 1.0 / 30.0:
+		print("[nt %s] pos %.0f,%.0f wp %d" % ["H" if is_host else "G", player.pos.x, player.pos.z, _nt_wp.size()])
+	# a >20u jump in one tick can only be a caught-respawn teleport (max legit step ~0.7u):
+	# both sides restart their walk-out route from home (castle world only — town is open)
+	var teleported := player != null and _nt_prev_pos != Vector3.ZERO \
+		and player.pos.distance_to(_nt_prev_pos) > 20.0
+	if player != null:
+		_nt_prev_pos = player.pos
+	if teleported and world_kind == "castle" and not OS.has_environment("NETTEST_CLAN") \
+			and not OS.has_environment("NETTEST_RESCUE"):
+		print("[%s] respawned home — walking out again" % ("HOST" if is_host else "GUEST"))
+		_nt_wp = _nt_route(player.el)
+		_nt_wp_last = player.pos
+		_nt_wp_stuck = 0.0
+		_nt_detour = 0.0
 	if OS.has_environment("NETTEST_CLAN"):
-		# verification mode: walk to my own clan hall and park there to recruit a clan
+		# verification mode: walk to my own clan hall (waypointed AROUND the keep — the hall
+		# sits in the courtyard's back corner and a straight walk pins on the keep) and park
 		var hall: Dictionary = clan_hall_by_owner.get(player.el, {}) if player else {}
 		if not hall.is_empty() and player:
-			var to := Vector3(hall["x"], 0, hall["z"]) - player.pos
-			to.y = 0
-			if to.length() > 1.4:
-				cam_yaw = atan2(-to.x, -to.z)
-				touch_move = Vector2(0, 1)
+			if _nt_wp.is_empty() and _nt_run_t <= 0.05 and world_kind == "castle":
+				_nt_wp = _nt_clan_route(player.el, hall)   # town halls are in the open — walk direct
+			if not _nt_wp.is_empty():
+				_nt_walk_waypoints()
 			else:
-				touch_move = Vector2.ZERO     # inside the hall → stand still → teach accrues
+				var to := Vector3(hall["x"], 0, hall["z"]) - player.pos
+				to.y = 0
+				if to.length() > 1.4:
+					cam_yaw = atan2(-to.x, -to.z)
+					touch_move = Vector2(0, 1)
+				else:
+					touch_move = Vector2.ZERO     # inside the hall → stand still → teach accrues
 		# once recruited, the GUEST issues a scripted "protect" command for its own clan
 		if not is_host and not _nt_cmd_sent and _nt_run_t > 14.0 and net:
 			var ids: Array = []
@@ -3969,22 +4775,149 @@ func _nt_drive(is_host: bool) -> void:
 				_nt_cmd_sent = true
 				print("[GUEST] sent 'fetch' for %d own allies" % ids.size())
 		return
+	if OS.has_environment("NETTEST_RESCUE"):
+		if is_host:
+			_nt_rescue_beats()                # scripted key → cage → homecoming (guests observe)
+		return
 	if is_host:
+		# march out the gate to the wilds rendezvous first — on the castle map the old
+		# "walk straight at the guest" could never make contact (two curtain walls between);
+		# the open town map needs no route at all
+		if _nt_wp.is_empty() and _nt_run_t <= 0.05 and world_kind == "castle":
+			_nt_wp = _nt_route(player.el if player else "water")
+		if not _nt_wp.is_empty():
+			_nt_walk_waypoints()
+			return
 		var tgt: GameChar = null
 		for ch in actors:
 			if _is_remote_human(ch) and ch.alive:
 				tgt = ch
 				break
-		if _nt_run_t > 6.0 and tgt != null and player != null:
+		if tgt != null and player != null:
 			var to := tgt.pos - player.pos
 			cam_yaw = atan2(-to.x, -to.z)     # face the target (fwd = (-sin,-cos) in _apply_human_move)
 			touch_move = Vector2(0, 1)
 		else:
 			touch_move = Vector2.ZERO
 	else:
+		var gidx := maxi(1, int(OS.get_environment("NETTEST_IDX")))
+		if gidx > 1:
+			cam_yaw = _nt_run_t * 1.0         # extra guests: courtyard circle (ghost/interp stress)
+			touch_move = Vector2(0, 1)
+			touch_sprint = OS.has_environment("NETTEST_SPRINT")
+			return
+		# guest #1: out the gate + over the bridge, then circle at the rendezvous as chase
+		# bait (a caught-respawn re-routes via the teleport detector above)
+		if _nt_wp.is_empty() and _nt_run_t <= 0.05 and world_kind == "castle":
+			_nt_wp = _nt_route(player.el if player else "fire")
+		if not _nt_wp.is_empty():
+			_nt_walk_waypoints()
+			return
 		cam_yaw = _nt_run_t * 1.0             # slow turn → walk a circle
 		touch_move = Vector2(0, 1)
 		touch_sprint = OS.has_environment("NETTEST_SPRINT")   # stress the worst-case gap
+
+# The scripted route from `el`'s castle out to the wilds rendezvous east of the river.
+# Spawns sit in walled courtyards ~250u apart, so both sides thread their own gate (the
+# castle's local +u axis runs keep-door → gate, so face-and-walk threads both openings)
+# and west castles cross at the z=-75 bridge.
+func _nt_route(el: String) -> Array:
+	var cd: Dictionary = WorldBuilder.CASTLES[el]
+	var g: Vector2 = cd["gate"]
+	# courtyard exit first — a point past the keep's front face, offset sideways so the
+	# straight line from anywhere around the sanctum skirts the keep instead of hugging it
+	var pts: Array = [
+		Vector3(cd["x"] + g.x * 22.0 - g.y * 10.0, 0, cd["z"] + g.y * 22.0 + g.x * 10.0),
+		Vector3(cd["x"] + g.x * (WorldBuilder.WALL_HALF + 8.0), 0, cd["z"] + g.y * (WorldBuilder.WALL_HALF + 8.0)),
+	]
+	if cd["x"] < RIVER_X1:
+		pts.append(Vector3(RIVER_X1 - 8.0, 0, -75.0))
+		pts.append(Vector3(RIVER_X2 + 8.0, 0, -75.0))
+	pts.append(Vector3(34.0, 0, -75.0))       # the rendezvous
+	return pts
+
+# Route from the courtyard spawn to my clan hall: slip past the keep on the hall's side
+# first (local (0, ±(KEEP_HV+5))), then head for the hall itself in the back corner.
+func _nt_clan_route(el: String, hall: Dictionary) -> Array:
+	var cd: Dictionary = WorldBuilder.CASTLES[el]
+	var g: Vector2 = cd["gate"]
+	var p := Vector2(-g.y, g.x)
+	var c := Vector2(cd["x"], cd["z"])
+	var side := signf((Vector2(hall["x"], hall["z"]) - c).dot(p))
+	if side == 0.0:
+		side = 1.0
+	# stay in FRONT of the keep while sliding sideways (u=14 > KEEP_HU), only then cut
+	# behind it at a lane the keep can't reach (|v| = KEEP_HV + 9) — a direct diagonal
+	# clips the keep's corner and wedges the face-walker there
+	var lane := (WorldBuilder.KEEP_HV + 9.0) * side
+	var a := c + g * 14.0 + p * lane
+	var b := c - g * 6.0 + p * lane
+	return [Vector3(a.x, 0, a.y), Vector3(b.x, 0, b.y), Vector3(hall["x"], 0, hall["z"])]
+
+func _nt_walk_waypoints() -> void:
+	if player == null or _nt_wp.is_empty():
+		return
+	var to: Vector3 = (_nt_wp[0] as Vector3) - player.pos
+	to.y = 0
+	if to.length() < 3.0:
+		_nt_wp.pop_front()
+		_nt_wp_stuck = 0.0
+		_nt_wp_last = player.pos
+		touch_move = Vector2.ZERO
+		return
+	# stuck on a wall → sidestep for a bit (keep the waypoint), alternating sides
+	if _nt_detour > 0.0:
+		_nt_detour -= 1.0 / 30.0
+		cam_yaw = atan2(-to.x, -to.z) + (PI / 2.0) * _nt_detour_sign
+		touch_move = Vector2(0, 1)
+		return
+	_nt_wp_stuck += 1.0 / 30.0
+	if _nt_wp_stuck >= 1.0:
+		if player.pos.distance_to(_nt_wp_last) < 1.5:
+			if _nt_stuck_at != Vector3.ZERO and player.pos.distance_to(_nt_stuck_at) < 4.0:
+				_nt_detour_len = minf(_nt_detour_len + 0.8, 3.6)   # same pin — commit further, same side
+			else:
+				_nt_detour_len = 1.4
+				_nt_detour_sign = -_nt_detour_sign                 # a new pin — try the other side
+			_nt_stuck_at = player.pos
+			_nt_detour = _nt_detour_len
+			print("[nettest] stuck at %.0f,%.0f — sidestepping %.1fs" % [player.pos.x, player.pos.z, _nt_detour_len])
+		_nt_wp_stuck = 0.0
+		_nt_wp_last = player.pos
+	cam_yaw = atan2(-to.x, -to.z)
+	touch_move = Vector2(0, 1)
+
+# NETTEST_RESCUE: hop the HOST avatar through the rescue beats (key → cage → homecoming),
+# teleporting its twin alongside. Not a movement test — it exercises the ONLINE rescue
+# machinery end-to-end: key pickup + kh/kp meta, cage opening on host AND guests (rt),
+# twin replication (flag bit 9), homecoming win detection, and broadcast_end.
+func _nt_rescue_beats() -> void:
+	if player == null:
+		return
+	var el := player.el
+	_nt_beat_t += 1.0 / 30.0
+	if _nt_beat_t < 4.0 or _nt_beat > 2:
+		return
+	_nt_beat_t = 0.0
+	match _nt_beat:
+		0:
+			if keys.has(el):
+				player.pos = keys[el]["pos"] + Vector3(0.5, 0, 0)
+				print("[HOST rescue] beat 0: at my key (%.0f,%.0f)" % [player.pos.x, player.pos.z])
+		1:
+			var cg: Dictionary = cage_by_el.get(el, {})
+			if not cg.is_empty():
+				player.pos = Vector3(cg["x"] + 1.0, 0, cg["z"])
+				print("[HOST rescue] beat 1: at the cage (key held=%s)" % str(has_key_by_el.get(el, false)))
+		2:
+			var hs := _home_spot(el)
+			var tw: GameChar = twin_by_el.get(el)
+			print("[HOST rescue] beat 2: going home (twin freed=%s)" % str(tw != null))
+			if not hs.is_empty():
+				player.pos = Vector3(hs["x"], 0, hs["z"])
+				if tw != null:
+					tw.pos = Vector3(hs["x"] + 1.0, 0, hs["z"])
+	_nt_beat += 1
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60

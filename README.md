@@ -1,9 +1,14 @@
 # Elemental Rescue
 
 A playful 3D **rescue adventure** built in [Godot 4.6](https://godotengine.org/),
-set in a twilight town of rock‑paper‑scissors elementals. Your twin is locked in
-a zoo cage: find your key, free them, and walk them home to your cave — while your
-rival element and roaming CO₂ try to send you back to the start.
+set in a vast medieval land of rock‑paper‑scissors elementals. Fire, Water and
+Leaf each rule a **huge European castle** — curtain wall, towers, gatehouse, a
+themed garden courtyard and a great keep with an entrance hall, bedchambers and
+portraits of its element on the walls. Your twin is caged in the old dungeon
+yard out in the wilds, and **your key is locked in the treasury of the castle of
+the element that eats you**: raid it, free your twin, and walk them home to your
+keep — while your rival element and the CO₂ roaming the wilderness try to send
+you back to the start.
 
 ![Fire, Water and Leaf walking through the twilight riverside town](docs/banner.png)
 
@@ -25,16 +30,17 @@ swing when walking and stand still when idle.
 The goal is to **rescue your caged twin** — there is no clock and you can't be
 permanently knocked out, so take your time:
 
-1. **Find your key.** Each element has its own **silvery, colour‑matched key**
+1. **Steal your key.** Each element has its own **silvery, colour‑matched key**
    (silvery‑red Fire, silvery‑blue Water, silvery‑green Leaf) — and you can only
-   pick up **your own**. It waits deep in your **predator's territory** — out among
-   their cave, clan hall and training pad — so claiming it means a raid into the turf
-   of the element that hunts you. Yours is marked in your element's colour on the
-   radar; walk over it and it magnets to your back and trails you.
-2. **Free your twin.** Carry the key to *your* element's cage in the zoo and your
-   twin pops out and starts following you.
-3. **Escort them home.** Lead your twin into your home cave to **win**. If you die
-   mid‑escort they'll wait where they are until you come back.
+   pick up **your own**. It rests on the **treasury dais inside your predator's
+   keep**, so claiming it means a raid through their gate, across their garden
+   courtyard and into their great hall. Yours is marked in your element's colour
+   on the radar; walk over it and it magnets to your back and trails you.
+2. **Free your twin.** Carry the key to *your* element's cage in the **dungeon
+   yard** out in the wilderness and your twin pops out and starts following you.
+3. **Escort them home.** Lead your twin through your gate and into your **keep's
+   glowing sanctum** to **win**. If you die mid‑escort they'll wait where they
+   are until you come back.
 
 Along the way:
 
@@ -48,7 +54,25 @@ Along the way:
   respawn, so there's always oxygen in play.
 - **Counter‑slow.** Whoever lands a hit on you *or* a clan member is slowed for 5s —
   your window to get away.
-- **Self‑training.** Stand on the glowing **totem** beside your cave (with no enemy
+- **Your castle is home.** Inside your keep's glowing sanctum you're safe — rivals
+  and CO₂ are walled out — but camp too long and you're ejected and locked out for
+  a while. Each castle's garden matches its element: an **ember garden** of braziers
+  and glowing coals for Fire, **lily ponds and fountains** for Water, and **clipped
+  hedgerows and topiary** for Leaf.
+- **The home tower (first person!).** A great round tower rises from the middle of
+  your keep — and it's your house. Step through its door and the camera drops into
+  **your character's eyes** (drag to look around, WASD to walk). A **spiral
+  staircase** winds around the glowing light column through six floors: the throne
+  hall, a kitchen, a living room, a **music room** (grand piano, cello, violin and
+  drifting notes), a bedchamber and a library — small candle-lit windows, rugs,
+  fireplaces and portraits of your element all the way up — then opens onto a
+  **crenellated roof terrace** with a banner, a brazier and a stargazing scope.
+  Two secrets hide inside, Hogwarts-style: a **bookshelf that slides aside** for a
+  treasure room (a bonus heart, once per round), and a **portrait concealing a
+  ladder** that whisks you straight to the roof. Time at home never counts toward
+  the camping eject — stay as long as you like. Walk out the door and the chase
+  camera returns. (Single-player for now; online guests keep the classic view.)
+- **Self‑training.** Stand on the glowing **totem** in your courtyard (with no enemy
   near) to earn an **extra heart**, up to four. Training is kept even after you're
   sent home.
 - **Clan hall.** Stand in your **clan hall** for ~4s to summon a **clan of 10** of
@@ -67,7 +91,10 @@ Along the way:
   slower, refills faster) plus an instant gulp. You're now racing the grey CO for the
   same molecules — the bar stays the same size, it just lasts longer.
 - **River & bridges.** The river slows every element except Water; cross on the
-  three bridges.
+  five bridges.
+- **The wilds.** All the CO₂ and O₂ roam the **wilderness between the castles** —
+  hamlets, rock shelters, woods and the dungeon yard. They never spawn inside a
+  curtain wall (though a chasing CO₂ may follow you through your gate).
 - **Black stones (Pac‑Man power‑up).** Scattered dark stones (shown on the radar)
   turn you into an **energized black figure** for 15s and run a little faster. While
   disguised the tables turn: your **predator panics and flees, and you can eat it**
@@ -111,19 +138,20 @@ point), and the imported art in `models/`; `project.godot` and `icon.svg` stay a
 the project root where Godot expects them.
 
 Everything except the three elemental bodies is built procedurally in code
-(`src/mesh_lib.gd`) — houses, props, the gas molecules, caves and the storybook
-materials — so the project stays self‑contained. The fire/water/leaf bodies are
+(`src/mesh_lib.gd`) — castles, houses, props, the gas molecules, caves and the
+storybook materials — so the project stays self‑contained. The fire/water/leaf bodies are
 imported GLB meshes (`models/Fire3.glb`, `models/Water3.glb`, `models/Leaf3.glb`); their legs are
 generated at load time and auto‑seated into each body so they always connect
 cleanly regardless of body shape.
 
 Key scripts (under `src/`):
 
-- `game.gd` — the main game loop, AI, caves, river, scoring and camera.
+- `game.gd` — the main game loop, AI, castles/caves, river, scoring and camera.
 - `game_char.gd` — per-actor state (the `GameChar` class: position, hearts, role).
 - `mesh_lib.gd` — procedural mesh/material factory and the character builders.
 - `char_visual.gd` — the walking rig (body bob + leg/arm swing).
-- `world_builder.gd` — lays out the town, caves and river.
+- `world_builder.gd` — lays out the three castles (walls, gardens, keeps,
+  home towers, portraits, beds), the dungeon yard, hamlets and river.
 - `ui.gd` / `radar.gd` — HUD, scoreboard and minimap.
 
 It began life as a Three.js prototype (`elemental-tag.html`) and was ported to
