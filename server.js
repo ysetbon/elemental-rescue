@@ -41,6 +41,15 @@ const httpServer = http.createServer((req, res) => {
   res.end("elemental-rescue relay: ok");
 });
 
+// Real-time hygiene: never let Nagle batch our tiny 30Hz frames (be explicit —
+// Node's default varies by version), and if a guest's TCP link is backed up past
+// this many queued bytes, DROP position snapshots for that guest instead of
+// queueing them. A snapshot is superseded ~33ms later anyway; queueing them just
+// turns one slow link into seconds of compounding lag for that player. Control
+// messages (lobby/start/end/meta) still always queue — they must arrive.
+httpServer.on("connection", (sock) => sock.setNoDelay(true));
+const SNAP_BACKPRESSURE_BYTES = 16 * 1024;   // ~10 snapshots of headroom
+
 const wss = new WebSocketServer({ server: httpServer });
 
 const rooms = new Map();   // CODE -> { code, hostWs, started, guests: Map(id -> ws) }
@@ -65,8 +74,10 @@ wss.on("connection", (ws) => {
     if (isBinary) {
       const room = rooms.get(ws.room);
       if (room && ws.isHost)
-        for (const g of room.guests.values())
+        for (const g of room.guests.values()) {
+          if (g.bufferedAmount > SNAP_BACKPRESSURE_BYTES) continue;   // stale-frame drop
           deliver(g, data, true);
+        }
       return;
     }
     let m;

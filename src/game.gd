@@ -273,6 +273,29 @@ var _deco_accum := 0.0           # lite: frame time accumulated between cosmetic
 const DECO_LITE_HZ := 20.0       # lite: run décor / wind-leaf animation at this rate, not per-frame
 const PERF_SCALE_LITE := 0.75    # lite: render the 3D world at 75% then upscale (HUD stays sharp)
 const PERF_SCALE_GUEST := 0.60   # guests prioritize local responsiveness over visual sharpness
+
+# ---- adaptive quality (web) ----
+# The deployed build runs on wildly different machines, and `lite` only catches
+# touch devices — a weak laptop got full quality and just chugged (worst on the
+# castle map, and fatal online where the HOST's frame rate is everyone's
+# smoothness). So in a match on web we watch the real frame rate: if it sags,
+# step the 3D render scale down one notch (HUD stays sharp); if it's comfortably
+# high again, step back up. ?q=high|balanced|max still pins a fixed quality and
+# turns this off.
+var _perf_scale_base := 1.0      # scale chosen by mode/lite/?q (steps multiply this)
+var _aq_lock := false            # ?q= pinned a quality — adaptive stays out of it
+var _aq_level := 0               # current step into AQ_STEPS
+var _aq_time := 0.0              # elapsed seconds in the sampling window
+var _aq_frames := 0              # frames rendered in the window
+var _aq_high_windows := 0        # consecutive fast windows (hysteresis before stepping up)
+var _aq_drops := 0               # times we've had to step down — each one makes climbing
+                                 # back need longer proof, so borderline machines settle
+var _aq_cooldown := 0.0          # settle time after a step before sampling again
+const AQ_STEPS: Array[float] = [1.0, 0.85, 0.72, 0.6]   # render-scale multipliers
+const AQ_WINDOW := 2.0           # seconds per FPS sample window
+const AQ_FPS_LOW := 42.0         # a window under this → drop one step
+const AQ_FPS_HIGH := 55.0        # two windows over this → climb one step back
+const AQ_SETTLE := 5.0           # seconds to let a new scale settle before re-sampling
 var cam_yaw := 0.0
 var cam_pitch := 0.0             # first-person look pitch — only used inside the home tower
 var dragging := false
@@ -600,18 +623,59 @@ func _apply_perf_scale() -> void:
 	if OS.has_feature("web"):
 		var q: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('q')", true)
 		match (str(q) if q != null else ""):
-			"high": scale = 1.0
-			"balanced": scale = 0.75
-			"max": scale = 0.6
-	get_viewport().scaling_3d_scale = clampf(scale, 0.4, 1.0)
+			"high": scale = 1.0; _aq_lock = true
+			"balanced": scale = 0.75; _aq_lock = true
+			"max": scale = 0.6; _aq_lock = true
+	_perf_scale_base = scale
+	get_viewport().scaling_3d_scale = clampf(scale * AQ_STEPS[_aq_level], 0.4, 1.0)
 	if world_env != null and world_env.environment != null:
 		world_env.environment.ssr_enabled = not lite
+
+# Watch the real frame rate during a web match and step the render scale to fit
+# the machine (see the AQ_* block above). Runs in every mode — single, HOST
+# (where it also protects the guests' snapshot cadence) and CLIENT.
+func _adaptive_quality_tick(delta: float) -> void:
+	if _aq_lock or not running or not OS.has_feature("web"):
+		return
+	if delta > 0.5:                # hidden tab / load hitch — restart the window
+		_aq_time = 0.0
+		_aq_frames = 0
+		return
+	if _aq_cooldown > 0.0:
+		_aq_cooldown -= delta
+		return
+	_aq_time += delta
+	_aq_frames += 1
+	if _aq_time < AQ_WINDOW:
+		return
+	var fps := float(_aq_frames) / _aq_time
+	_aq_time = 0.0
+	_aq_frames = 0
+	if fps < AQ_FPS_LOW and _aq_level < AQ_STEPS.size() - 1:
+		_aq_level += 1
+		_aq_drops += 1
+		_aq_high_windows = 0
+		_aq_cooldown = AQ_SETTLE
+		_apply_perf_scale()
+		if net_log:
+			print("[perf] %.0f fps — render scale down to %.2f" % [fps, get_viewport().scaling_3d_scale])
+	elif fps > AQ_FPS_HIGH and _aq_level > 0:
+		_aq_high_windows += 1
+		if _aq_high_windows >= mini(6, 1 + _aq_drops):
+			_aq_high_windows = 0
+			_aq_level -= 1
+			_aq_cooldown = AQ_SETTLE
+			_apply_perf_scale()
+			if net_log:
+				print("[perf] %.0f fps — render scale back up to %.2f" % [fps, get_viewport().scaling_3d_scale])
+	else:
+		_aq_high_windows = 0
 
 # How many seconds of decorative animation to advance this frame. On lite devices we
 # batch it to ~20Hz (it's purely cosmetic), returning -1.0 on the frames we skip so the
 # saved CPU goes to a steadier framerate.
 func _cosmetic_step(delta: float) -> float:
-	if not lite:
+	if not lite and _aq_level < 2:   # deep adaptive steps also batch the décor
 		return delta
 	_deco_accum += delta
 	if _deco_accum < 1.0 / DECO_LITE_HZ:
@@ -660,6 +724,15 @@ func _build_environment() -> void:
 	sun.look_at_from_position(SUN_FROM, Vector3.ZERO, Vector3.UP)
 
 func _rebuild_world(world_seed: int) -> void:
+	# fresh world → re-probe quality from the top (a menu backdrop isn't a match load)
+	if _aq_level != 0:
+		_aq_level = 0
+		_apply_perf_scale()
+	_aq_drops = 0
+	_aq_high_windows = 0
+	_aq_time = 0.0
+	_aq_frames = 0
+	_aq_cooldown = 0.0
 	if world_root != null and is_instance_valid(world_root):
 		world_root.queue_free()
 	world_root = Node3D.new()
@@ -727,6 +800,7 @@ func _build_trails() -> void:
 
 # ------------------------------------------------------------------ main loop
 func _process(delta: float) -> void:
+	_adaptive_quality_tick(delta)
 	if mode == Mode.HOST:
 		_host_process(delta)     # this browser is the authority: simulate, render, play
 		return
