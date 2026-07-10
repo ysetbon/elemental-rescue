@@ -5,8 +5,28 @@ extends Node3D
 # hunts everyone and O₂ molecules hand out points. Most points when time runs out.
 
 # ------------------------------------------------------------------ constants
-const ARENA := 200.0     # castle world — much larger than the old 120 twilight town
-const PACE := 1.2        # uniform speed-up of every character to match the bigger map
+# ---- the two selectable worlds (intro page) ----
+# Everything map-dependent lives in WORLDS and is applied by _set_world_kind().
+# Online, the HOST's pick rides the "start" message so every guest builds the
+# same world from the same seed.
+const WORLDS := {
+	"castle": {
+		"arena": 200.0, "pace": 1.2, "fog": 0.0046, "stones": 6,
+		"bridges": [
+			{ "z": -150.0, "half": 4.0 }, { "z": -75.0, "half": 4.0 }, { "z": 0.0, "half": 4.0 },
+			{ "z": 75.0, "half": 4.0 }, { "z": 150.0, "half": 4.0 },
+		],
+		"zoo": { "x": -52.0, "z": 22.0 },
+	},
+	"town": {
+		"arena": 120.0, "pace": 1.0, "fog": 0.0062, "stones": 4,
+		"bridges": [{ "z": -70.0, "half": 3.5 }, { "z": 0.0, "half": 3.5 }, { "z": 70.0, "half": 3.5 }],
+		"zoo": { "x": -34.0, "z": 24.0 },
+	},
+}
+var world_kind := "castle"
+var ARENA := 200.0       # castle world — much larger than the 120 twilight town
+var PACE := 1.2          # uniform speed-up of every character to match the bigger map
 const CATCH_DIST := 2.4
 # Online only: a guest is DRAWN ~(½RTT + INTERP_DELAY)·speed from where the host authoritatively
 # has it (guest prioritises its own smoothness over matching the host — see _render_off). So
@@ -16,7 +36,10 @@ const CATCH_DIST := 2.4
 # their true position at ~140ms RTT, ~3–4u at ~300ms RTT + sprint. 1.6 → a 4.0u effective
 # catch, which cleared the typical gap in-test (note: own-avatar reconcile skew is a separate,
 # tiny ~0.1–0.5u — the input-seq reconciliation removes the latency lead).
-const NET_CATCH_PAD := 1.6
+# The render gap is (½RTT + INTERP_DELAY) · speed, so both pads scale with PACE: the
+# empirical numbers above were measured at pre-PACE speeds. (vars: PACE is per-world.)
+var NET_CATCH_PAD := 1.6 * 1.2
+var NET_REPORT_PAD := 4.0 * 1.2   # range guard on guest-reported catches/hits/sips
 const SIGHT_RANGE := 55.0
 const CO2_SIGHT := 28.0
 const PTS_O2 := 5
@@ -52,7 +75,9 @@ const CLAN_SCALE := 0.77      # ~40% bigger than the caged twin (0.55), smaller 
 const CLAN_COOLDOWN := 8.0    # delay before you can re-teach after losing allies
 const ALLY_HELP_RANGE := 30.0 # (unused now — clan hunt the prey across the whole map)
 const KEY_PICK_DIST := 2.6
-const CAGE_RELEASE_DIST := 3.4
+const CAGE_RELEASE_DIST := 4.2   # must clear the cage's contact ring: obstacle (r 2.3 + 0.2)
+                                 # + body radius 0.9 pushes you out to exactly 3.4, so a 3.4
+                                 # threshold was a float-rounding knife-edge that often failed
 const RESCUE_WIN_DIST := 4.2  # fallback win radius when a world has no homecoming circle
 const TWIN_LEASH := 18.0      # twin only follows while you're within this
 
@@ -60,7 +85,7 @@ const TWIN_LEASH := 18.0      # twin only follows while you're within this
 const STEER_SLOTS := 16       # candidate directions each NPC weighs every tick
 const PROBE_DIST := 7.5       # how far ahead a direction is checked for walls/dead-ends
 const DISGUISE_TIME := 15.0   # seconds you stay a black figure after a black stone
-const N_BLACK_STONES := 6     # a couple more on the big castle map
+var N_BLACK_STONES := 6       # per-world: a couple more on the big castle map
 const CO_REVERT_TIME := 15.0  # a spent CO₂ (now CO, gray, harmless) auto-recharges after this
 const O2_RESPAWN := 10.0      # a consumed O₂ molecule reappears elsewhere after this
 const O2_CHARGE_CAP := 8      # how many O₂ sips the player can bank for sprint stamina
@@ -72,16 +97,16 @@ const SUN_COLOR := 0xffeccb
 const SUN_ENERGY := 0.60
 const SUN_FROM := Vector3(-95.0, 52.0, 38.0)
 const FOG_COLOR := 0xeec7b7
-const FOG_DENSITY := 0.0046   # thinner haze so the far-off castles still read on the big map
+var FOG_DENSITY := 0.0046     # per-world: thinner haze so far-off castles read on the big map
 const EXPOSURE := 1.0
 
-const BRIDGES := [
-	{ "z": -150.0, "half": 4.0 }, { "z": -75.0, "half": 4.0 }, { "z": 0.0, "half": 4.0 },
-	{ "z": 75.0, "half": 4.0 }, { "z": 150.0, "half": 4.0 },
-]
-# The old zoo is now a medieval dungeon yard out in the wilderness — same cages,
-# same rescue rules, castle-age dressing.
-const ZOO := { "x": -52.0, "z": 22.0 }
+var BRIDGES: Array = WORLDS["castle"]["bridges"]   # per-world (see _set_world_kind)
+# The old zoo is a medieval dungeon yard on the castle map — same cages, same
+# rescue rules, different dressing and spot per world.
+var ZOO: Dictionary = WORLDS["castle"]["zoo"]
+# town-world landmarks (only TownBuilder reads these)
+const SCHOOL := { "x": 80.0, "z": -60.0, "w": 28.0, "d": 20.0 }
+const PLAYGROUND := { "x": -70.0, "z": 70.0 }
 
 const ELEMENTS := {
 	"fire": { "color": 0xf0662a, "glow": 0xffc878, "prey": "grass", "predator": "water", "label": "Fire" },
@@ -209,6 +234,16 @@ var _nt_picked := false
 var _nt_started := false
 var _nt_run_t := 0.0             # seconds since this side's match actually went live
 var _nt_cmd_sent := false        # NETTEST_CLAN: guest has issued its scripted task command
+var _nt_wp: Array = []           # scripted waypoints (world positions) still ahead of this side
+var _nt_wp_stuck := 0.0          # seconds since the last stuck check
+var _nt_wp_last := Vector3.ZERO  # position at the last stuck check / waypoint hit
+var _nt_detour := 0.0            # seconds left of sidestepping away from a wall pin
+var _nt_detour_sign := 1.0       # alternate the sidestep direction on repeated pins
+var _nt_detour_len := 1.4        # grows while re-pinned at the same spot (corner escape)
+var _nt_stuck_at := Vector3.ZERO # where the last pin happened
+var _nt_prev_pos := Vector3.ZERO # last tick's position (teleport = respawn detector)
+var _nt_beat := 0                # NETTEST_RESCUE: next scripted rescue beat (key → cage → home)
+var _nt_beat_t := 0.0            # seconds since the last rescue beat
 var key_nodes: Dictionary = {}    # CLIENT: el -> Node3D (rendered team keys)
 var _net_rk := {}                 # CLIENT: el -> key-held bool (from meta)
 var _net_rt := {}                 # CLIENT: el -> twin-freed bool (from meta)
@@ -405,6 +440,8 @@ func _ready_visual() -> void:
 	var is_banner := OS.get_cmdline_user_args().has("banner")
 	randomize()
 	_read_net_log_flag()
+	if OS.get_cmdline_user_args().has("town"):
+		_set_world_kind("town")   # debug probes/tests: boot straight into the town world
 	mobile = TouchControls.is_touch_session()
 	lite = mobile   # phones get the lighter renderer (set before the world is built)
 	_apply_perf_scale()
@@ -423,6 +460,7 @@ func _ready_visual() -> void:
 	touch.game = self
 	add_child(touch)
 	ui.element_selected.connect(start_game)
+	ui.world_selected.connect(_on_world_selected)
 	ui.play_again.connect(_on_play_again)
 	ui.task_assigned.connect(_assign_task)
 	_sync_radar_world()
@@ -450,6 +488,18 @@ func _ready_visual() -> void:
 	# save a viewport screenshot to user://drawcalls.png, then quit.
 	if OS.get_cmdline_user_args().has("drawcalls"):
 		call_deferred("_setup_drawcalls_probe")
+	# debug: `-- menushot [page2]` (windowed) — screenshot the intro page after a beat, then
+	# quit (visual check of the world-select page; `page2` clicks through to the element page).
+	if OS.get_cmdline_user_args().has("menushot"):
+		get_tree().create_timer(1.0).timeout.connect(func() -> void:
+			if OS.get_cmdline_user_args().has("page2"):
+				_on_world_selected("town")
+				ui._show_element_page("town")
+			get_tree().create_timer(0.8).timeout.connect(func() -> void:
+				var img := get_viewport().get_texture().get_image()
+				img.save_png("user://menushot.png")
+				print("[menushot] saved %s/menushot.png" % OS.get_user_data_dir())
+				get_tree().quit()))
 
 # ---- `-- autostart perftest` probe: measures raw main-loop cost per frame while the
 # sim runs a worst-case load (full clan on attack + all molecules). Headless frames are
@@ -500,9 +550,22 @@ func _perftest_tick() -> void:
 var _cam_freeze := false
 
 func _setup_drawcalls_probe() -> void:
-	# homeshot waits out the 3-2-1-GO countdown overlay so the shot is clean
-	var delay := 4.5 if OS.get_cmdline_user_args().has("homeshot") else 2.0
+	# homeshot/worldshot wait out the 3-2-1-GO countdown overlay so the shot is clean
+	var args := OS.get_cmdline_user_args()
+	var delay := 4.5 if (args.has("homeshot") or args.has("worldshot")) else 2.0
 	get_tree().create_timer(delay).timeout.connect(func() -> void:
+		if OS.get_cmdline_user_args().has("worldshot"):
+			# vista for the intro world cards: HUD off, fog thinned, framed per world
+			_cam_freeze = true
+			ui.visible = false
+			if world_env != null and world_env.environment != null:
+				world_env.environment.fog_density = FOG_DENSITY * 0.3
+			if world_kind == "castle":
+				camera.position = Vector3(30.0, 34.0, -70.0)
+				camera.look_at(Vector3(132.0, 6.0, 0.0), Vector3.UP)    # the water castle across the wilds
+			else:
+				camera.position = Vector3(62.0, 32.0, 62.0)
+				camera.look_at(Vector3(-24.0, 0.0, 8.0), Vector3.UP)    # over the river toward the zoo
 		if OS.get_cmdline_user_args().has("towerfloor2") and player:
 			var t := _tower()
 			if not t.is_empty():
@@ -616,9 +679,28 @@ func _rebuild_world(world_seed: int) -> void:
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
-	WorldBuilder.build(self)
+	if world_kind == "town":
+		TownBuilder.build(self)
+	else:
+		WorldBuilder.build(self)
 	_sg_nobs = -1   # world changed — lazily rebuild the spatial index on first query
 	_sync_radar_world()
+
+# Apply one of the two selectable worlds (intro page pick; online, the host's pick
+# arrives with the "start" message). Must run BEFORE _rebuild_world for that world.
+func _set_world_kind(kind: String) -> void:
+	world_kind = kind if WORLDS.has(kind) else "castle"
+	var w: Dictionary = WORLDS[world_kind]
+	ARENA = w["arena"]
+	PACE = w["pace"]
+	FOG_DENSITY = w["fog"]
+	N_BLACK_STONES = w["stones"]
+	BRIDGES = w["bridges"]
+	ZOO = w["zoo"]
+	NET_CATCH_PAD = 1.6 * PACE
+	NET_REPORT_PAD = 4.0 * PACE
+	if world_env != null and world_env.environment != null:
+		world_env.environment.fog_density = FOG_DENSITY
 
 func _sync_radar_world() -> void:
 	if ui == null:
@@ -924,26 +1006,29 @@ func _update_camera(dt: float) -> void:
 			camera.position = camera.position.lerp(Vector3(tx, cam_h, tz), 1.0 - pow(snap, dt))
 			camera.look_at(Vector3(cp.x, look_y, cp.z), Vector3.UP)
 		var blips: Array = []
-		for ch in all_chars():
-			if not ch.alive or ch == player:
-				continue
-			blips.append({ "pos": Vector2(ch.pos.x, ch.pos.z), "color": ch.radar_color, "o2": ch.kind == "o2" })
-		# objective markers: your colour-matched key, then the cage to free your twin
-		if not has_key and keys.has(player.el):
-			var mk: Dictionary = keys[player.el]
-			blips.append({ "pos": Vector2(mk["pos"].x, mk["pos"].z), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
-		elif has_key and freed_twin == null and cage_by_el.has(player.el):
-			var cg: Dictionary = cage_by_el[player.el]
-			blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
-		elif freed_twin:
-			# twin is out — point at the homecoming circle behind your keep
-			var hs := _home_spot(player.el)
-			if not hs.is_empty():
-				blips.append({ "pos": Vector2(hs["x"], hs["z"]), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
-		# available black stones (disguise pickups)
-		for s in black_stones:
-			if s["cooldown"] <= 0.0:
-				blips.append({ "pos": Vector2(s["pos"].x, s["pos"].z), "color": Color(0.35, 0.3, 0.45), "o2": false })
+		if mode == Mode.CLIENT:
+			_client_radar_blips(blips)   # guests: actors/objectives come from the net mirrors
+		else:
+			for ch in all_chars():
+				if not ch.alive or ch == player:
+					continue
+				blips.append({ "pos": Vector2(ch.pos.x, ch.pos.z), "color": ch.radar_color, "o2": ch.kind == "o2" })
+			# objective markers: your colour-matched key, then the cage to free your twin
+			if not has_key and keys.has(player.el):
+				var mk: Dictionary = keys[player.el]
+				blips.append({ "pos": Vector2(mk["pos"].x, mk["pos"].z), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
+			elif has_key and freed_twin == null and cage_by_el.has(player.el):
+				var cg: Dictionary = cage_by_el[player.el]
+				blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
+			elif freed_twin:
+				# twin is out — point at the homecoming circle behind your keep
+				var hs := _home_spot(player.el)
+				if not hs.is_empty():
+					blips.append({ "pos": Vector2(hs["x"], hs["z"]), "color": MeshLib.rgb(ELEMENTS[player.el]["color"]), "o2": false })
+			# available black stones (disguise pickups)
+			for s in black_stones:
+				if s["cooldown"] <= 0.0:
+					blips.append({ "pos": Vector2(s["pos"].x, s["pos"].z), "color": Color(0.35, 0.3, 0.45), "o2": false })
 		ui.radar.update_data(Vector2(player.pos.x, player.pos.z), player.group.rotation.y, blips)
 	else:
 		var a := time_ms * 0.00006
@@ -961,6 +1046,42 @@ func _assign_cam_height() -> float:
 		return ASSIGN_CAM_H
 	var fit := 7.0 / (half_v * minf(1.0, aspect))   # clan ring radius + margin
 	return maxf(ASSIGN_CAM_H, fit)
+
+# GUEST: radar blips from the replication mirrors. The host-side sources the radar
+# normally reads (all_chars() / has_key / freed_twin / keys) are empty on a client,
+# so online the radar showed nothing at all — no actors and no objective markers.
+func _client_radar_blips(blips: Array) -> void:
+	for nid in _net_actors:
+		if int(nid) == local_net_id:
+			continue
+		var a: Dictionary = _net_actors[nid]
+		var fl := int(a.get("flags", 0))
+		if (fl & (1 << 4)) == 0:
+			continue                             # dead / consumed
+		var g = ghosts.get(nid)
+		if g == null or not is_instance_valid(g):
+			continue
+		var kind: String = _KIND_NAME[fl & 3]
+		var col: Color
+		if kind == "o2":
+			col = MeshLib.rgb(0xeceef6)
+		elif kind == "co2":
+			col = MeshLib.rgb(0x3a3744)
+		else:
+			col = MeshLib.rgb(ELEMENTS[_EL_NAME[(fl >> 2) & 3]]["color"])
+		blips.append({ "pos": Vector2(g.position.x, g.position.z), "color": col, "o2": kind == "o2" })
+	# objective markers, mirroring the host branch: key → cage → homecoming circle
+	if bool(_net_rt.get(local_el, false)):
+		var hs := _home_spot(local_el)
+		if not hs.is_empty():
+			blips.append({ "pos": Vector2(hs["x"], hs["z"]), "color": MeshLib.rgb(ELEMENTS[local_el]["color"]), "o2": false })
+	elif bool(_net_rk.get(local_el, false)):
+		if cage_by_el.has(local_el):
+			var cg: Dictionary = cage_by_el[local_el]
+			blips.append({ "pos": Vector2(cg["x"], cg["z"]), "color": Color(0.95, 0.82, 0.22), "o2": false })
+	elif key_nodes.has(local_el) and is_instance_valid(key_nodes[local_el]) and key_nodes[local_el].visible:
+		var kn: Node3D = key_nodes[local_el]
+		blips.append({ "pos": Vector2(kn.position.x, kn.position.z), "color": MeshLib.rgb(ELEMENTS[local_el]["color"]), "o2": false })
 
 # ------------------------------------------------------- spatial index (perf)
 # The castle world registers ~300 obstacles + ~80 rects, and the steering / LOS /
@@ -2146,7 +2267,7 @@ func server_guest_sip(peer: int, nid: int) -> void:
 	if who == null:
 		return
 	for n in npcs:
-		if n.kind == "o2" and n.alive and n.net_id == nid and n.pos.distance_to(who.pos) < CATCH_DIST + 4.0:
+		if n.kind == "o2" and n.alive and n.net_id == nid and n.pos.distance_to(who.pos) < CATCH_DIST + NET_REPORT_PAD:
 			_consume_o2(n)
 			return
 
@@ -2162,14 +2283,14 @@ func server_guest_caught(peer: int, by_nid: int) -> void:
 		if c.net_id == by_nid:
 			attacker = c
 			break
-	if attacker == null or not attacker.alive:
+	if attacker == null or not attacker.alive or attacker.is_twin:
 		return
 	var ok := false
 	if attacker.kind == "element" and attacker.el == ELEMENTS[prey.el]["predator"]:
 		ok = true
 	elif attacker.kind == "co2" and attacker.co_timer <= 0.0:
 		ok = true
-	if not ok or attacker.pos.distance_to(prey.pos) > CATCH_DIST + 4.0:   # generous range guard (ghost was ~½RTT behind)
+	if not ok or attacker.pos.distance_to(prey.pos) > CATCH_DIST + NET_REPORT_PAD:   # generous range guard (ghost was ~½RTT behind)
 		return
 	_take_hit(prey, attacker)
 	if attacker.kind == "co2":
@@ -2192,7 +2313,7 @@ func server_guest_catch(peer: int, prey_nid: int) -> void:
 		return
 	if prey.el != ELEMENTS[pred.el]["prey"]:
 		return
-	if pred.pos.distance_to(prey.pos) > CATCH_DIST + 4.0:   # generous (the prey ghost was ~½RTT behind)
+	if pred.pos.distance_to(prey.pos) > CATCH_DIST + NET_REPORT_PAD:   # generous (the prey ghost was ~½RTT behind)
 		return
 	_take_hit(prey, pred)
 
@@ -2227,6 +2348,9 @@ func _name_of(ch: GameChar) -> String:
 func _take_hit(victim: GameChar, attacker: GameChar) -> void:
 	if not victim.alive or victim.invuln_timer > 0.0:
 		return
+	if net_log and mode == Mode.HOST and _is_remote_human(victim):
+		print("[HOST] guest#%d (%s) hit by %s at %.0f,%.0f — hp %d -> %d" % [victim.peer_id,
+			_name_of(victim), _name_of(attacker), victim.pos.x, victim.pos.z, victim.hp, victim.hp - 1])
 	if victim.is_player or victim.ally:
 		attacker.slow_timer = SLOW_TIME
 	if victim.ally:
@@ -2795,6 +2919,9 @@ func _free_keys() -> void:
 # --------------------------------------------------------- black-stone disguise
 func _spawn_black_stones() -> void:
 	_free_black_stones()
+	if mode != Mode.SINGLE:
+		return   # online the stones would exist only on the host (they never replicate), so the
+		         # disguise would be a host-only power invisible to guests — offline-only for now
 	var dark := MeshLib.unlit_mat(MeshLib.rgb(0x2a2733))
 	var glow := MeshLib.unlit_mat(MeshLib.rgb(0x6a5f86), 0.4)
 	for i in N_BLACK_STONES:
@@ -3288,12 +3415,18 @@ func _on_join_failed(reason: String) -> void:
 func _on_lobby_changed(players: Array, my_id: int, admin_id: int, code: String) -> void:
 	ui.show_lobby(players, my_id, admin_id, code)
 
-func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
-	_client_start_match(world_seed, humans, net_ids)
+# The intro page picked a world — apply it and show it behind the menu right away.
+func _on_world_selected(kind: String) -> void:
+	_set_world_kind(kind)
+	_rebuild_world(randi())
+
+func _on_match_starting(world_seed: int, humans: Array, net_ids: Dictionary, world: String) -> void:
+	_client_start_match(world_seed, humans, net_ids, world)
 
 # CLIENT: enter a networked match. Rebuild the static world from the host's seed so
 # prediction collides against the same map, then render remote actors as ghosts.
-func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary) -> void:
+func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary, world: String = "castle") -> void:
+	_set_world_kind(world)   # the HOST picked the world; every guest must build the same one
 	_set_lite(true)
 	_client_clear()
 	_clear_actors()
@@ -3336,6 +3469,8 @@ func _client_clear() -> void:
 			key_nodes[el].queue_free()
 	key_nodes.clear()
 	_net_keyhold.clear()
+	_net_rk = {}
+	_net_rt = {}   # stale twin-freed flags would suppress the next match's cage-open flip
 	_sipped.clear()
 	_hit_cooldown = 0.0
 	_catch_cooldown = 0.0
@@ -3454,7 +3589,12 @@ func client_on_meta(meta: Dictionary) -> void:
 	for el in ["fire", "water", "grass"]:
 		_scores[el] = int(sc.get(el, _scores[el]))
 	_net_rk = meta.get("rk", _net_rk)
-	_net_rt = meta.get("rt", _net_rt)
+	if meta.has("rt"):
+		var rt_prev := _net_rt
+		_net_rt = meta["rt"]
+		for el in _net_rt:
+			if bool(_net_rt[el]) and not bool(rt_prev.get(el, false)):
+				_client_open_cage(String(el))   # host freed this twin → mirror the cage opening
 	if meta.has("clan"):
 		_net_clan = meta["clan"]           # ally net_id -> owner peer (for own-clan selection)
 	if meta.has("kh"):
@@ -3470,12 +3610,27 @@ func client_on_meta(meta: Dictionary) -> void:
 	if meta.has("kp"):
 		_client_sync_keys(meta["kp"])
 
+# CLIENT: the host freed `el`'s twin — mirror the cage opening locally (visual + collider,
+# so the guest's collision world stays identical to the host's) and cheer for my own team.
+func _client_open_cage(el: String) -> void:
+	var cg: Dictionary = cage_by_el.get(el, {})
+	if cg.is_empty():
+		return
+	WorldBuilder.open_cage(cg)
+	obstacles = obstacles.filter(func(o): return absf(o["x"] - cg["x"]) > 0.01 or absf(o["z"] - cg["z"]) > 0.01)
+	if net_log:
+		print("[GUEST] cage opened for %s" % el)
+	if el == local_el:
+		ui.toast("%s is free! Lead them to the glowing circle behind your tower." % ELEMENTS[el]["label"])
+
 func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	if ghosts.has(nid):
 		return ghosts[nid]
 	var kind: String = _KIND_NAME[flags & 3]
 	var el: String = _EL_NAME[(flags >> 2) & 3]
 	var cv := _build_char_visual(kind, el)
+	if (flags & (1 << 9)) != 0:            # freed twin → the smaller rescued sibling (see _release_twin)
+		cv.scale = Vector3.ONE * 0.8
 	if (flags & (1 << 7)) != 0:            # clan ally → render at clan scale + a selection shroud
 		cv.scale = Vector3.ONE * CLAN_SCALE
 		var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
@@ -3524,6 +3679,13 @@ func host_remove_peer(peer: int) -> void:
 		_disperse_ally(a)
 	if peer_actor.has(peer):
 		var ch: GameChar = peer_actor[peer]
+		# a leaving rescuer DROPS its team key where its avatar stands — otherwise the key
+		# stays "held" by the AI filler forever and that team's rescue wedges (_holder_avatar
+		# only recognises humans, so the twin would wait for a holder that can never exist)
+		if bool(has_key_by_el.get(ch.el, false)) and int(key_holder_by_el.get(ch.el, 0)) == ch.net_id and keys.has(ch.el):
+			has_key_by_el[ch.el] = false
+			key_holder_by_el.erase(ch.el)
+			keys[ch.el]["pos"] = ch.pos
 		ch.is_human = false
 		ch.peer_id = 0
 		peer_actor.erase(peer)
@@ -3531,9 +3693,29 @@ func host_remove_peer(peer: int) -> void:
 # HOST: a guest joined AFTER the match started. Spawn it into the running match (fresh actor +
 # net_id, replicates via snapshots) and top up NPC fillers so the teams stay balanced.
 func host_late_join(peer: int, el: String) -> void:
-	if mode != Mode.HOST or not running or peer_actor.has(peer):
+	# NOT gated on `running`: a guest whose element pick lands during the 3s countdown must
+	# still spawn (its actor just idles until GO) — rejecting it here left the joiner a dead
+	# viewer with net_id 0, since the targeted start's netids never contained its peer.
+	if net_log:
+		print("[HOST] late-join peer %d el %s (mode=%d ending=%s actors=%d known=%s)" % [
+			peer, el, mode, str(ending), actors.size(), str(peer_actor.has(peer))])
+	if mode != Mode.HOST or ending or actors.is_empty() or peer_actor.has(peer):
 		return
-	_spawn_element_actor(el, peer, true, false)
+	var ch := _spawn_element_actor(el, peer, true, false)
+	# Spawn at the same fanned slot the joiner predicts locally: its index among the HUMANS
+	# of its element in lobby order (the "humans" list the targeted start carries is built by
+	# iterating net.lobby, and the guest can't see AI fillers when it picks its own slot —
+	# by_el.size() counts fillers too, which put the two sides ~9u apart).
+	var idx := 0
+	for pid in net.lobby:
+		if String(net.lobby[pid]["el"]) != el:
+			continue
+		if int(pid) == peer:
+			break
+		idx += 1
+	ch.pos = _element_spawn_pos(el, idx)
+	if ch.group:
+		ch.group.position = ch.pos
 	_rebalance_fillers()
 
 # Add NPC fillers so every element team matches the biggest human team ("match the biggest").
@@ -3745,6 +3927,8 @@ func _pack_flags(ch: GameChar) -> int:
 	if ch.slow_timer > 0.0: f |= 1 << 6          # slowed (predator hit) → clients predict at half speed too
 	if ch.ally: f |= 1 << 7                       # recruited clan ally → clients render it scaled-down
 	if ch.ally and ch.role == "": f |= 1 << 8     # idle (unassigned) ally → guest raises the command view
+	if ch.is_twin: f |= 1 << 9                    # freed twin → guests render the rescued sibling, never a threat/catch
+	if ch.cave_cooldown > 0.0: f |= 1 << 10       # keep-sanctum lockout → the guest predicts the same wall
 	return f
 
 func _broadcast_snapshot() -> void:
@@ -3904,13 +4088,23 @@ func _host_update_keys(dt: float) -> void:
 			if beam: beam.visible = true
 
 func _server_release_twin(el: String) -> void:
-	var t := make_character("element", el)   # group null on server
-	t.is_twin = true
-	t.max_hp = 1
-	t.hp = 1
+	# mirror the single-player release (_release_twin): open the cage visual and drop its
+	# collider so the twin can be escorted out. Guests do the same in _client_open_cage
+	# when the meta "rt" flag flips, keeping every collision world identical.
 	var cg: Dictionary = cage_by_el[el]
+	WorldBuilder.open_cage(cg)
+	obstacles = obstacles.filter(func(o): return absf(o["x"] - cg["x"]) > 0.01 or absf(o["z"] - cg["z"]) > 0.01)
+	var t := make_character("element", el)
+	t.is_twin = true
+	t.max_hp = 999   # the twin is an escort objective, not a combatant (same as single-player)
+	t.hp = 999
 	t.pos = Vector3(cg["x"], 0, cg["z"])
+	if t.group:
+		t.group.position = t.pos
+		t.group.scale = Vector3.ONE * 0.8
 	twin_by_el[el] = t
+	if player != null and player.el == el:
+		ui.toast("%s is free! Lead them to the glowing circle behind your tower." % ELEMENTS[el]["label"])
 
 func _nearest_human_of(el: String, from: Vector3) -> GameChar:
 	var best: GameChar = null
@@ -3998,6 +4192,8 @@ func _client_predict_local(dt: float) -> void:
 	else:
 		stamina = minf(100.0, stamina + dt * 13.0)
 	ui.set_stamina(stamina)
+	if player.cave_cooldown > 0.0:
+		player.cave_cooldown = maxf(0.0, player.cave_cooldown - dt)   # host re-asserts via flag bit 10
 	var seq := net.send_input(mx, mz, sprint, cam_yaw, dt)   # send this frame's command (+dt) for host replay; authoritative movement is the server's
 	# local prediction so it feels instant
 	_apply_human_move(player, mx, mz, sprint, cam_yaw, dt)
@@ -4015,8 +4211,19 @@ func _client_predict_local(dt: float) -> void:
 func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd: float, server_flags: int, server_hp: int, ack_seq: int) -> void:
 	if player == null:
 		return
+	var prev_hp := player.hp
 	player.hp = server_hp
+	if server_hp < prev_hp and server_hp > 0:
+		ui.toast("Hit!  %d hearts left" % server_hp)   # the host can't toast a guest directly
 	player.slow_timer = SLOW_TIME if (server_flags & (1 << 6)) != 0 else 0.0
+	# Keep-sanctum lockout mirrors the host (flag bit 10), so prediction collides with the
+	# same wall instead of rubber-banding against an invisible one for the whole lockout.
+	var locked := (server_flags & (1 << 10)) != 0
+	if locked and player.cave_cooldown <= 0.0:
+		player.cave_cooldown = CAVE_LOCKOUT
+		ui.toast("Ejected! Keep locked for %ds" % int(CAVE_LOCKOUT))
+	elif not locked and player.cave_cooldown > 0.0:
+		player.cave_cooldown = 0.0
 	var server_vel := Vector3.ZERO
 	if server_spd > 0.04:
 		server_vel = Vector3(sin(server_yaw), 0, cos(server_yaw)) * server_spd
@@ -4067,6 +4274,8 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 	_pred_hist = pending
 	if error.length() > REND_SNAP_DIST:
 		_render_off = Vector3.ZERO                       # teleport/respawn — let it snap
+		if inside_own_cave(player):
+			ui.toast("Caught! Back to your castle.")     # guests get the same respawn feedback
 	else:
 		_render_off = vis_before - player.pos
 		if _render_off.length() > REND_OFF_MAX:
@@ -4139,8 +4348,8 @@ func _client_render_remote(dt: float) -> void:
 			pos = (k0["pos"] as Vector3).lerp(k1["pos"], alpha)
 			yaw = lerp_angle(float(k0["yaw"]), float(k1["yaw"]), alpha)
 			spd = lerpf(float(k0["spd"]), float(k1["spd"]), alpha)
-		if net_log and player:
-			_nl_seen_min = minf(_nl_seen_min, _client_render_pos().distance_to(pos))
+		if net_log and player and (int(a["flags"]) & 3) == 0 and (int(a["flags"]) & (1 << 9)) == 0:
+			_nl_seen_min = minf(_nl_seen_min, _client_render_pos().distance_to(pos))   # elements only (catch-relevant)
 		var g := _client_get_ghost(nid, int(a["flags"]))
 		g.visible = ((int(a["flags"]) & (1 << 4)) != 0) and not _sipped.has(nid)   # I sipped this O₂ → keep it hidden until the host confirms
 		g.position = pos
@@ -4340,6 +4549,8 @@ func _client_threat_check(dt: float) -> void:
 		if node == null or not is_instance_valid(node):
 			continue
 		var flags := int((_net_actors[nid] as Dictionary).get("flags", 0))
+		if (flags & (1 << 9)) != 0:
+			continue                           # the freed twin is friendly — never a threat or a catch
 		var kind: String = _KIND_NAME[flags & 3]
 		var alive := (flags & (1 << 4)) != 0
 		var d := me.distance_to(node.position)
@@ -4368,6 +4579,8 @@ func _client_threat_check(dt: float) -> void:
 # GUEST: the host told us the round is over. Tear down the networked view, then show
 # the end screen.
 func _on_match_ended(reason: String, winner_el: String, standings: Array) -> void:
+	if net_log:
+		print("[GUEST] match ended: %s team wins (%s)" % [winner_el, reason])
 	_client_clear()
 	_show_end_screen(reason, winner_el, standings)
 
@@ -4420,7 +4633,7 @@ func _ready_testclient() -> void:
 			st["started"] = true
 			print("[%s] 2 players in lobby — starting match" % label)
 			net.start_match())
-	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary) -> void:
+	net.match_starting.connect(func(_s: int, _h: Array, ids: Dictionary, _w: String) -> void:
 		var mine := net.my_id
 		local_net_id = int(ids.get(str(mine), ids.get(mine, 0)))
 		for pid in ids:
@@ -4469,9 +4682,12 @@ func _ready_nettest() -> void:
 	var is_host := not args.has("join")
 	net_log = true
 	mode = Mode.HOST if is_host else Mode.CLIENT
+	if OS.has_environment("NETTEST_WORLD"):
+		_set_world_kind(OS.get_environment("NETTEST_WORLD"))   # host-authoritative; guests follow the start msg
 	Engine.max_fps = 60                 # don't free-run headless at 1000s of fps
-	var label := "HOST" if is_host else "GUEST"
-	var my_el := "water" if is_host else "fire"   # water preys fire → catches actually fire
+	var idx := maxi(1, int(OS.get_environment("NETTEST_IDX")))   # guest number (1 = the chased one)
+	var label: String = "HOST" if is_host else (("GUEST%d" % idx) if idx > 1 else "GUEST")
+	var my_el: String = "water" if is_host else ("fire" if idx == 1 else "grass")   # water preys fire → catches actually fire
 	_ready_visual()                     # build world/camera/ui/net + wire online signals
 	var run_s := 24.0
 	if OS.has_environment("NETTEST_SECS"):
@@ -4482,16 +4698,21 @@ func _ready_nettest() -> void:
 		print("[%s] JOIN FAILED: %s" % [label, r]); get_tree().quit())
 	net.connection_lost.connect(func() -> void:
 		print("[%s] connection lost — quitting" % label); get_tree().quit())
+	# multi-guest runs: NETTEST_PLAYERS delays the auto-start until the whole party is in
+	# the lobby (a common start); without it, extra guests exercise the late-join path.
+	var need := maxi(2, int(OS.get_environment("NETTEST_PLAYERS")))
 	net.lobby_changed.connect(func(players: Array, _mi: int, _ai: int, _c: String) -> void:
 		if not _nt_picked:
 			_nt_picked = true
 			net.choose_element(my_el)
-		if is_host and not _nt_started and players.size() >= 2:
+		if is_host and not _nt_started and players.size() >= need:
 			_nt_started = true
-			print("[HOST] 2 players in lobby — starting match")
-			net.start_match())
-	net.match_starting.connect(func(_s: int, _h: Array, _ids: Dictionary) -> void:
-		print("[GUEST] match starting (my_net_id=%d)" % local_net_id))
+			# brief grace so the guests' element picks (one relay round-trip behind their
+			# join) land before the roster is frozen — else they all play the fire default
+			print("[HOST] %d players in lobby — starting match in 0.7s" % players.size())
+			get_tree().create_timer(0.7).timeout.connect(func() -> void: net.start_match()))
+	net.match_starting.connect(func(_s: int, _h: Array, _ids: Dictionary, _w: String) -> void:
+		print("[GUEST] match starting (my_net_id=%d world=%s)" % [local_net_id, _w]))
 	var drive := Timer.new()
 	drive.wait_time = 1.0 / 30.0
 	drive.autostart = true
@@ -4511,17 +4732,38 @@ func _nt_drive(is_host: bool) -> void:
 	if not running:
 		return
 	_nt_run_t += 1.0 / 30.0
+	if player != null and fmod(_nt_run_t, 2.0) < 1.0 / 30.0:
+		print("[nt %s] pos %.0f,%.0f wp %d" % ["H" if is_host else "G", player.pos.x, player.pos.z, _nt_wp.size()])
+	# a >20u jump in one tick can only be a caught-respawn teleport (max legit step ~0.7u):
+	# both sides restart their walk-out route from home (castle world only — town is open)
+	var teleported := player != null and _nt_prev_pos != Vector3.ZERO \
+		and player.pos.distance_to(_nt_prev_pos) > 20.0
+	if player != null:
+		_nt_prev_pos = player.pos
+	if teleported and world_kind == "castle" and not OS.has_environment("NETTEST_CLAN") \
+			and not OS.has_environment("NETTEST_RESCUE"):
+		print("[%s] respawned home — walking out again" % ("HOST" if is_host else "GUEST"))
+		_nt_wp = _nt_route(player.el)
+		_nt_wp_last = player.pos
+		_nt_wp_stuck = 0.0
+		_nt_detour = 0.0
 	if OS.has_environment("NETTEST_CLAN"):
-		# verification mode: walk to my own clan hall and park there to recruit a clan
+		# verification mode: walk to my own clan hall (waypointed AROUND the keep — the hall
+		# sits in the courtyard's back corner and a straight walk pins on the keep) and park
 		var hall: Dictionary = clan_hall_by_owner.get(player.el, {}) if player else {}
 		if not hall.is_empty() and player:
-			var to := Vector3(hall["x"], 0, hall["z"]) - player.pos
-			to.y = 0
-			if to.length() > 1.4:
-				cam_yaw = atan2(-to.x, -to.z)
-				touch_move = Vector2(0, 1)
+			if _nt_wp.is_empty() and _nt_run_t <= 0.05 and world_kind == "castle":
+				_nt_wp = _nt_clan_route(player.el, hall)   # town halls are in the open — walk direct
+			if not _nt_wp.is_empty():
+				_nt_walk_waypoints()
 			else:
-				touch_move = Vector2.ZERO     # inside the hall → stand still → teach accrues
+				var to := Vector3(hall["x"], 0, hall["z"]) - player.pos
+				to.y = 0
+				if to.length() > 1.4:
+					cam_yaw = atan2(-to.x, -to.z)
+					touch_move = Vector2(0, 1)
+				else:
+					touch_move = Vector2.ZERO     # inside the hall → stand still → teach accrues
 		# once recruited, the GUEST issues a scripted "protect" command for its own clan
 		if not is_host and not _nt_cmd_sent and _nt_run_t > 14.0 and net:
 			var ids: Array = []
@@ -4533,22 +4775,149 @@ func _nt_drive(is_host: bool) -> void:
 				_nt_cmd_sent = true
 				print("[GUEST] sent 'fetch' for %d own allies" % ids.size())
 		return
+	if OS.has_environment("NETTEST_RESCUE"):
+		if is_host:
+			_nt_rescue_beats()                # scripted key → cage → homecoming (guests observe)
+		return
 	if is_host:
+		# march out the gate to the wilds rendezvous first — on the castle map the old
+		# "walk straight at the guest" could never make contact (two curtain walls between);
+		# the open town map needs no route at all
+		if _nt_wp.is_empty() and _nt_run_t <= 0.05 and world_kind == "castle":
+			_nt_wp = _nt_route(player.el if player else "water")
+		if not _nt_wp.is_empty():
+			_nt_walk_waypoints()
+			return
 		var tgt: GameChar = null
 		for ch in actors:
 			if _is_remote_human(ch) and ch.alive:
 				tgt = ch
 				break
-		if _nt_run_t > 6.0 and tgt != null and player != null:
+		if tgt != null and player != null:
 			var to := tgt.pos - player.pos
 			cam_yaw = atan2(-to.x, -to.z)     # face the target (fwd = (-sin,-cos) in _apply_human_move)
 			touch_move = Vector2(0, 1)
 		else:
 			touch_move = Vector2.ZERO
 	else:
+		var gidx := maxi(1, int(OS.get_environment("NETTEST_IDX")))
+		if gidx > 1:
+			cam_yaw = _nt_run_t * 1.0         # extra guests: courtyard circle (ghost/interp stress)
+			touch_move = Vector2(0, 1)
+			touch_sprint = OS.has_environment("NETTEST_SPRINT")
+			return
+		# guest #1: out the gate + over the bridge, then circle at the rendezvous as chase
+		# bait (a caught-respawn re-routes via the teleport detector above)
+		if _nt_wp.is_empty() and _nt_run_t <= 0.05 and world_kind == "castle":
+			_nt_wp = _nt_route(player.el if player else "fire")
+		if not _nt_wp.is_empty():
+			_nt_walk_waypoints()
+			return
 		cam_yaw = _nt_run_t * 1.0             # slow turn → walk a circle
 		touch_move = Vector2(0, 1)
 		touch_sprint = OS.has_environment("NETTEST_SPRINT")   # stress the worst-case gap
+
+# The scripted route from `el`'s castle out to the wilds rendezvous east of the river.
+# Spawns sit in walled courtyards ~250u apart, so both sides thread their own gate (the
+# castle's local +u axis runs keep-door → gate, so face-and-walk threads both openings)
+# and west castles cross at the z=-75 bridge.
+func _nt_route(el: String) -> Array:
+	var cd: Dictionary = WorldBuilder.CASTLES[el]
+	var g: Vector2 = cd["gate"]
+	# courtyard exit first — a point past the keep's front face, offset sideways so the
+	# straight line from anywhere around the sanctum skirts the keep instead of hugging it
+	var pts: Array = [
+		Vector3(cd["x"] + g.x * 22.0 - g.y * 10.0, 0, cd["z"] + g.y * 22.0 + g.x * 10.0),
+		Vector3(cd["x"] + g.x * (WorldBuilder.WALL_HALF + 8.0), 0, cd["z"] + g.y * (WorldBuilder.WALL_HALF + 8.0)),
+	]
+	if cd["x"] < RIVER_X1:
+		pts.append(Vector3(RIVER_X1 - 8.0, 0, -75.0))
+		pts.append(Vector3(RIVER_X2 + 8.0, 0, -75.0))
+	pts.append(Vector3(34.0, 0, -75.0))       # the rendezvous
+	return pts
+
+# Route from the courtyard spawn to my clan hall: slip past the keep on the hall's side
+# first (local (0, ±(KEEP_HV+5))), then head for the hall itself in the back corner.
+func _nt_clan_route(el: String, hall: Dictionary) -> Array:
+	var cd: Dictionary = WorldBuilder.CASTLES[el]
+	var g: Vector2 = cd["gate"]
+	var p := Vector2(-g.y, g.x)
+	var c := Vector2(cd["x"], cd["z"])
+	var side := signf((Vector2(hall["x"], hall["z"]) - c).dot(p))
+	if side == 0.0:
+		side = 1.0
+	# stay in FRONT of the keep while sliding sideways (u=14 > KEEP_HU), only then cut
+	# behind it at a lane the keep can't reach (|v| = KEEP_HV + 9) — a direct diagonal
+	# clips the keep's corner and wedges the face-walker there
+	var lane := (WorldBuilder.KEEP_HV + 9.0) * side
+	var a := c + g * 14.0 + p * lane
+	var b := c - g * 6.0 + p * lane
+	return [Vector3(a.x, 0, a.y), Vector3(b.x, 0, b.y), Vector3(hall["x"], 0, hall["z"])]
+
+func _nt_walk_waypoints() -> void:
+	if player == null or _nt_wp.is_empty():
+		return
+	var to: Vector3 = (_nt_wp[0] as Vector3) - player.pos
+	to.y = 0
+	if to.length() < 3.0:
+		_nt_wp.pop_front()
+		_nt_wp_stuck = 0.0
+		_nt_wp_last = player.pos
+		touch_move = Vector2.ZERO
+		return
+	# stuck on a wall → sidestep for a bit (keep the waypoint), alternating sides
+	if _nt_detour > 0.0:
+		_nt_detour -= 1.0 / 30.0
+		cam_yaw = atan2(-to.x, -to.z) + (PI / 2.0) * _nt_detour_sign
+		touch_move = Vector2(0, 1)
+		return
+	_nt_wp_stuck += 1.0 / 30.0
+	if _nt_wp_stuck >= 1.0:
+		if player.pos.distance_to(_nt_wp_last) < 1.5:
+			if _nt_stuck_at != Vector3.ZERO and player.pos.distance_to(_nt_stuck_at) < 4.0:
+				_nt_detour_len = minf(_nt_detour_len + 0.8, 3.6)   # same pin — commit further, same side
+			else:
+				_nt_detour_len = 1.4
+				_nt_detour_sign = -_nt_detour_sign                 # a new pin — try the other side
+			_nt_stuck_at = player.pos
+			_nt_detour = _nt_detour_len
+			print("[nettest] stuck at %.0f,%.0f — sidestepping %.1fs" % [player.pos.x, player.pos.z, _nt_detour_len])
+		_nt_wp_stuck = 0.0
+		_nt_wp_last = player.pos
+	cam_yaw = atan2(-to.x, -to.z)
+	touch_move = Vector2(0, 1)
+
+# NETTEST_RESCUE: hop the HOST avatar through the rescue beats (key → cage → homecoming),
+# teleporting its twin alongside. Not a movement test — it exercises the ONLINE rescue
+# machinery end-to-end: key pickup + kh/kp meta, cage opening on host AND guests (rt),
+# twin replication (flag bit 9), homecoming win detection, and broadcast_end.
+func _nt_rescue_beats() -> void:
+	if player == null:
+		return
+	var el := player.el
+	_nt_beat_t += 1.0 / 30.0
+	if _nt_beat_t < 4.0 or _nt_beat > 2:
+		return
+	_nt_beat_t = 0.0
+	match _nt_beat:
+		0:
+			if keys.has(el):
+				player.pos = keys[el]["pos"] + Vector3(0.5, 0, 0)
+				print("[HOST rescue] beat 0: at my key (%.0f,%.0f)" % [player.pos.x, player.pos.z])
+		1:
+			var cg: Dictionary = cage_by_el.get(el, {})
+			if not cg.is_empty():
+				player.pos = Vector3(cg["x"] + 1.0, 0, cg["z"])
+				print("[HOST rescue] beat 1: at the cage (key held=%s)" % str(has_key_by_el.get(el, false)))
+		2:
+			var hs := _home_spot(el)
+			var tw: GameChar = twin_by_el.get(el)
+			print("[HOST rescue] beat 2: going home (twin freed=%s)" % str(tw != null))
+			if not hs.is_empty():
+				player.pos = Vector3(hs["x"], 0, hs["z"])
+				if tw != null:
+					tw.pos = Vector3(hs["x"] + 1.0, 0, hs["z"])
+	_nt_beat += 1
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60

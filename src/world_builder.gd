@@ -49,6 +49,7 @@ static func build(game) -> void:
 	_game = game
 	_root = game.world_root
 	_batches.clear()   # world can be rebuilt — never carry transforms across builds
+	_vis_rng.seed = 0x5EED
 	_ground_and_walls()
 	_river_and_bridges()
 	for el in ["fire", "water", "grass"]:
@@ -84,6 +85,13 @@ static func _add(n: Node3D) -> void:
 # Transparent materials keep their own MeshInstance3D so alpha sorting stays
 # exactly as before.
 static var _batches: Dictionary = {}
+
+# Randomness for PURE VISUALS (anim phases, wind leaves, flower blooms). Online guests
+# rebuild the world from the match seed and must consume the global seeded RNG stream
+# IDENTICALLY to the host — but lite (always on for guests, off for desktop hosts) skips
+# some decoration. Anything lite-dependent must therefore draw from this side stream,
+# never from the global randf()/randi() the collider placement uses.
+static var _vis_rng := RandomNumberGenerator.new()
 
 static func _batch_mesh(mesh: Mesh, mat: Material, xf: Transform3D) -> void:
 	var bm := mat as BaseMaterial3D
@@ -877,7 +885,7 @@ static func _add_hearth(cd: Dictionary, rr: float, ang: float, y0: float) -> Vec
 	glow.position = Vector3(0, 0.03, 0.35)
 	n.add_child(glow)
 	if not _game.lite:
-		var ph := randf() * TAU
+		var ph := _vis_rng.randf() * TAU
 		_game.deco_anims.append(func(t: float) -> void:
 			fire.scale = Vector3(1.3, 1.0 + sin(t * 0.019 + ph) * 0.18, 0.8))
 	return _tower_place(cd, n, rr, ang, true, y0)
@@ -1057,7 +1065,7 @@ static func _add_torch(cd: Dictionary, u: float, v: float) -> void:
 	flame.position = Vector3(w.x, 2.82, w.y)
 	_add(flame)
 	if not _game.lite:
-		var ph := randf() * TAU
+		var ph := _vis_rng.randf() * TAU
 		_game.deco_anims.append(func(t: float) -> void:
 			flame.scale = Vector3.ONE * (1.0 + sin(t * 0.02 + ph) * 0.18))
 
@@ -1260,8 +1268,8 @@ static func _flower_bed(cd: Dictionary, u: float, v: float, r: float, colors: Ar
 		Transform3D(Basis(), Vector3(w.x, 0.05, w.y)))
 	var n := 4 if _game.lite else 8
 	for i in n:
-		var a := randf() * TAU
-		var rr := sqrt(randf()) * (r - 0.3)
+		var a := _vis_rng.randf() * TAU
+		var rr := sqrt(_vis_rng.randf()) * (r - 0.3)
 		var fx := w.x + cos(a) * rr
 		var fz := w.y + sin(a) * rr
 		_batch_mesh(MeshLib.cyl_mesh(0.03, 0.03, 0.5, 5), MeshLib.lit_mat(MeshLib.rgb(0x4c7048)),
@@ -1305,7 +1313,7 @@ static func _add_brazier(cd: Dictionary, u: float, v: float) -> void:
 	_add(glow)
 	_obstacle(w.x, w.y, 0.8)
 	if not _game.lite:
-		var ph := randf() * TAU
+		var ph := _vis_rng.randf() * TAU
 		_game.deco_anims.append(func(t: float) -> void:
 			flame.scale = Vector3.ONE * (1.0 + sin(t * 0.017 + ph) * 0.16))
 
@@ -1376,7 +1384,7 @@ static func _add_fountain(cd: Dictionary, u: float, v: float) -> void:
 	_add(jet)
 	_obstacle(w.x, w.y, 1.9)
 	if not _game.lite:
-		var ph := randf() * TAU
+		var ph := _vis_rng.randf() * TAU
 		_game.deco_anims.append(func(t: float) -> void:
 			jet.position.y = 1.7 + sin(t * 0.004 + ph) * 0.12)
 
@@ -1573,7 +1581,9 @@ static func _scatter() -> void:
 		var cd: Dictionary = CASTLES[el]
 		keepouts.append({ "x": cd["x"], "z": cd["z"], "r": WALL_HALF * 1.45 + 6.0 })
 	var spots: Array = []
-	var count := 40 if _game.lite else 64
+	# NOT lite-dependent: scatter props register colliders, and online guests (always
+	# lite) must build the exact world a desktop host (non-lite) does from this seed.
+	var count := 64
 	for i in count:
 		var x := 0.0; var z := 0.0; var ok := false; var tries := 0
 		while not ok and tries < 80:
@@ -1618,17 +1628,17 @@ static func _build_wind_leaves() -> void:
 		var mat := MeshLib.unlit_mat(MeshLib.rgb(tones[i % tones.size()]), 0.92)
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		var m := MeshLib.mi(mesh, mat)
-		var low := randf() < 0.5
-		var s := 0.55 + randf() * 0.85
+		var low := _vis_rng.randf() < 0.5
+		var s := 0.55 + _vis_rng.randf() * 0.85
 		m.scale = Vector3.ONE * s
 		_add(m)
 		_game.wind_leaves.append({
 			"mesh": m,
-			"x": (randf() * 2.0 - 1.0) * A, "z": (randf() * 2.0 - 1.0) * A,
-			"y": (0.25 + randf() * 1.2) if low else (1.6 + randf() * 11.0),
-			"ph": randf() * 7.0, "spin": (randf() * 2.0 - 1.0) * 2.2,
-			"vx": 2.2 + randf() * 2.6, "vz": (randf() * 2.0 - 1.0) * 1.4,
-			"bob": 0.4 + randf() * 1.3,
+			"x": (_vis_rng.randf() * 2.0 - 1.0) * A, "z": (_vis_rng.randf() * 2.0 - 1.0) * A,
+			"y": (0.25 + _vis_rng.randf() * 1.2) if low else (1.6 + _vis_rng.randf() * 11.0),
+			"ph": _vis_rng.randf() * 7.0, "spin": (_vis_rng.randf() * 2.0 - 1.0) * 2.2,
+			"vx": 2.2 + _vis_rng.randf() * 2.6, "vz": (_vis_rng.randf() * 2.0 - 1.0) * 1.4,
+			"bob": 0.4 + _vis_rng.randf() * 1.3,
 		})
 
 static func _make_windleaf_mesh() -> ArrayMesh:

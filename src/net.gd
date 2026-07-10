@@ -18,7 +18,7 @@ extends Node
 signal joined_room(code: String)                       # we're in a room (host or guest)
 signal join_failed(reason: String)                     # rejected / couldn't connect
 signal lobby_changed(players: Array, my_id: int, admin_id: int, code: String)
-signal match_starting(world_seed: int, humans: Array, net_ids: Dictionary)  # guest: round starting
+signal match_starting(world_seed: int, humans: Array, net_ids: Dictionary, world: String)  # guest: round starting
 signal match_ended(reason: String, winner_el: String, standings: Array)
 signal connection_lost()                               # host vanished / socket dropped
 
@@ -109,14 +109,21 @@ func _process(_dt: float) -> void:
 		if not _open:
 			_open = true
 			_on_open()
+		# The host must drain faster than its guests send: 6 guests x ~30Hz input is
+		# 180 msg/s, and a castle-world frame dip below ~23fps would outpace 8/frame.
+		# Guest-bound frames (snapshots) keep the small cap so a relay burst can't
+		# monopolize a rendered frame.
+		var cap := 64 if role == "host" else MAX_PACKETS_PER_FRAME
 		var processed := 0
-		while _ws.get_available_packet_count() > 0 and processed < MAX_PACKETS_PER_FRAME:
+		while _ws != null and _ws.get_available_packet_count() > 0 and processed < cap:
 			processed += 1
 			var pkt := _ws.get_packet()
 			if _ws.was_string_packet():
 				_on_text(pkt.get_string_from_utf8())   # control + meta stay JSON
 			else:
 				_on_bin(pkt)                            # hot path: binary position snapshots
+			# a handled message ("err"/"host_gone") may call leave() and null the
+			# socket mid-drain — the while condition above re-checks, don't touch _ws here
 	elif st == WebSocketPeer.STATE_CLOSED:
 		var was_in_room := role != "" or _open
 		_ws = null
@@ -218,6 +225,8 @@ func _on_guest_el(m: Dictionary) -> void:
 	if started:
 		# MID-GAME JOIN: the late guest picked its element → spawn it into the running match
 		# (once) and send a start addressed to JUST that guest so it builds the same world.
+		if game != null and game.get("net_log"):
+			print("[HOST] mid-game el from peer %d: %s (known=%s)" % [id, el, str(game.peer_actor.has(id))])
 		if game != null and game.has_method("host_late_join") and not game.peer_actor.has(id):
 			var nm: String = String(lobby[id]["name"]) if lobby.has(id) else _unique_name("Player")
 			lobby[id] = { "name": nm, "el": el }
@@ -228,7 +237,8 @@ func _on_guest_el(m: Dictionary) -> void:
 			var mapping: Dictionary = {}
 			for pid in game.peer_actor:
 				mapping[pid] = game.peer_actor[pid].net_id
-			_send({ "t": "start", "to": id, "seed": _match_seed, "humans": humans, "netids": mapping })
+			_send({ "t": "start", "to": id, "seed": _match_seed, "humans": humans, "netids": mapping,
+				"world": String(game.world_kind) })
 		return
 	if not lobby.has(id):
 		return
@@ -292,8 +302,15 @@ func _on_start(m: Dictionary) -> void:
 		return
 	if started:
 		return
+	# A broadcast start whose netids don't contain me predates my join — I connected in the
+	# same instant the host pressed START, so the relay fanned it out to me too. I'm NOT in
+	# that match: taking it would freeze me as a net_id-0 viewer AND make me discard the
+	# targeted late-join lobby the host sends right behind it. Wait for my own start instead.
+	var ids: Dictionary = m.get("netids", {})
+	if to == 0 and not (ids.has(str(my_id)) or ids.has(my_id)):
+		return
 	started = true
-	match_starting.emit(int(m.get("seed", 0)), m.get("humans", []), m.get("netids", {}))
+	match_starting.emit(int(m.get("seed", 0)), m.get("humans", []), m.get("netids", {}), String(m.get("world", "castle")))
 
 # guest: a binary frame arrived (positions). Route by the 1-byte tag, decode the raw
 # float32 payload, and hand it to the game (no JSON on the hot path).
@@ -349,7 +366,8 @@ func start_match() -> void:
 	if game:
 		for pid in game.peer_actor:
 			mapping[pid] = game.peer_actor[pid].net_id
-	_send({ "t": "start", "seed": world_seed, "humans": humans, "netids": mapping })
+	var wk: String = String(game.world_kind) if game != null else "castle"
+	_send({ "t": "start", "seed": world_seed, "humans": humans, "netids": mapping, "world": wk })
 
 # Guest -> host: assign a task to my own clan (by ally net_id). The host validates ownership.
 func send_clan_task(role_: String, ids: Array) -> void:
