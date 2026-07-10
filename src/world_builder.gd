@@ -76,6 +76,28 @@ static func _rect(x: float, z: float, hw: float, hd: float) -> void:
 static func _add(n: Node3D) -> void:
 	_root.add_child(n)
 
+# ------------------------------------------------------------- decor culling
+# Small decorative props stop rendering beyond `r` units of the camera
+# (visibility ranges cull per GeometryInstance3D, so recurse into groups).
+# At those distances the props are a few pixels deep in the haze, but every one
+# still cost a WebGL draw call — the castle map has hundreds of them, and the
+# web export lives or dies by draw-call count. Never used on landmarks that
+# must read across the map (beams, keep/tower silhouettes, ground planes,
+# bridges) and never on batched MultiMeshes (already one call each). Purely
+# visual: no RNG is consumed and no collider changes, so online host/guest
+# worlds stay identical.
+static func _cull(n: Node, r: float) -> void:
+	if n is GeometryInstance3D:
+		var g := n as GeometryInstance3D
+		g.visibility_range_end = r
+		g.visibility_range_end_margin = 4.0   # hysteresis so the edge never flickers
+	for c in n.get_children():
+		_cull(c, r)
+
+static func _add_cull(n: Node3D, r: float) -> void:
+	_cull(n, r)
+	_add(n)
+
 # ------------------------------------------------ static-geometry batching
 # Repeated static props (wall slabs, merlons, stair steps, floor plates, tower
 # drums, flowers, …) accumulate per (mesh, material) and are flushed into one
@@ -158,12 +180,14 @@ static func _cwall(cd: Dictionary, u: float, v: float, lu: float, lv: float, h: 
 		_rect(w.x, w.y, s.x / 2.0, s.y / 2.0)
 
 # Place a prebuilt node at local (u, v), turning its +Z toward local dir (du, dv).
+# Everything placed this way is keep-interior furnishing (portraits, beds,
+# chests, banners) — small props that vanish into the haze past ~110u.
 static func _place(cd: Dictionary, node: Node3D, u: float, v: float, du: float, dv: float, y: float = 0.0) -> void:
 	var w := _lw(cd, u, v)
 	var d := _ld(cd, du, dv)
 	node.position = Vector3(w.x, y, w.y)
 	node.rotation.y = atan2(d.x, d.y)
-	_add(node)
+	_add_cull(node, 110.0)
 
 # ------------------------------------------------------- ground / boundary
 static func _ground_and_walls() -> void:
@@ -191,11 +215,11 @@ static func _add_house(x: float, z: float, w: float, d: float, h: float, color: 
 	prism.size = Vector3(w + 1.0, h * 0.5, d + 1.0)
 	var roof := MeshLib.mi(prism, MeshLib.lit_mat(MeshLib.rgb(ROOF_COLORS[randi() % ROOF_COLORS.size()])))
 	roof.position = Vector3(x, h + h * 0.25, z)
-	_add(roof)
+	_add_cull(roof, 190.0)
 	if randf() < 0.5:
 		var ch := MeshLib.box(0.7, 1.1, 0.7, MeshLib.lit_mat(MeshLib.rgb(0x8a7466)))
 		ch.position = Vector3(x + (randf() - 0.5) * w * 0.35, h + h * 0.32, z + (randf() - 0.5) * d * 0.3)
-		_add(ch)
+		_add_cull(ch, 160.0)
 	# timber-framed windows (warm candlelight)
 	var on_z := win_side == "pz" or win_side == "nz"
 	var span := w if on_z else d
@@ -211,7 +235,7 @@ static func _add_house(x: float, z: float, w: float, d: float, h: float, color: 
 			win.position = Vector3(x + off, h * 0.52, z + sgn * (d / 2.0 + 0.07))
 		else:
 			win.position = Vector3(x + sgn * (w / 2.0 + 0.07), h * 0.52, z + off)
-		_add(win)
+		_add_cull(win, 140.0)
 
 static func _add_cypress(x: float, z: float, scale: float = 1.0) -> void:
 	var s := scale * (0.8 + randf() * 0.5)
@@ -224,7 +248,7 @@ static func _add_cypress(x: float, z: float, scale: float = 1.0) -> void:
 	grp.add_child(trunk)
 	grp.add_child(body)
 	grp.position = Vector3(x, 0, z)
-	_add(grp)
+	_add_cull(grp, 180.0)
 	_obstacle(x, z, 0.8 * s)
 
 static func _add_street(x: float, z: float, w: float, d: float, col: int = 0xcfc8b4) -> void:
@@ -288,11 +312,11 @@ static func add_cave(cx: float, cz: float, owner: String) -> void:
 	var roof_col: Color = MeshLib.rgb(CASTLE_TINTS[owner]) if owner != "" else MeshLib.rgb(0xbcc0cc)
 	var roof := MeshLib.cyl(r + 1.4, r + 0.5, 1.2, _glass_or_lit(roof_col, 0.42), 14)
 	roof.position = Vector3(cx, 3.6, cz)
-	_add(roof)
+	_add_cull(roof, 200.0)
 	var glow_color: Color = MeshLib.rgb(_game.ELEMENTS[owner]["color"]) if owner != "" else MeshLib.rgb(0xf0c060)
 	var glow := MeshLib.disc(r - 0.8, MeshLib.unlit_mat(glow_color, 0.16 if owner != "" else 0.09), 22)
 	glow.position = Vector3(cx, 0.08, cz)
-	_add(glow)
+	_add_cull(glow, 150.0)
 	var radar_fill: Color = MeshLib.rgb(_game.ELEMENTS[owner]["color"]) if owner != "" else MeshLib.rgb(0xe0a93c)
 	var cave := { "x": cx, "z": cz, "r": r, "owner": owner, "openAngle": open_angle, "radarFill": radar_fill }
 	_game.caves.append(cave)
@@ -384,7 +408,7 @@ static func _curtain_wall(cd: Dictionary, stone: Material, stone_dark: Material,
 		b.position = Vector3(w.x, WALL_H - 2.2, w.y)
 		var d := _ld(cd, 1.0, 0.0)
 		b.rotation.y = atan2(d.x, d.y) + PI / 2.0
-		_add(b)
+		_add_cull(b, 220.0)
 
 static func _merlons(cd: Dictionary, mat: Material) -> void:
 	var W := WALL_HALF
@@ -486,7 +510,7 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 	var carpet := MeshLib.box(_lsz(cd, 5.0, 3.4).x, 0.05, _lsz(cd, 5.0, 3.4).y, MeshLib.unlit_mat(col, 0.45))
 	var cw := _lw(cd, 8.5, 0.0)
 	carpet.position = Vector3(cw.x, 0.1, cw.y)
-	_add(carpet)
+	_add_cull(carpet, 120.0)
 	# treasury nook: the dais where a raiding rival finds ITS key (game.gd
 	# reads key_spot_by_owner and parks each element's key in its predator's keep)
 	var ped_w := _add_key_dais(cd, 6.0, -9.5, col)
@@ -515,7 +539,7 @@ static func _build_keep(el: String, cd: Dictionary, col: Color, tint: Color, sto
 		var rug := MeshLib.disc(1.7, MeshLib.unlit_mat(col, 0.22), 16)
 		var rw := _lw(cd, -5.6, rv)
 		rug.position = Vector3(rw.x, 0.09, rw.y)
-		_add(rug)
+		_add_cull(rug, 110.0)
 
 # ------------------------------------------------------------ the home tower
 # Position on the tower's own polar grid: `ang` is the local angle measured
@@ -530,12 +554,13 @@ static func _door_ang(cd: Dictionary) -> float:
 
 # Place a node at polar (rr, ang), y0 up. face_in: +Z toward the tower centre
 # (furniture backed against the curved wall); otherwise +Z runs tangentially.
+# Everything placed this way is tower-interior furnishing — cull past ~90u.
 static func _tower_place(cd: Dictionary, node: Node3D, rr: float, ang: float, face_in: bool, y0: float = 0.0) -> Vector2:
 	var w := _tw(cd, rr, ang)
 	var wa := _door_ang(cd) + ang
 	node.position = Vector3(w.x, y0, w.y)
 	node.rotation.y = atan2(-cos(wa), -sin(wa)) if face_in else -wa
-	_add(node)
+	_add_cull(node, 90.0)
 	return w
 
 # The same placement as _tower_place, but as a global Transform3D for batching.
@@ -628,12 +653,12 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 		rim.outer_radius = 2.66
 		var rim_mi := MeshLib.mi(rim, wood)
 		rim_mi.position = Vector3(w0.x, f * fh + 0.02, w0.y)
-		_add(rim_mi)
+		_add_cull(rim_mi, 130.0)
 
 	# --- the spiral: central column + one turn of steps per floor
 	var column := MeshLib.cyl(0.45, 0.55, top + 1.6, stone_dark, 12)
 	column.position = Vector3(w0.x, (top + 1.6) / 2.0, w0.y)
-	_add(column)
+	_add_cull(column, 200.0)
 	_obstacle(w0.x, w0.y, 1.0)
 	var step_mat := MeshLib.lit_mat(MeshLib.rgb(0xb2a88e))
 	for i in 12 * TOWER_LEVELS:
@@ -658,10 +683,10 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var rbraz_w := _tw(cd, 3.8, 2.6)
 	var rbowl := MeshLib.cyl(0.6, 0.4, 0.7, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 10)
 	rbowl.position = Vector3(rbraz_w.x, top + 0.35, rbraz_w.y)
-	_add(rbowl)
+	_add_cull(rbowl, 140.0)
 	var rflame := MeshLib.sphere(0.3, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
 	rflame.position = Vector3(rbraz_w.x, top + 0.9, rbraz_w.y)
-	_add(rflame)
+	_add_cull(rflame, 140.0)
 	blk.call(TOWER_LEVELS,rbraz_w, 0.7)
 	var scope := Node3D.new()
 	var barrel := MeshLib.cyl(0.14, 0.2, 1.6, gold, 8)
@@ -683,17 +708,17 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var rune_w := _tw(cd, 3.4, 3.0)
 	var rune := MeshLib.disc(1.35, MeshLib.unlit_mat(tint.lightened(0.3), 0.55), 24)
 	rune.position = Vector3(rune_w.x, top + 0.05, rune_w.y)
-	_add(rune)
+	_add_cull(rune, 140.0)
 	var rune_ring := TorusMesh.new()
 	rune_ring.inner_radius = 1.18
 	rune_ring.outer_radius = 1.42
 	var rune_ring_mi := MeshLib.mi(rune_ring, MeshLib.unlit_mat(col, 0.85))
 	rune_ring_mi.position = Vector3(rune_w.x, top + 0.08, rune_w.y)
-	_add(rune_ring_mi)
+	_add_cull(rune_ring_mi, 140.0)
 	var emblem := _mini_figure(el, 0.55)   # the element's sigil, laid face-up
 	emblem.rotation.x = -PI / 2.0
 	emblem.position = Vector3(rune_w.x, top + 0.12, rune_w.y)
-	_add(emblem)
+	_add_cull(emblem, 120.0)
 	var land_w := _tw(cd, 3.6, 0.0)        # landing: by the throne-hall front door
 	if not _game.lite:
 		_game.deco_anims.append(func(t: float) -> void:
@@ -739,7 +764,7 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 			var nw := _tw(cd, 3.3, na)
 			var base_y := fh + 1.7 + ni * 0.3
 			note.position = Vector3(nw.x, base_y, nw.y)
-			_add(note)
+			_add_cull(note, 90.0)
 			var ph := ni * 2.1
 			_game.deco_anims.append(func(t: float) -> void:
 				note.position.y = base_y + sin(t * 0.0021 + ph) * 0.25
@@ -775,7 +800,7 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var shelf_wa := _door_ang(cd) + nook_a1
 	shelf_door.position = Vector3(shelf_closed_w.x, fh, shelf_closed_w.y)
 	shelf_door.rotation.y = -shelf_wa + PI   # spine along the radial line, books facing the library
-	_add(shelf_door)
+	_add_cull(shelf_door, 90.0)
 	var shelf_closed := shelf_door.position
 	var shelf_open := shelf_closed + Vector3(cos(shelf_wa), 0, sin(shelf_wa)) * 2.05  # slides into the outer wall
 	# the treasure inside
@@ -794,11 +819,11 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	var sparkle := MeshLib.sphere(0.18, MeshLib.unlit_mat(col, 0.9), 8, 6)
 	var sp_w := _tw(cd, 4.3, 3.35)
 	sparkle.position = Vector3(sp_w.x, fh + 1.3, sp_w.y)
-	_add(sparkle)
+	_add_cull(sparkle, 90.0)
 	var ngw := _tw(cd, 3.9, 3.15)
 	var nglow := MeshLib.disc(0.9, MeshLib.unlit_mat(col, 0.2), 12)
 	nglow.position = Vector3(ngw.x, fh + 0.05, ngw.y)
-	_add(nglow)
+	_add_cull(nglow, 90.0)
 
 	# L2 — bedchamber
 	var bed_w := _add_tower_bed(cd, 3.95, PI, col, 2.0 * fh)
@@ -861,7 +886,7 @@ static func _add_stair_guides(cd: Dictionary, tint: Color) -> void:
 		ring.outer_radius = 2.54
 		var rm := MeshLib.mi(ring, edge)
 		rm.position = Vector3(c.x, y + 0.05, c.y)
-		_add(rm)
+		_add_cull(rm, 120.0)
 
 # A hearth: stone surround + fire glow, backed against the tower wall.
 static func _add_hearth(cd: Dictionary, rr: float, ang: float, y0: float) -> Vector2:
@@ -1008,15 +1033,15 @@ static func _add_key_dais(cd: Dictionary, u: float, v: float, col: Color) -> Vec
 	var w := _lw(cd, u, v)
 	var dais := MeshLib.disc(1.15, MeshLib.lit_mat(MeshLib.rgb(0xc4beac)), 16)
 	dais.position = Vector3(w.x, 0.04, w.y)
-	_add(dais)
+	_add_cull(dais, 140.0)
 	var ring := TorusMesh.new()
 	ring.inner_radius = 1.05; ring.outer_radius = 1.25
 	var ring_mi := MeshLib.mi(ring, MeshLib.lit_mat(MeshLib.rgb(0xc9a23f)))
 	ring_mi.position = Vector3(w.x, 0.07, w.y)
-	_add(ring_mi)
+	_add_cull(ring_mi, 140.0)
 	var halo := MeshLib.disc(0.95, MeshLib.unlit_mat(col, 0.16), 16)
 	halo.position = Vector3(w.x, 0.06, w.y)
-	_add(halo)
+	_add_cull(halo, 140.0)
 	return w
 
 static func _add_chest(cd: Dictionary, u: float, v: float, col: Color) -> void:
@@ -1063,7 +1088,7 @@ static func _add_torch(cd: Dictionary, u: float, v: float) -> void:
 		Transform3D(Basis(), Vector3(w.x, 2.35, w.y)))
 	var flame := MeshLib.sphere(0.17, MeshLib.unlit_mat(MeshLib.rgb(0xffb054)), 8, 6)
 	flame.position = Vector3(w.x, 2.82, w.y)
-	_add(flame)
+	_add_cull(flame, 120.0)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
 		_game.deco_anims.append(func(t: float) -> void:
@@ -1294,7 +1319,7 @@ static func _build_home_shrine(el: String, cd: Dictionary, col: Color) -> void:
 	mat.albedo_texture = MeshLib.home_marker_tex(el, col)
 	var decal := MeshLib.mi(pm, mat)
 	decal.position = Vector3(w.x, 0.12, w.y)
-	_add(decal)
+	_add_cull(decal, 240.0)   # the win circle: generous range, it must read on approach
 	if not _game.lite:
 		_game.deco_anims.append(func(t: float) -> void:
 			var k := 1.0 + sin(t * 0.003) * 0.06
@@ -1307,10 +1332,10 @@ static func _add_brazier(cd: Dictionary, u: float, v: float) -> void:
 		Transform3D(Basis(), Vector3(w.x, 0.4, w.y)))
 	var flame := MeshLib.sphere(0.38, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
 	flame.position = Vector3(w.x, 1.0, w.y)
-	_add(flame)
+	_add_cull(flame, 130.0)
 	var glow := MeshLib.disc(1.1, MeshLib.unlit_mat(MeshLib.rgb(0xff7030), 0.2), 14)
 	glow.position = Vector3(w.x, 0.06, w.y)
-	_add(glow)
+	_add_cull(glow, 130.0)
 	_obstacle(w.x, w.y, 0.8)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
@@ -1328,7 +1353,7 @@ static func _garden_fire(cd: Dictionary, _col: Color) -> void:
 		var w := _lw(cd, 8.0, sv * 17.0)
 		var pool := MeshLib.disc(2.2, MeshLib.unlit_mat(MeshLib.rgb(0xff6a28), 0.5), 18)
 		pool.position = Vector3(w.x, 0.06, w.y)
-		_add(pool)
+		_add_cull(pool, 150.0)
 		var rock_mat := MeshLib.lit_mat(MeshLib.rgb(0x4e4652))
 		for i in 6:
 			var a := float(i) / 6.0 * TAU
@@ -1347,12 +1372,12 @@ static func _garden_water(cd: Dictionary, _col: Color) -> void:
 		var w := _lw(cd, 16.0, sv * 13.0)
 		var pond := MeshLib.cyl(3.2, 3.2, 0.14, pond_mat, 20)
 		pond.position = Vector3(w.x, 0.08, w.y)
-		_add(pond)
+		_add_cull(pond, 170.0)
 		var rim := TorusMesh.new()
 		rim.inner_radius = 3.1; rim.outer_radius = 3.55
 		var rim_mi := MeshLib.mi(rim, MeshLib.lit_mat(MeshLib.rgb(0xaeb2c0)))
 		rim_mi.position = Vector3(w.x, 0.14, w.y)
-		_add(rim_mi)
+		_add_cull(rim_mi, 170.0)
 		for i in 4:
 			var a := randf() * TAU
 			_batch_mesh(MeshLib.cyl_mesh(0.32, 0.32, 0.02, 8), MeshLib.lit_mat(MeshLib.rgb(0x5e9660)),
@@ -1369,19 +1394,19 @@ static func _add_fountain(cd: Dictionary, u: float, v: float) -> void:
 	var w := _lw(cd, u, v)
 	var base := MeshLib.cyl(1.7, 1.9, 0.45, MeshLib.lit_mat(MeshLib.rgb(0xaeb2c0)), 14)
 	base.position = Vector3(w.x, 0.22, w.y)
-	_add(base)
+	_add_cull(base, 150.0)
 	var pool := MeshLib.disc(1.5, _glass_or_lit(MeshLib.rgb(0x8ab4e8), 0.6), 14)
 	pool.position = Vector3(w.x, 0.47, w.y)
-	_add(pool)
+	_add_cull(pool, 150.0)
 	var column := MeshLib.cyl(0.28, 0.36, 0.8, MeshLib.lit_mat(MeshLib.rgb(0x9fa3b2)), 8)
 	column.position = Vector3(w.x, 0.85, w.y)
-	_add(column)
+	_add_cull(column, 150.0)
 	var bowl := MeshLib.cyl(0.7, 0.35, 0.3, MeshLib.lit_mat(MeshLib.rgb(0xaeb2c0)), 10)
 	bowl.position = Vector3(w.x, 1.35, w.y)
-	_add(bowl)
+	_add_cull(bowl, 150.0)
 	var jet := MeshLib.sphere(0.26, MeshLib.unlit_mat(MeshLib.rgb(0xdcecfc), 0.9), 10, 8)
 	jet.position = Vector3(w.x, 1.7, w.y)
-	_add(jet)
+	_add_cull(jet, 150.0)
 	_obstacle(w.x, w.y, 1.9)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
@@ -1401,10 +1426,10 @@ static func _garden_grass(cd: Dictionary, _col: Color) -> void:
 			var w := _lw(cd, t[0], sv * t[1])
 			var trunk := MeshLib.cyl(0.1, 0.13, 0.9, MeshLib.lit_mat(MeshLib.rgb(0x8a7866)), 6)
 			trunk.position = Vector3(w.x, 0.45, w.y)
-			_add(trunk)
+			_add_cull(trunk, 170.0)
 			var ball := MeshLib.sphere(0.85, hedge, 12, 10)
 			ball.position = Vector3(w.x, 1.7, w.y)
-			_add(ball)
+			_add_cull(ball, 170.0)
 			_obstacle(w.x, w.y, 0.9)
 		var cw := _lw(cd, 14.0, sv * 12.0)
 		_add_cypress(cw.x, cw.y, 0.9)
@@ -1433,10 +1458,10 @@ static func _build_dungeon_yard() -> void:
 			var bz: float = zz + sz2 * 12.5
 			var bowl := MeshLib.cyl(0.7, 0.42, 0.75, MeshLib.lit_mat(MeshLib.rgb(0x4a4650)), 10)
 			bowl.position = Vector3(bx, 0.38, bz)
-			_add(bowl)
+			_add_cull(bowl, 150.0)
 			var flame := MeshLib.sphere(0.34, MeshLib.unlit_mat(MeshLib.rgb(0xffa040)), 10, 8)
 			flame.position = Vector3(bx, 0.95, bz)
-			_add(flame)
+			_add_cull(flame, 150.0)
 			_obstacle(bx, bz, 0.75)
 	var bar_mat := MeshLib.lit_mat(MeshLib.rgb(0x6e6c7a))
 	var builders: Array[Callable] = [MeshLib.build_flame, MeshLib.build_droplet, MeshLib.build_leaf, MeshLib.build_o2, MeshLib.build_co2]
@@ -1469,11 +1494,13 @@ static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Materia
 	content.add_child(lid)
 	var base := MeshLib.cyl(r + 0.3, r + 0.3, 0.18, MeshLib.lit_mat(MeshLib.rgb(0xccc9d6)), 18)
 	base.position = Vector3(cx, 0.09, cz)
-	_add(base)
+	_add_cull(base, 170.0)
 	var mini: CharVisual = build_fn.call()
 	mini.scale = Vector3.ONE * 0.55
 	mini.position = Vector3(cx, 0.15, cz)
 	content.add_child(mini)
+	# a cage is ~20 draws (bars + dome + captive) × 5 cages — cull the lot at range
+	_cull(content, 170.0)
 	if not _game.lite:
 		_game.deco_anims.append(func(t: float) -> void:
 			mini.animate(t, 0.0)
@@ -1503,29 +1530,29 @@ static func reset_cages(game) -> void:
 # ------------------------------------------------- clan hall / training pad
 static func _build_clan_hall(x: float, z: float, col: Color) -> void:
 	var pad := MeshLib.cyl(3.2, 3.2, 0.16, MeshLib.lit_mat(MeshLib.rgb(0xe8e2d2)), 20)
-	pad.position = Vector3(x, 0.08, z); _add(pad)
+	pad.position = Vector3(x, 0.08, z); _add_cull(pad, 180.0)
 	var glow := MeshLib.disc(3.0, MeshLib.unlit_mat(col, 0.16), 22)
-	glow.position = Vector3(x, 0.1, z); _add(glow)
+	glow.position = Vector3(x, 0.1, z); _add_cull(glow, 180.0)
 	var post_mat := MeshLib.lit_mat(MeshLib.rgb(0x97816a))
 	for i in 4:
 		var a := i * PI / 2.0 + PI / 4.0
 		var post := MeshLib.cyl(0.12, 0.12, 3.0, post_mat, 6)
-		post.position = Vector3(x + cos(a) * 2.6, 1.5, z + sin(a) * 2.6); _add(post)
+		post.position = Vector3(x + cos(a) * 2.6, 1.5, z + sin(a) * 2.6); _add_cull(post, 180.0)
 	# translucent canopy so the top-down command view can see the members beneath it
 	var roof := MeshLib.cyl(3.1, 3.4, 0.4, _glass_or_lit(col, 0.5), 16)
-	roof.position = Vector3(x, 3.1, z); _add(roof)
-	var pole := MeshLib.cyl(0.1, 0.1, 4.4, post_mat, 6); pole.position = Vector3(x, 2.2, z); _add(pole)
-	var flag := MeshLib.box(1.4, 0.9, 0.08, MeshLib.unlit_mat(col)); flag.position = Vector3(x + 0.8, 3.9, z); _add(flag)
+	roof.position = Vector3(x, 3.1, z); _add_cull(roof, 180.0)
+	var pole := MeshLib.cyl(0.1, 0.1, 4.4, post_mat, 6); pole.position = Vector3(x, 2.2, z); _add_cull(pole, 180.0)
+	var flag := MeshLib.box(1.4, 0.9, 0.08, MeshLib.unlit_mat(col)); flag.position = Vector3(x + 0.8, 3.9, z); _add_cull(flag, 180.0)
 
 static func _build_training_pad(x: float, z: float, col: Color) -> void:
 	var pad := MeshLib.cyl(2.6, 2.6, 0.16, MeshLib.lit_mat(MeshLib.rgb(0xd9cfc0)), 18)
-	pad.position = Vector3(x, 0.08, z); _add(pad)
+	pad.position = Vector3(x, 0.08, z); _add_cull(pad, 180.0)
 	var glow := MeshLib.disc(2.4, MeshLib.unlit_mat(col, 0.14), 20)
-	glow.position = Vector3(x, 0.1, z); _add(glow)
+	glow.position = Vector3(x, 0.1, z); _add_cull(glow, 180.0)
 	var totem := MeshLib.cyl(0.34, 0.4, 2.4, MeshLib.lit_mat(col), 10)
-	totem.position = Vector3(x, 1.2, z); _add(totem)
+	totem.position = Vector3(x, 1.2, z); _add_cull(totem, 180.0)
 	var top := MeshLib.sphere(0.5, MeshLib.unlit_mat(col, 0.9), 12, 8)
-	top.position = Vector3(x, 2.6, z); _add(top)
+	top.position = Vector3(x, 2.6, z); _add_cull(top, 180.0)
 	_obstacle(x, z, 0.5)
 
 # ------------------------------------------------------------- hamlets
@@ -1538,18 +1565,18 @@ static func _build_hamlet(hx: float, hz: float) -> void:
 	# the village well
 	var ring := MeshLib.cyl(1.1, 1.2, 0.85, MeshLib.lit_mat(MeshLib.rgb(0xaeb2c0)), 12)
 	ring.position = Vector3(hx, 0.42, hz)
-	_add(ring)
+	_add_cull(ring, 150.0)
 	var wtr := MeshLib.disc(0.85, _glass_or_lit(MeshLib.rgb(0x8ab4e8), 0.6), 12)
 	wtr.position = Vector3(hx, 0.75, hz)
-	_add(wtr)
+	_add_cull(wtr, 150.0)
 	var post_mat := MeshLib.lit_mat(MeshLib.rgb(0x8a6f52))
 	for s in [-1.0, 1.0]:
 		var post := MeshLib.cyl(0.09, 0.09, 2.2, post_mat, 6)
 		post.position = Vector3(hx + s * 1.0, 1.1, hz)
-		_add(post)
+		_add_cull(post, 150.0)
 	var wroof := MeshLib.mi(_cone(1.5, 0.9, 8), MeshLib.lit_mat(MeshLib.rgb(ROOF_COLORS[0])))
 	wroof.position = Vector3(hx, 2.5, hz)
-	_add(wroof)
+	_add_cull(wroof, 150.0)
 	_obstacle(hx, hz, 1.35)
 	# hay bales + barrels
 	for i in 3:
@@ -1560,11 +1587,11 @@ static func _build_hamlet(hx: float, hz: float) -> void:
 			var hay := MeshLib.cyl(0.7, 0.7, 1.1, MeshLib.lit_mat(MeshLib.rgb(0xd8bc72)), 10)
 			hay.rotation.z = PI / 2.0
 			hay.position = Vector3(bx, 0.7, bz)
-			_add(hay)
+			_add_cull(hay, 150.0)
 		else:
 			var barrel := MeshLib.cyl(0.5, 0.55, 0.95, MeshLib.lit_mat(MeshLib.rgb(0x8a6a48)), 10)
 			barrel.position = Vector3(bx, 0.48, bz)
-			_add(barrel)
+			_add_cull(barrel, 150.0)
 		_obstacle(bx, bz, 0.75)
 
 # ------------------------------------------------------------- wilderness
@@ -1609,7 +1636,7 @@ static func _scatter() -> void:
 			rock.position = Vector3(x, 0.8, z)
 			rock.scale = Vector3(1, 1.1 + randf() * 0.6, 1)
 			rock.rotation.y = randf() * PI
-			_add(rock)
+			_add_cull(rock, 190.0)
 			_obstacle(x, z, 1.3)
 		else:
 			# a lone woodsman's hut
