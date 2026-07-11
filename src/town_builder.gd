@@ -14,10 +14,14 @@ const CAVE_TINTS := { "fire": 0xd8907a, "water": 0x8aa8cc, "grass": 0x8cb896 }
 
 static var _root: Node3D
 static var _game
+static var _batches: Dictionary = {}
+static var _unit_prism: PrismMesh
+static var _unit_plane: PlaneMesh
 
 static func build(game) -> void:
 	_game = game
 	_root = game.world_root
+	_batches.clear()
 	_ground_and_walls()
 	_river_and_bridges()
 	_build_school()
@@ -34,6 +38,7 @@ static func build(game) -> void:
 	_build_neighborhoods()
 	_scatter()
 	_build_wind_leaves()
+	_flush_batches()
 
 # --------------------------------------------------- registration helpers
 static func _obstacle(x: float, z: float, r: float) -> void:
@@ -44,6 +49,50 @@ static func _rect(x: float, z: float, hw: float, hd: float) -> void:
 
 static func _add(n: Node3D) -> void:
 	_root.add_child(n)
+
+static func _batch_mesh(mesh: Mesh, mat: Material, xf: Transform3D) -> void:
+	var bm := mat as BaseMaterial3D
+	if bm != null and bm.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED:
+		var node := MeshLib.mi(mesh, mat)
+		node.transform = xf
+		_add(node)
+		return
+	var key := "%d:%d" % [mesh.get_instance_id(), mat.get_instance_id()]
+	if not _batches.has(key):
+		_batches[key] = { "mesh": mesh, "mat": mat, "xfs": [] }
+	(_batches[key]["xfs"] as Array).append(xf)
+
+static func _batch_box(w: float, h: float, d: float, mat: Material, position: Vector3) -> void:
+	_batch_mesh(MeshLib.box_mesh(1.0, 1.0, 1.0), mat,
+		Transform3D(Basis.from_scale(Vector3(w, h, d)), position))
+
+static func _prism_mesh() -> PrismMesh:
+	if _unit_prism == null:
+		_unit_prism = PrismMesh.new()
+		_unit_prism.size = Vector3.ONE
+	return _unit_prism
+
+static func _plane_mesh() -> PlaneMesh:
+	if _unit_plane == null:
+		_unit_plane = PlaneMesh.new()
+		_unit_plane.size = Vector2.ONE
+	return _unit_plane
+
+static func _flush_batches() -> void:
+	for key in _batches:
+		var batch: Dictionary = _batches[key]
+		var transforms: Array = batch["xfs"]
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = batch["mesh"]
+		mm.instance_count = transforms.size()
+		for i in transforms.size():
+			mm.set_instance_transform(i, transforms[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = batch["mat"]
+		_add(mmi)
+	_batches.clear()
 
 static func _pick_house() -> Color:
 	return MeshLib.rgb(HOUSE_COLORS[randi() % HOUSE_COLORS.size()])
@@ -67,26 +116,19 @@ static func _ground_and_walls() -> void:
 	for w in walls:
 		_add_box_wall(w[0], w[1], w[2], w[3], 3.0, wall_mat)
 
-static func _add_box_wall(x: float, z: float, w: float, d: float, h: float, mat: Material) -> MeshInstance3D:
-	var m := MeshLib.box(w, h, d, mat)
-	m.position = Vector3(x, h / 2.0, z)
-	_add(m)
+static func _add_box_wall(x: float, z: float, w: float, d: float, h: float, mat: Material) -> void:
+	_batch_box(w, h, d, mat, Vector3(x, h / 2.0, z))
 	_rect(x, z, w / 2.0, d / 2.0)
-	return m
 
 # --------------------------------------------------------- house + props
 static func _add_house(x: float, z: float, w: float, d: float, h: float, color: Color, win_side: String = "pz") -> void:
 	_add_box_wall(x, z, w, d, h, MeshLib.lit_mat(color))
 	# gabled roof
-	var prism := PrismMesh.new()
-	prism.size = Vector3(w + 1.0, h * 0.5, d + 1.0)
-	var roof := MeshLib.mi(prism, MeshLib.lit_mat(MeshLib.rgb(ROOF_COLORS[randi() % ROOF_COLORS.size()])))
-	roof.position = Vector3(x, h + h * 0.25, z)
-	_add(roof)
+	_batch_mesh(_prism_mesh(), MeshLib.lit_mat(MeshLib.rgb(ROOF_COLORS[randi() % ROOF_COLORS.size()])),
+		Transform3D(Basis.from_scale(Vector3(w + 1.0, h * 0.5, d + 1.0)), Vector3(x, h + h * 0.25, z)))
 	if randf() < 0.5:
-		var ch := MeshLib.box(0.7, 1.1, 0.7, MeshLib.lit_mat(MeshLib.rgb(0x8a7466)))
-		ch.position = Vector3(x + (randf() - 0.5) * w * 0.35, h + h * 0.32, z + (randf() - 0.5) * d * 0.3)
-		_add(ch)
+		_batch_box(0.7, 1.1, 0.7, MeshLib.lit_mat(MeshLib.rgb(0x8a7466)),
+			Vector3(x + (randf() - 0.5) * w * 0.35, h + h * 0.32, z + (randf() - 0.5) * d * 0.3))
 	# white windows
 	var on_z := win_side == "pz" or win_side == "nz"
 	var span := w if on_z else d
@@ -97,33 +139,24 @@ static func _add_house(x: float, z: float, w: float, d: float, h: float, color: 
 		var off := 0.0
 		if n == 2:
 			off = -span * 0.22 if i == 0 else span * 0.22
-		var win := MeshLib.box(1.8 if on_z else 0.12, 1.4, 0.12 if on_z else 1.8, win_mat)
+		var pos: Vector3
 		if on_z:
-			win.position = Vector3(x + off, h * 0.52, z + sgn * (d / 2.0 + 0.07))
+			pos = Vector3(x + off, h * 0.52, z + sgn * (d / 2.0 + 0.07))
 		else:
-			win.position = Vector3(x + sgn * (w / 2.0 + 0.07), h * 0.52, z + off)
-		_add(win)
+			pos = Vector3(x + sgn * (w / 2.0 + 0.07), h * 0.52, z + off)
+		_batch_box(1.8 if on_z else 0.12, 1.4, 0.12 if on_z else 1.8, win_mat, pos)
 
 static func _add_cypress(x: float, z: float, scale: float = 1.0) -> void:
 	var s := scale * (0.8 + randf() * 0.5)
-	var grp := Node3D.new()
-	var trunk := MeshLib.cyl(0.09 * s, 0.13 * s, 0.7 * s, MeshLib.lit_mat(MeshLib.rgb(0x8a7866)))
-	trunk.position.y = 0.35 * s
-	var body := MeshLib.sphere(0.75 * s, MeshLib.lit_mat(MeshLib.rgb(CYPRESS_COLORS[randi() % CYPRESS_COLORS.size()])), 14, 12)
-	body.scale = Vector3(1, 2.9, 1)
-	body.position.y = 0.6 * s + 2.0 * s
-	grp.add_child(trunk)
-	grp.add_child(body)
-	grp.position = Vector3(x, 0, z)
-	_add(grp)
+	_batch_mesh(MeshLib.cyl_mesh(0.09, 0.13, 0.7, 8), MeshLib.lit_mat(MeshLib.rgb(0x8a7866)),
+		Transform3D(Basis.from_scale(Vector3.ONE * s), Vector3(x, 0.35 * s, z)))
+	_batch_mesh(MeshLib.sphere_mesh(0.75, 14, 12), MeshLib.lit_mat(MeshLib.rgb(CYPRESS_COLORS[randi() % CYPRESS_COLORS.size()])),
+		Transform3D(Basis.from_scale(Vector3(s, 2.9 * s, s)), Vector3(x, 2.6 * s, z)))
 	_obstacle(x, z, 0.8 * s)
 
 static func _add_street(x: float, z: float, w: float, d: float) -> void:
-	var p := PlaneMesh.new()
-	p.size = Vector2(w, d)
-	var s := MeshLib.mi(p, MeshLib.lit_mat(MeshLib.rgb(0xf4f5f9)))
-	s.position = Vector3(x, 0.02, z)
-	_add(s)
+	_batch_mesh(_plane_mesh(), MeshLib.lit_mat(MeshLib.rgb(0xf4f5f9)),
+		Transform3D(Basis.from_scale(Vector3(w, 1.0, d)), Vector3(x, 0.02, z)))
 
 # ------------------------------------------------------------- the river
 static func _river_and_bridges() -> void:
@@ -143,22 +176,17 @@ static func _river_and_bridges() -> void:
 	# bright curbs
 	var bank_mat := MeshLib.lit_mat(MeshLib.rgb(0xfafbfe))
 	for x in [x1 - 0.6, x2 + 0.6]:
-		var b := MeshLib.box(1.2, 0.3, A * 2 + 6, bank_mat)
-		b.position = Vector3(x, 0.12, 0)
-		_add(b)
+		_batch_box(1.2, 0.3, A * 2 + 6, bank_mat, Vector3(x, 0.12, 0))
 	# bridges
 	var wood := MeshLib.lit_mat(MeshLib.rgb(0xc0a78f))
 	var rail_mat := MeshLib.lit_mat(MeshLib.rgb(0x97816a))
 	for br in _game.BRIDGES:
 		var half: float = br["half"]
 		var bz: float = br["z"]
-		var deck := MeshLib.box(x2 - x1 + 4, 0.5, half * 2, wood)
-		deck.position = Vector3((x1 + x2) / 2.0, 0.3, bz)
-		_add(deck)
+		_batch_box(x2 - x1 + 4, 0.5, half * 2, wood, Vector3((x1 + x2) / 2.0, 0.3, bz))
 		for sgn in [-1, 1]:
-			var rail := MeshLib.box(x2 - x1 + 4, 0.8, 0.25, rail_mat)
-			rail.position = Vector3((x1 + x2) / 2.0, 0.95, bz + sgn * (half - 0.15))
-			_add(rail)
+			_batch_box(x2 - x1 + 4, 0.8, 0.25, rail_mat,
+				Vector3((x1 + x2) / 2.0, 0.95, bz + sgn * (half - 0.15)))
 
 # ------------------------------------------------------------- caves
 static func add_cave(cx: float, cz: float, owner: String) -> void:
@@ -170,11 +198,9 @@ static func add_cave(cx: float, cz: float, owner: String) -> void:
 		var a := open_angle + PI / 4.0 + i * (PI * 1.5 / (segs - 1))
 		var x := cx + cos(a) * r
 		var z := cz + sin(a) * r
-		var rock := MeshLib.sphere(1.5, rock_mat, 6, 4)
-		rock.position = Vector3(x, 1.2, z)
-		rock.scale = Vector3(1, 1.7, 1)
-		rock.rotation = Vector3((randf() - 0.5) * 0.3, randf() * PI, (randf() - 0.5) * 0.3)
-		_add(rock)
+		var rotation := Vector3((randf() - 0.5) * 0.3, randf() * PI, (randf() - 0.5) * 0.3)
+		_batch_mesh(MeshLib.sphere_mesh(1.5, 6, 4), rock_mat,
+			Transform3D(Basis.from_euler(rotation) * Basis.from_scale(Vector3(1, 1.7, 1)), Vector3(x, 1.2, z)))
 		_obstacle(x, z, 1.25)
 	# semi-glass / semi-stone roof so a character sheltering inside stays visible from above
 	var roof_col: Color = MeshLib.rgb(CAVE_TINTS[owner]) if owner != "" else MeshLib.rgb(0xbcc0cc)
@@ -284,7 +310,7 @@ static func _build_playground() -> void:
 	sw.position = Vector3(px - 8, 0, pz - 6)
 	_add(sw)
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(seats[0], func(t: float) -> void:
 			seats[0].rotation.x = sin(t * 0.0022) * 0.45
 			seats[1].rotation.x = sin(t * 0.0022 + 1.6) * 0.45)
 	_obstacle(px - 8 - 3.4, pz - 6, 0.9)
@@ -315,7 +341,7 @@ static func _build_playground() -> void:
 	mg.position = Vector3(px, 0, pz + 7)
 	_add(mg)
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void: mg.rotation.y = t * 0.0009)
+		_game.add_deco_anim(mg, func(t: float) -> void: mg.rotation.y = t * 0.0009)
 	_obstacle(px, pz + 7, 2.6)
 
 	# seesaw
@@ -327,7 +353,7 @@ static func _build_playground() -> void:
 	ss.position = Vector3(px - 3, 0, pz + 1)
 	_add(ss)
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void: plank.rotation.z = sin(t * 0.0016) * 0.22)
+		_game.add_deco_anim(plank, func(t: float) -> void: plank.rotation.z = sin(t * 0.0016) * 0.22)
 	_obstacle(px - 3, pz + 1, 0.9)
 
 static func _cone(r: float, h: float, seg: int) -> CylinderMesh:
@@ -386,7 +412,7 @@ static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Materia
 	mini.position = Vector3(cx, 0.15, cz)
 	content.add_child(mini)
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(mini, func(t: float) -> void:
 			mini.animate(t, 0.0)
 			mini.rotation.y = sin(t * 0.0007 + cx) * 0.6)
 	_obstacle(cx, cz, r + 0.2)
@@ -520,18 +546,31 @@ static func _build_wind_leaves() -> void:
 	var A: float = _game.ARENA
 	var mesh := _make_windleaf_mesh()
 	var tones := [0x7cb46c, 0x8fc27e, 0x6aa55e, 0x9acb86]
-	for i in 44:
-		var mat := MeshLib.unlit_mat(MeshLib.rgb(tones[i % tones.size()]), 0.92)
+	var batches: Array[MultiMesh] = []
+	for tone in tones:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		mm.instance_count = 11
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		var mat: StandardMaterial3D = MeshLib.unlit_mat(MeshLib.rgb(tone), 0.92).duplicate()
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		var m := MeshLib.mi(mesh, mat)
+		mmi.material_override = mat
+		_add(mmi)
+		batches.append(mm)
+	for i in 44:
 		var low := randf() < 0.5
 		var s := 0.55 + randf() * 0.85
-		m.scale = Vector3.ONE * s
-		_add(m)
+		var mm: MultiMesh = batches[i % tones.size()]
+		var instance_index := i / tones.size()
+		var x := (randf() * 2.0 - 1.0) * A
+		var z := (randf() * 2.0 - 1.0) * A
+		var y := (0.25 + randf() * 1.2) if low else (1.6 + randf() * 11.0)
+		mm.set_instance_transform(instance_index, Transform3D(Basis().scaled(Vector3.ONE * s), Vector3(x, y, z)))
 		_game.wind_leaves.append({
-			"mesh": m,
-			"x": (randf() * 2.0 - 1.0) * A, "z": (randf() * 2.0 - 1.0) * A,
-			"y": (0.25 + randf() * 1.2) if low else (1.6 + randf() * 11.0),
+			"multimesh": mm, "index": instance_index, "scale": s,
+			"x": x, "z": z, "y": y,
 			"ph": randf() * 7.0, "spin": (randf() * 2.0 - 1.0) * 2.2,
 			"vx": 2.2 + randf() * 2.6, "vz": (randf() * 2.0 - 1.0) * 1.4,
 			"bob": 0.4 + randf() * 1.3,

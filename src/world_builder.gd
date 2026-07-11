@@ -721,7 +721,7 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 	_add_cull(emblem, 120.0)
 	var land_w := _tw(cd, 3.6, 0.0)        # landing: by the throne-hall front door
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(rune, func(t: float) -> void:
 			rune.scale = Vector3.ONE * (1.0 + sin(t * 0.004) * 0.08))
 
 	# ================= the floors of home (0-2 + roof) =================
@@ -766,7 +766,7 @@ static func _build_tower(el: String, cd: Dictionary, col: Color, tint: Color, st
 			note.position = Vector3(nw.x, base_y, nw.y)
 			_add_cull(note, 90.0)
 			var ph := ni * 2.1
-			_game.deco_anims.append(func(t: float) -> void:
+			_game.add_deco_anim(note, func(t: float) -> void:
 				note.position.y = base_y + sin(t * 0.0021 + ph) * 0.25
 				note.rotation.y = sin(t * 0.0013 + ph) * 0.5)
 	# the library side: bookshelves + a reading chair
@@ -911,7 +911,7 @@ static func _add_hearth(cd: Dictionary, rr: float, ang: float, y0: float) -> Vec
 	n.add_child(glow)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(fire, func(t: float) -> void:
 			fire.scale = Vector3(1.3, 1.0 + sin(t * 0.019 + ph) * 0.18, 0.8))
 	return _tower_place(cd, n, rr, ang, true, y0)
 
@@ -1091,7 +1091,7 @@ static func _add_torch(cd: Dictionary, u: float, v: float) -> void:
 	_add_cull(flame, 120.0)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(flame, func(t: float) -> void:
 			flame.scale = Vector3.ONE * (1.0 + sin(t * 0.02 + ph) * 0.18))
 
 # A framed painting of the castle's own element character, hung on a wall.
@@ -1321,7 +1321,7 @@ static func _build_home_shrine(el: String, cd: Dictionary, col: Color) -> void:
 	decal.position = Vector3(w.x, 0.12, w.y)
 	_add_cull(decal, 240.0)   # the win circle: generous range, it must read on approach
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(decal, func(t: float) -> void:
 			var k := 1.0 + sin(t * 0.003) * 0.06
 			decal.scale = Vector3(k, 1.0, k))
 	_game.home_spot_by_owner[el] = { "x": w.x, "z": w.y, "r": 3.2 }
@@ -1339,7 +1339,7 @@ static func _add_brazier(cd: Dictionary, u: float, v: float) -> void:
 	_obstacle(w.x, w.y, 0.8)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(flame, func(t: float) -> void:
 			flame.scale = Vector3.ONE * (1.0 + sin(t * 0.017 + ph) * 0.16))
 
 # FIRE — an ember garden: braziers, glowing ember pools ringed with dark rock,
@@ -1410,7 +1410,7 @@ static func _add_fountain(cd: Dictionary, u: float, v: float) -> void:
 	_obstacle(w.x, w.y, 1.9)
 	if not _game.lite:
 		var ph := _vis_rng.randf() * TAU
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(jet, func(t: float) -> void:
 			jet.position.y = 1.7 + sin(t * 0.004 + ph) * 0.12)
 
 # LEAF — a formal green garden: clipped hedgerows, topiary balls, cypress and
@@ -1502,7 +1502,7 @@ static func _add_cage(cx: float, cz: float, build_fn: Callable, bar_mat: Materia
 	# a cage is ~20 draws (bars + dome + captive) × 5 cages — cull the lot at range
 	_cull(content, 170.0)
 	if not _game.lite:
-		_game.deco_anims.append(func(t: float) -> void:
+		_game.add_deco_anim(mini, func(t: float) -> void:
 			mini.animate(t, 0.0)
 			mini.rotation.y = sin(t * 0.0007 + cx) * 0.6)
 	_obstacle(cx, cz, r + 0.2)
@@ -1651,18 +1651,31 @@ static func _build_wind_leaves() -> void:
 	var A: float = _game.ARENA
 	var mesh := _make_windleaf_mesh()
 	var tones := [0x7cb46c, 0x8fc27e, 0x6aa55e, 0x9acb86]
-	for i in 60:
-		var mat := MeshLib.unlit_mat(MeshLib.rgb(tones[i % tones.size()]), 0.92)
+	var batches: Array[MultiMesh] = []
+	for tone in tones:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		mm.instance_count = 15
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		var mat: StandardMaterial3D = MeshLib.unlit_mat(MeshLib.rgb(tone), 0.92).duplicate()
 		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		var m := MeshLib.mi(mesh, mat)
+		mmi.material_override = mat
+		_add(mmi)
+		batches.append(mm)
+	for i in 60:
 		var low := _vis_rng.randf() < 0.5
 		var s := 0.55 + _vis_rng.randf() * 0.85
-		m.scale = Vector3.ONE * s
-		_add(m)
+		var mm: MultiMesh = batches[i % tones.size()]
+		var instance_index := i / tones.size()
+		var x := (_vis_rng.randf() * 2.0 - 1.0) * A
+		var z := (_vis_rng.randf() * 2.0 - 1.0) * A
+		var y := (0.25 + _vis_rng.randf() * 1.2) if low else (1.6 + _vis_rng.randf() * 11.0)
+		mm.set_instance_transform(instance_index, Transform3D(Basis().scaled(Vector3.ONE * s), Vector3(x, y, z)))
 		_game.wind_leaves.append({
-			"mesh": m,
-			"x": (_vis_rng.randf() * 2.0 - 1.0) * A, "z": (_vis_rng.randf() * 2.0 - 1.0) * A,
-			"y": (0.25 + _vis_rng.randf() * 1.2) if low else (1.6 + _vis_rng.randf() * 11.0),
+			"multimesh": mm, "index": instance_index, "scale": s,
+			"x": x, "z": z, "y": y,
 			"ph": _vis_rng.randf() * 7.0, "spin": (_vis_rng.randf() * 2.0 - 1.0) * 2.2,
 			"vx": 2.2 + _vis_rng.randf() * 2.6, "vz": (_vis_rng.randf() * 2.0 - 1.0) * 1.4,
 			"bob": 0.4 + _vis_rng.randf() * 1.3,

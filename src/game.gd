@@ -132,7 +132,7 @@ var key_spot_by_owner: Dictionary = {}    # el -> Vector3 treasury pedestal INSI
 var tower_by_owner: Dictionary = {}       # el -> home-tower dict (see WorldBuilder._build_tower):
                                           # 6 walkable floors + roof, spiral stair, furniture circles,
                                           # sliding-bookshelf secret and portrait passage
-var deco_anims: Array = []       # [Callable(t_ms)]
+var deco_anims: Array = []       # [{ "node":Node3D, "fn":Callable, "phase":int }]
 var wind_leaves: Array = []
 
 # --------------------------------------------------------------- game state
@@ -271,8 +271,12 @@ var lite := false                # lighter rendering for weak/touch devices (ren
                                  # fewer wind-leaves, throttled décor, no SSR)
 var _deco_accum := 0.0           # lite: frame time accumulated between cosmetic updates
 const DECO_LITE_HZ := 20.0       # lite: run décor / wind-leaf animation at this rate, not per-frame
+const DECO_FULL_DIST := 120.0
+const DECO_HALF_DIST := 220.0
+const CHAR_ANIM_FULL_DIST := 75.0
+const CHAR_ANIM_HALF_DIST := 150.0
 const PERF_SCALE_LITE := 0.75    # lite: render the 3D world at 75% then upscale (HUD stays sharp)
-const PERF_SCALE_GUEST := 0.60   # guests prioritize local responsiveness over visual sharpness
+const PERF_SCALE_GUEST := 0.75   # guests start sharper; adaptive quality can still step down on weak GPUs
 
 # ---- adaptive quality (web) ----
 # The deployed build runs on wildly different machines, and `lite` only catches
@@ -291,6 +295,19 @@ var _aq_high_windows := 0        # consecutive fast windows (hysteresis before s
 var _aq_drops := 0               # times we've had to step down — each one makes climbing
                                  # back need longer proof, so borderline machines settle
 var _aq_cooldown := 0.0          # settle time after a step before sampling again
+var _msaa_ok := false            # web: MSAA must be EARNED by a proven-fast window — weak
+                                 # iGPUs pay ~35% for it, so never assume it at boot
+var _aq_warmup := 0.0            # skip AQ sampling this long after a match starts — shader
+                                 # compile / world-build stutter isn't the machine's real speed
+const AQ_WARMUP := 6.0
+# A drop must PAY FOR ITSELF. CPU-bound machines gain nothing from a lower render
+# scale — degrading them is pure visual loss. After each step down, the next sample
+# must show a real gain or the step is reverted; two futile drops lock the scale high.
+var _aq_pre_drop_fps := 0.0      # fps of the window that triggered the last step down
+var _aq_check_gain := false      # the next full window judges whether that step helped
+var _aq_futile_drops := 0        # reverted steps this match
+var _aq_scale_locked := false    # scale is not the bottleneck here — stop degrading
+const AQ_GAIN_MIN := 1.12        # a step must yield ≥12% more fps to be kept
 const AQ_STEPS: Array[float] = [1.0, 0.85, 0.72, 0.6]   # render-scale multipliers
 const AQ_WINDOW := 2.0           # seconds per FPS sample window
 const AQ_FPS_LOW := 42.0         # a window under this → drop one step
@@ -623,11 +640,16 @@ func _apply_perf_scale() -> void:
 	if OS.has_feature("web"):
 		var q: Variant = JavaScriptBridge.eval("(new URLSearchParams(location.search)).get('q')", true)
 		match (str(q) if q != null else ""):
-			"high": scale = 1.0; _aq_lock = true
+			"high": scale = 1.0; _aq_lock = true; _msaa_ok = true   # explicit max quality: grant MSAA too
 			"balanced": scale = 0.75; _aq_lock = true
 			"max": scale = 0.6; _aq_lock = true
 	_perf_scale_base = scale
-	get_viewport().scaling_3d_scale = clampf(scale * AQ_STEPS[_aq_level], 0.4, 1.0)
+	var effective_scale := clampf(scale * AQ_STEPS[_aq_level], 0.4, 1.0)
+	get_viewport().scaling_3d_scale = effective_scale
+	var use_msaa := not mobile and mode != Mode.HOST and _aq_level == 0 and effective_scale >= 0.75
+	if OS.has_feature("web") and not _msaa_ok:   # on web, headroom must be proven first
+		use_msaa = false
+	get_viewport().msaa_3d = Viewport.MSAA_2X if use_msaa else Viewport.MSAA_DISABLED
 	if world_env != null and world_env.environment != null:
 		world_env.environment.ssr_enabled = not lite
 
@@ -641,6 +663,11 @@ func _adaptive_quality_tick(delta: float) -> void:
 		_aq_time = 0.0
 		_aq_frames = 0
 		return
+	if _aq_warmup > 0.0:           # shader-compile / world-build stutter: not a real sample
+		_aq_warmup -= delta
+		_aq_time = 0.0
+		_aq_frames = 0
+		return
 	if _aq_cooldown > 0.0:
 		_aq_cooldown -= delta
 		return
@@ -651,23 +678,48 @@ func _adaptive_quality_tick(delta: float) -> void:
 	var fps := float(_aq_frames) / _aq_time
 	_aq_time = 0.0
 	_aq_frames = 0
-	if fps < AQ_FPS_LOW and _aq_level < AQ_STEPS.size() - 1:
+	if _aq_check_gain:
+		_aq_check_gain = false
+		if fps < _aq_pre_drop_fps * AQ_GAIN_MIN:
+			_aq_level = maxi(0, _aq_level - 1)   # the drop bought nothing — CPU-bound, undo it
+			_aq_futile_drops += 1
+			if _aq_futile_drops >= 2:
+				_aq_scale_locked = true
+			_aq_cooldown = AQ_SETTLE
+			_apply_perf_scale()
+			if net_log:
+				print("[perf] %.0f fps — drop didn't help (was %.0f before), back up to %.2f%s" % [
+					fps, _aq_pre_drop_fps, get_viewport().scaling_3d_scale,
+					" (scale locked: not the bottleneck)" if _aq_scale_locked else ""])
+			return
+		_aq_futile_drops = 0       # a drop that paid off proves scale matters on this machine
+	if fps < AQ_FPS_LOW and not _aq_scale_locked and _aq_level < AQ_STEPS.size() - 1:
+		_aq_pre_drop_fps = fps
+		_aq_check_gain = true
 		_aq_level += 1
 		_aq_drops += 1
 		_aq_high_windows = 0
+		_msaa_ok = false           # struggling — MSAA must be re-earned at full scale
 		_aq_cooldown = AQ_SETTLE
 		_apply_perf_scale()
 		if net_log:
 			print("[perf] %.0f fps — render scale down to %.2f" % [fps, get_viewport().scaling_3d_scale])
-	elif fps > AQ_FPS_HIGH and _aq_level > 0:
-		_aq_high_windows += 1
-		if _aq_high_windows >= mini(6, 1 + _aq_drops):
-			_aq_high_windows = 0
-			_aq_level -= 1
+	elif fps > AQ_FPS_HIGH:
+		if _aq_level > 0:
+			_aq_high_windows += 1
+			if _aq_high_windows >= mini(6, 1 + _aq_drops):
+				_aq_high_windows = 0
+				_aq_level -= 1
+				_aq_cooldown = AQ_SETTLE
+				_apply_perf_scale()
+				if net_log:
+					print("[perf] %.0f fps — render scale back up to %.2f" % [fps, get_viewport().scaling_3d_scale])
+		elif not _msaa_ok:         # already at full scale with headroom — now MSAA is affordable
+			_msaa_ok = true
 			_aq_cooldown = AQ_SETTLE
 			_apply_perf_scale()
 			if net_log:
-				print("[perf] %.0f fps — render scale back up to %.2f" % [fps, get_viewport().scaling_3d_scale])
+				print("[perf] %.0f fps — headroom proven, enabling 2x MSAA" % fps)
 	else:
 		_aq_high_windows = 0
 
@@ -683,6 +735,27 @@ func _cosmetic_step(delta: float) -> float:
 	var d := _deco_accum
 	_deco_accum = 0.0
 	return d
+
+func add_deco_anim(node: Node3D, fn: Callable) -> void:
+	deco_anims.append({ "node": node, "fn": fn, "phase": deco_anims.size() })
+
+func _run_deco_anims(t: float) -> void:
+	var frame := Engine.get_process_frames()
+	for entry in deco_anims:
+		var node: Node3D = entry["node"]
+		if node == null or not is_instance_valid(node):
+			continue
+		var dist_sq := camera.global_position.distance_squared_to(node.global_position)
+		var stride := 1 if dist_sq <= DECO_FULL_DIST * DECO_FULL_DIST else (2 if dist_sq <= DECO_HALF_DIST * DECO_HALF_DIST else 4)
+		if (frame + int(entry["phase"])) % stride == 0:
+			(entry["fn"] as Callable).call(t)
+
+func _should_animate_character(node: Node3D, phase: int) -> bool:
+	if camera == null:
+		return true
+	var dist_sq := camera.global_position.distance_squared_to(node.global_position)
+	var stride := 1 if dist_sq <= CHAR_ANIM_FULL_DIST * CHAR_ANIM_FULL_DIST else (2 if dist_sq <= CHAR_ANIM_HALF_DIST * CHAR_ANIM_HALF_DIST else 4)
+	return (Engine.get_process_frames() + phase) % stride == 0
 
 func _build_environment() -> void:
 	camera = Camera3D.new()
@@ -811,8 +884,7 @@ func _process(delta: float) -> void:
 	time_ms += delta * 1000.0
 	var cd := _cosmetic_step(delta)
 	if cd >= 0.0:
-		for fn in deco_anims:
-			fn.call(time_ms)
+		_run_deco_anims(time_ms)
 		_update_wind_leaves(minf(0.08, cd), time_ms)
 
 	if _banner:
@@ -861,7 +933,8 @@ func _process(delta: float) -> void:
 		ch.group.position = ch.pos
 		if ch.vel.length_squared() > 0.5:
 			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
-		ch.group.animate(time_ms, ch.vel.length())
+		if _should_animate_character(ch.group, ch.net_id):
+			ch.group.animate(time_ms, ch.vel.length())
 	# drive the black-figure disguise model so it mirrors the (now-hidden) player
 	if disguise_node and is_instance_valid(disguise_node) and player and _is_disguised() and not tower_mode:
 		disguise_node.position = player.pos
@@ -2148,12 +2221,13 @@ func _update_wind_leaves(dt: float, t: float) -> void:
 		if L["z"] - cz > W: L["z"] -= W * 2.0
 		elif L["z"] - cz < -W: L["z"] += W * 2.0
 		var y: float = L["y"] + sin(t * 0.001 * L["bob"] + L["ph"]) * 1.1
-		var mesh: MeshInstance3D = L["mesh"]
-		mesh.position = Vector3(L["x"], maxf(0.15, y), L["z"])
-		mesh.rotation = Vector3(
+		var rotation := Vector3(
 			sin(t * 0.0009 + L["ph"]) * 1.15,
 			t * 0.0005 * L["spin"] + L["ph"],
 			cos(t * 0.0007 + L["ph"] * 1.7) * 0.85)
+		var basis := Basis.from_euler(rotation).scaled(Vector3.ONE * float(L["scale"]))
+		var mm: MultiMesh = L["multimesh"]
+		mm.set_instance_transform(int(L["index"]), Transform3D(basis, Vector3(L["x"], maxf(0.15, y), L["z"])))
 
 # ------------------------------------------------------------- characters
 func all_chars() -> Array:
@@ -3313,6 +3387,10 @@ func _run_countdown() -> void:
 		ui.set_countdown("")
 	if not ending:
 		running = true
+		_aq_warmup = AQ_WARMUP
+		_aq_scale_locked = false   # a new match (maybe a new world) is a new bottleneck question
+		_aq_futile_drops = 0
+		_aq_check_gain = false
 
 func end_game(reason: String) -> void:
 	if ending and reason != "force":
@@ -3814,8 +3892,7 @@ func _host_process(delta: float) -> void:
 	time_ms += delta * 1000.0
 	var cd := _cosmetic_step(delta)
 	if cd >= 0.0:
-		for fn in deco_anims:
-			fn.call(time_ms)
+		_run_deco_anims(time_ms)
 	if running:
 		time_left = maxf(0.0, time_left - dt)
 		_host_capture_local_input(dt)        # host's own avatar input -> net_input[my_id]
@@ -3842,8 +3919,9 @@ func _host_process(delta: float) -> void:
 		_host_sync_hud()
 		_host_refresh_channel()              # host's own training/teaching progress bar
 		_snap_accum += dt
-		if _snap_accum >= 1.0 / SNAP_HZ:
-			_snap_accum = 0.0
+		var snap_step := 1.0 / SNAP_HZ
+		if _snap_accum >= snap_step:
+			_snap_accum = fmod(_snap_accum, snap_step)
 			_broadcast_snapshot()
 	if cd >= 0.0:
 		_update_wind_leaves(minf(0.08, cd), time_ms)
@@ -3854,7 +3932,8 @@ func _host_process(delta: float) -> void:
 		ch.group.position = ch.pos
 		if ch.vel.length_squared() > 0.5:
 			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
-		ch.group.animate(time_ms, ch.vel.length())
+		if _should_animate_character(ch.group, ch.net_id):
+			ch.group.animate(time_ms, ch.vel.length())
 	_update_camera(dt)
 	if net_log:
 		_nl_host_tick(dt)
@@ -4216,8 +4295,7 @@ func _client_process(delta: float) -> void:
 	time_ms += delta * 1000.0
 	var cd := _cosmetic_step(delta)
 	if cd >= 0.0:
-		for fn in deco_anims:
-			fn.call(time_ms)
+		_run_deco_anims(time_ms)
 	if local_net_id == 0 or player == null or not running:
 		_update_camera(dt)   # lobby/countdown backdrop; no prediction until GO
 		return
@@ -4392,6 +4470,8 @@ func _client_render_remote(dt: float) -> void:
 		var buf: Array = a["buf"]
 		if buf.is_empty():
 			continue
+		while buf.size() > 2 and float(buf[1]["t"]) <= render_t:
+			buf.pop_front()
 		if net_log:
 			_nl_render_frames += 1
 			_nl_buf_sum += buf.size()
@@ -4429,7 +4509,8 @@ func _client_render_remote(dt: float) -> void:
 		g.position = pos
 		if spd > 0.5:
 			g.rotation.y = lerp_angle(g.rotation.y, yaw, 1.0 - pow(0.001, dt))
-		g.animate(time_ms, spd)
+		if g.visible and _should_animate_character(g, int(nid)):
+			g.animate(time_ms, spd)
 
 # GUEST: predict my self-training bar locally so it fills smoothly while I stand on my
 # totem. Purely cosmetic — the host runs the authoritative channel and awards the heart
