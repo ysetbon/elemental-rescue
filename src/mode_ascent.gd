@@ -78,7 +78,6 @@ var ping := {}                        # last bell ringer { x, z, el, t } — sho
 var ring_view := 0.0                  # the local player's ring channel 0..1 (HUD)
 var autopilot := false                # debug: the AI drives the local player too
 var _door_msg_cd := 0.0
-var _hud_flash := 0.0
 var _last_eclipse := false
 var _last_rise := 0
 var _was_lit := false
@@ -686,14 +685,8 @@ func _safe_mote_spot(from: Vector3) -> Vector3:
 	if best == "":
 		# only Heart Isle is left: its ground ring, on the side the mote came from
 		var a := SkyLayout.ang_of(from.x, from.z) + randf_range(-25.0, 25.0)
-		for _i in 12:
-			var ok := true
-			for k in [0]:
-				if SkyLayout.in_sector(a, k):
-					ok = false
-			if ok:
-				break
-			a += 30.0
+		if SkyLayout.in_sector(a, 0):
+			a += 30.0                # not on the door stair
 		return SkyLayout.pol3(a, 24.6)
 	var is2: Dictionary = SkyLayout.NODES[best]
 	var min_d := 10.0 if String(is2["kind"]) == "home" else 0.0
