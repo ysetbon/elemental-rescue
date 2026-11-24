@@ -2328,6 +2328,8 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 	# old 120-arena town, so everyone strides faster to keep travel times reasonable.
 	# Chase balance is untouched (all relative speeds preserved).
 	ch.speed = (10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)) * PACE
+	if sky != null and kind != "element":
+		ch.speed *= ModeAscent.GAS_SPEED   # sky: smog clouds + breeze bubbles drift slower than you run
 	if kind == "element":
 		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
 	elif kind == "o2":
@@ -5347,7 +5349,44 @@ func _sky_debug_setup() -> void:
 			sky.motes_el[el] = int(_sky_dbg["skymotes"])
 	if _sky_dbg.has("skyrings"):
 		sky.rings_el[player.el] = int(_sky_dbg["skyrings"])
-	if _sky_dbg.has("skytp"):
+	if _sky_dbg.has("skytp") and not String(_sky_dbg["skytp"]).contains(","):
+		# skytp=mote|smog|bubble|predator — stand a few metres from the nearest one
+		var what := String(_sky_dbg["skytp"])
+		var tgt := Vector3.ZERO
+		var found := false
+		if what == "mote":
+			for m in sky.motes:
+				if m["el"] == player.el and not m["taken"]:
+					tgt = m["pos"]; found = true
+					break
+		elif what == "predator":
+			for a in actors:
+				if a != player and _eats(a.el, player.el):
+					a.pos = player.pos + Vector3(4.5, 0, 1.0)   # bring the rival to us instead
+					found = false
+					break
+		else:
+			for n in npcs:
+				if n.kind == ("co2" if what == "smog" else "o2"):
+					tgt = n.pos; found = true
+					break
+		if found:
+			var isle := SkyLayout.node_of(tgt.x, tgt.z)
+			var c := Vector3.ZERO
+			if isle != "":
+				c = Vector3(SkyLayout.NODES[isle]["x"], 0, SkyLayout.NODES[isle]["z"])
+			var off := (c - tgt)
+			off.y = 0
+			off = off.normalized() * 4.0 if off.length() > 4.5 else Vector3(3.0, 0, 2.0)
+			if what == "mote":
+				player.pos = Vector3(tgt.x + off.x, 0, tgt.z + off.z)
+			else:
+				for n in npcs:                                   # bring the gas to us (it may be over a gap)
+					if n.kind == ("co2" if what == "smog" else "o2"):
+						n.pos = player.pos + Vector3(5.0, 0, -2.0)
+						break
+			cam_yaw = atan2(-off.x, -off.z) + PI
+	elif _sky_dbg.has("skytp"):
 		var v := String(_sky_dbg["skytp"]).split(",")
 		var k := int(v[2]) if v.size() > 2 else 0
 		player.tier = k
@@ -5358,6 +5397,8 @@ func _sky_debug_setup() -> void:
 		cam_yaw = deg_to_rad(float(_sky_dbg["skyyaw"]))
 	if _sky_dbg.has("skyhud"):
 		ui.visible = int(_sky_dbg["skyhud"]) != 0
+	if _sky_dbg.has("skyclean"):
+		ui.countdown_label.visible = false                       # no 3-2-1 overlay in early captures
 	if _sky_dbg.has("skykey"):
 		# skykey=E — hold a key down (QA for key prompts such as "E to climb")
 		var ev := InputEventKey.new()

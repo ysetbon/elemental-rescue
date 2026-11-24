@@ -55,6 +55,7 @@ const AI_GATHER_SPEED := 0.62    # …and stroll while hunting motes, so a human
 const AI_FLEE_BOOST := 1.22      # but they bolt when something that eats them is close
 const N_SMOG := 4                # single-player CO₂ smog clouds / O₂ breeze bubbles in this world
 const N_BUBBLES := 10
+const GAS_SPEED := 0.8           # smog clouds / breeze bubbles move at 80% of their castle-world speed
 const ELS := ["fire", "water", "grass"]
 const SHORT_NAME := { "fire": "vent", "water": "lift", "grass": "vine" }
 const PAD_NAME := { "fire": "fire vent", "water": "water lift", "grass": "vine ladder" }
