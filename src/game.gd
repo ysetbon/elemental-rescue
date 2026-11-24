@@ -23,8 +23,21 @@ const WORLDS := {
 		"bridges": [{ "z": -70.0, "half": 3.5 }, { "z": 0.0, "half": 3.5 }, { "z": 70.0, "half": 3.5 }],
 		"zoo": { "x": -34.0, "z": 24.0 },
 	},
+	# SKYFALL ISLES — floating islands over a cloud sea, playing the mode ASCENT
+	# (ModeAscent). No river, no clans / cages / keys / home tower; the map itself
+	# is SkyLayout data and the world is one Blender-authored scene (SkyBuilder).
+	"sky": {
+		"arena": 175.0, "pace": 1.2, "fog": 0.004, "stones": 5,
+		"bridges": [], "zoo": { "x": 0.0, "z": 0.0 }, "river": false,
+	},
 }
 var world_kind := "castle"
+var has_river := true        # per-world (WORLDS[..]["river"], default true): guards every RIVER_X1/X2 use
+var sky: ModeAscent = null   # Skyfall Isles rules + AI — null in the castle / town worlds
+var sky_view = null          # SkyView: the sky world's moving visuals (motes, bell, smog front…)
+var sun_light: DirectionalLight3D = null
+var snap_floats := 8         # per-actor snapshot floats: SNAP_FLOATS, +1 (height) in the sky world
+var _sky_cam_y := 0.0        # sky: camera base height (frozen 1s into a fall)
 var ARENA := 200.0       # castle world — much larger than the 120 twilight town
 var PACE := 1.2          # uniform speed-up of every character to match the bigger map
 const CATCH_DIST := 2.4
@@ -482,6 +495,8 @@ func _ready_visual() -> void:
 	_read_net_log_flag()
 	if OS.get_cmdline_user_args().has("town"):
 		_set_world_kind("town")   # debug probes/tests: boot straight into the town world
+	elif OS.get_cmdline_user_args().has("sky"):
+		_set_world_kind("sky")    # `-- autostart fire sky` boots straight into an Ascent round
 	mobile = TouchControls.is_touch_session()
 	lite = mobile   # phones get the lighter renderer (set before the world is built)
 	_apply_perf_scale()
@@ -517,9 +532,15 @@ func _ready_visual() -> void:
 	if OS.get_cmdline_user_args().has("autostart"):
 		var _el := "fire"
 		if OS.get_cmdline_user_args().has("water"): _el = "water"
-		elif OS.get_cmdline_user_args().has("grass"): _el = "grass"
+		elif OS.get_cmdline_user_args().has("grass") or OS.get_cmdline_user_args().has("leaf"): _el = "grass"
 		start_game(_el)
 		running = true
+		# debug: `-- autostart fire sky autopilot` lets the rival AI drive your avatar too
+		# (a whole Ascent round hands-off; add --fixed-fps 20 --headless to fast-forward it)
+		if sky != null and OS.get_cmdline_user_args().has("autopilot"):
+			sky.autopilot = true
+		if sky != null:
+			_sky_debug_setup()
 	# debug: `-- autostart perftest` — headless sim-cost probe: worst-case actor load
 	# (full clan on attack), then print per-frame sim-time stats and quit.
 	if OS.get_cmdline_user_args().has("perftest"):
@@ -793,6 +814,7 @@ func _build_environment() -> void:
 	sun.light_color = MeshLib.rgb(SUN_COLOR)
 	sun.light_energy = SUN_ENERGY
 	sun.shadow_enabled = false
+	sun_light = sun
 	add_child(sun)
 	sun.look_at_from_position(SUN_FROM, Vector3.ZERO, Vector3.UP)
 
@@ -825,10 +847,18 @@ func _rebuild_world(world_seed: int) -> void:
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
-	if world_kind == "town":
-		TownBuilder.build(self)
+	sky = null
+	sky_view = null
+	if world_kind == "sky":
+		sky = ModeAscent.new(self)
+		SkyBuilder.build(self)
+		sky.view = sky_view
 	else:
-		WorldBuilder.build(self)
+		SkyBuilder.restore_environment(self)   # back from the sky world: twilight sky + light again
+		if world_kind == "town":
+			TownBuilder.build(self)
+		else:
+			WorldBuilder.build(self)
 	_sg_nobs = -1   # world changed — lazily rebuild the spatial index on first query
 	_sync_radar_world()
 
@@ -843,6 +873,8 @@ func _set_world_kind(kind: String) -> void:
 	N_BLACK_STONES = w["stones"]
 	BRIDGES = w["bridges"]
 	ZOO = w["zoo"]
+	has_river = bool(w.get("river", true))
+	snap_floats = SNAP_FLOATS + (1 if world_kind == "sky" else 0)
 	NET_CATCH_PAD = 1.6 * PACE
 	NET_REPORT_PAD = 4.0 * PACE
 	if world_env != null and world_env.environment != null:
@@ -855,6 +887,9 @@ func _sync_radar_world() -> void:
 	for c in caves:
 		radar_caves.append({ "x": c["x"], "z": c["z"], "r": c["r"], "fill": c["radarFill"] })
 	ui.radar.setup(RIVER_X1, RIVER_X2, BRIDGES, radar_caves)
+	ui.radar.has_river = has_river
+	ui.radar.sky_on = world_kind == "sky"
+	ui.radar.range_ = 105.0 if world_kind == "sky" else RADAR_RANGE
 
 func _build_trails() -> void:
 	for i in TRAIL_N:
@@ -899,6 +934,8 @@ func _process(delta: float) -> void:
 
 	if running:
 		_tick_timers(dt)
+		if sky != null and sky.autopilot:
+			sky.drive_autopilot(dt)
 		_update_player(dt)
 		for ch in actors:
 			if not ch.is_human and ch.alive:
@@ -914,14 +951,18 @@ func _process(delta: float) -> void:
 				else:
 					_update_o2(n, dt)
 		_update_cave_timers(dt)
-		_update_training(dt)
-		_update_teaching(dt)
-		_refresh_channel()
-		_update_key(dt)
+		if sky == null:
+			_update_training(dt)
+			_update_teaching(dt)
+			_refresh_channel()
+			_update_key(dt)
 		_update_black_stones(dt)
 		_check_catches()
-		_check_rescue()
-		_update_hud_status()
+		if sky != null:
+			sky.tick(dt)             # Ascent rules: motes, pads, bell, smog sea, falls, the win
+		else:
+			_check_rescue()
+			_update_hud_status()
 		for ch in actors:
 			if ch.alive and not ch.is_human and ch.vel.length_squared() > 120.0 and randf() < dt * 14.0:
 				_spawn_trail(ch)
@@ -941,7 +982,11 @@ func _process(delta: float) -> void:
 		disguise_node.rotation.y = player.group.rotation.y
 		disguise_node.animate(time_ms, player.vel.length())
 
+	if sky != null:
+		sky.frame(dt)                # sky visuals + HUD
 	_update_camera(dt)
+	if sky != null:
+		_sky_debug_tick(delta)
 
 	# TEMP capture hook: `-- autostart shot [water|grass] [walk]`
 	if OS.get_cmdline_user_args().has("shot") and player:
@@ -1139,7 +1184,7 @@ func _update_camera(dt: float) -> void:
 		else:
 			# inside your home cave (e.g. just respawned after dying) drop to a low, close
 			# angle so you see your character under the roof instead of staring at the ceiling
-			var in_cave := inside_own_cave(player)
+			var in_cave := inside_own_cave(player) and sky == null   # sky sanctums are open-air: no roof to duck under
 			var cam_h: float = 2.4 if in_cave else CAM_H
 			var max_d: float = 7.5 if in_cave else CAM_DIST
 			var look_y: float = 1.2 if in_cave else 1.9
@@ -1148,10 +1193,21 @@ func _update_camera(dt: float) -> void:
 			# world never jolts when the host nudges us; host/single follow the sim directly.
 			var cp: Vector3 = _client_render_pos() if mode == Mode.CLIENT else player.pos
 			var d := _cam_obstruction(cp.x, cp.z, sin(cam_yaw), cos(cam_yaw), max_d)
+			var base_y := 0.0
+			if sky != null:
+				# the spire has real height: ride at the avatar's tier, never dip inside
+				# the drum above, and lift for a steeper view when squeezed against it
+				var full := d
+				d = _sky_cam_dist(cp, d)
+				if d < full:
+					cam_h = lerpf(6.8, cam_h, clampf(d / CAM_DIST, 0.0, 1.0))
+				if not sky.fall_frozen():
+					_sky_cam_y = cp.y        # a fall: follow for a second, then let them drop away
+				base_y = _sky_cam_y
 			var tx := cp.x + sin(cam_yaw) * d
 			var tz := cp.z + cos(cam_yaw) * d
-			camera.position = camera.position.lerp(Vector3(tx, cam_h, tz), 1.0 - pow(snap, dt))
-			camera.look_at(Vector3(cp.x, look_y, cp.z), Vector3.UP)
+			camera.position = camera.position.lerp(Vector3(tx, base_y + cam_h, tz), 1.0 - pow(snap, dt))
+			camera.look_at(Vector3(cp.x, (cp.y if sky != null else 0.0) + look_y, cp.z), Vector3.UP)
 		var blips: Array = []
 		if mode == Mode.CLIENT:
 			_client_radar_blips(blips)   # guests: actors/objectives come from the net mirrors
@@ -1176,7 +1232,14 @@ func _update_camera(dt: float) -> void:
 			for s in black_stones:
 				if s["cooldown"] <= 0.0:
 					blips.append({ "pos": Vector2(s["pos"].x, s["pos"].z), "color": Color(0.35, 0.3, 0.45), "o2": false })
+			if sky != null:
+				sky.radar_blips(blips)   # my Sun Motes + the bell-ringer ping
 		ui.radar.update_data(Vector2(player.pos.x, player.pos.z), player.group.rotation.y, blips)
+	elif sky != null:
+		# menu backdrop: a slow orbit of the whole archipelago
+		var a2 := time_ms * 0.00005
+		camera.position = Vector3(sin(a2) * 170.0, 58.0, cos(a2) * 170.0)
+		camera.look_at(Vector3(0, 10, 0), Vector3.UP)
 	else:
 		var a := time_ms * 0.00006
 		camera.position = Vector3(sin(a) * 62.0, 17.0, cos(a) * 62.0)
@@ -1229,6 +1292,8 @@ func _client_radar_blips(blips: Array) -> void:
 	elif key_nodes.has(local_el) and is_instance_valid(key_nodes[local_el]) and key_nodes[local_el].visible:
 		var kn: Node3D = key_nodes[local_el]
 		blips.append({ "pos": Vector2(kn.position.x, kn.position.z), "color": MeshLib.rgb(ELEMENTS[local_el]["color"]), "o2": false })
+	if sky != null:
+		sky.radar_blips(blips)
 
 # ------------------------------------------------------- spatial index (perf)
 # The castle world registers ~300 obstacles + ~80 rects, and the steering / LOS /
@@ -1422,7 +1487,7 @@ func _ray_aabb(ox: float, oz: float, dx: float, dz: float, minx: float, minz: fl
 
 # ------------------------------------------------------------------ terrain
 func in_river(p: Vector3) -> bool:
-	return p.x > RIVER_X1 and p.x < RIVER_X2
+	return has_river and p.x > RIVER_X1 and p.x < RIVER_X2
 
 func on_bridge(p: Vector3) -> bool:
 	for b in BRIDGES:
@@ -1433,6 +1498,8 @@ func on_bridge(p: Vector3) -> bool:
 func terrain_mult(ch: GameChar) -> float:
 	if ch.kind != "element":
 		return 1.0
+	if sky != null:
+		return sky.terrain_mult(ch)   # sky streams + the smog sea instead of the river
 	if ch.el == "water":
 		return 1.0
 	return 0.55 if (in_river(ch.pos) and not on_bridge(ch.pos)) else 1.0
@@ -1506,9 +1573,9 @@ func _update_cave_timers(dt: float) -> void:
 	if player and player.alive and tower_mode:
 		ui.set_cave(_tower_floor_label(_tower()))
 	elif player and player.alive and inside_own_cave(player):
-		ui.set_cave("Home keep — safe %ds left" % int(ceil(CAVE_MAX_STAY - player.cave_time)))
+		ui.set_cave(("Sanctum — safe %ds left" if sky != null else "Home keep — safe %ds left") % int(ceil(CAVE_MAX_STAY - player.cave_time)))
 	elif player and player.cave_cooldown > 0.0:
-		ui.set_cave("Keep lockout %ds" % int(ceil(player.cave_cooldown)))
+		ui.set_cave(("Sanctum lockout %ds" if sky != null else "Keep lockout %ds") % int(ceil(player.cave_cooldown)))
 	else:
 		ui.set_cave("")
 
@@ -1630,14 +1697,18 @@ func resolve_collisions(ch: GameChar) -> void:
 	var m := ARENA - 1.2
 	ch.pos.x = clampf(ch.pos.x, -m, m)
 	ch.pos.z = clampf(ch.pos.z, -m, m)
+	if sky != null:
+		sky.constrain(ch)   # tier bands, stair wedges, walkable ground / falling, height
 
 func random_spot(min_r: float = 0.0) -> Vector3:
+	if sky != null:
+		return sky.random_air_spot(min_r)   # gases drift over the gaps between the isles
 	for i in 60:
 		var x := (randf() * 2.0 - 1.0) * (ARENA - 10.0)
 		var z := (randf() * 2.0 - 1.0) * (ARENA - 10.0)
 		if Vector2(x, z).length() < min_r:
 			continue
-		if x > RIVER_X1 - 2 and x < RIVER_X2 + 2:
+		if has_river and x > RIVER_X1 - 2 and x < RIVER_X2 + 2:
 			continue
 		if caves.any(func(c): return Vector2(c["x"] - x, c["z"] - z).length() < c["r"] + 3):
 			continue
@@ -1829,9 +1900,11 @@ func _nearest_in(group: Array, from: Vector3) -> GameChar:
 	return best
 
 func _update_element_ai(ch: GameChar, dt: float) -> void:
-	var me: Dictionary = ELEMENTS[ch.el]
-	var predator: GameChar = _nearest_in(by_el.get(me["predator"], []), ch.pos)
-	var prey: GameChar = _nearest_in(by_el.get(me["prey"], []), ch.pos)
+	if sky != null:
+		sky.update_ai(ch, dt)   # Ascent rivals race: gather → spire → climb → ring
+		return
+	var predator: GameChar = _nearest_in(by_el.get(_pred_of(ch.el), []), ch.pos)
+	var prey: GameChar = _nearest_in(by_el.get(_prey_of(ch.el), []), ch.pos)
 	# while the player wears a black stone they're "energized" — the element they'd
 	# normally eat them (this char, if its prey is the player) must flee instead.
 	var prey_is_empowered: bool = prey != null and prey.is_player and _is_disguised()
@@ -1960,9 +2033,12 @@ func _update_player(dt: float) -> void:
 	if tower_mode:
 		_update_tower_player(dt)
 		return
-	_check_tower_gate()
+	if sky == null:
+		_check_tower_gate()
 	if tower_mode:
 		return
+	if sky != null and (player.busy != 0 or player.kb_t > 0.0):
+		return   # falling / mid-flight / being shoved: no steering
 	var mx := 0.0
 	var mz := 0.0
 	if Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP): mz += 1.0
@@ -2273,6 +2349,8 @@ func _build_char_visual(kind: String, el: String) -> CharVisual:
 		if el == "fire": model = MeshLib.build_flame()
 		elif el == "water": model = MeshLib.build_droplet()
 		else: model = MeshLib.build_leaf()
+	elif world_kind == "sky":
+		model = SkyBuilder.build_gas_visual(kind)   # CO₂ = smog cloud, O₂ = breeze bubble
 	elif kind == "o2":
 		model = MeshLib.build_o2()
 	else:
@@ -2312,9 +2390,11 @@ func _check_catches() -> void:
 			continue        # a guest predator reports its OWN catches client-side (accurate to its view) → server_guest_catch
 		var prey: GameChar = null
 		var nd := 1.0e20
-		for p in by_el.get(ELEMENTS[a.el]["prey"], []):
+		for p in by_el.get(_prey_of(a.el), []):
 			if not p.alive or inside_own_cave(p) or inside_own_room(p):
 				continue
+			if sky != null and not sky.same_layer(a, p):
+				continue        # catches only between actors on the same spire tier
 			if _is_remote_human(p):
 				continue        # a guest detects its OWN catches client-side (accurate to its view) → server_guest_caught
 			if p.is_player and _is_disguised():
@@ -2326,8 +2406,9 @@ func _check_catches() -> void:
 			_take_hit(prey, a)
 	# black-stone power-up (Pac-Man style): while disguised you can EAT your predator
 	if _is_disguised() and player and player.alive and not inside_own_cave(player):
-		var pred: GameChar = _nearest_in(by_el.get(ELEMENTS[player.el]["predator"], []), player.pos)
-		if pred and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST:
+		var pred: GameChar = _nearest_in(by_el.get(_pred_of(player.el), []), player.pos)
+		if pred and not inside_own_cave(pred) and pred.invuln_timer <= 0.0 and player.pos.distance_to(pred.pos) < CATCH_DIST \
+				and (sky == null or sky.same_layer(player, pred)):
 			ui.toast("Gotcha! You caught your predator %s!" % ELEMENTS[pred.el]["label"])
 			_take_hit(pred, player)
 	# ATTACK clan smack the element their OWNER hunts (each attacker hits its nearest such prey)
@@ -2337,7 +2418,7 @@ func _check_catches() -> void:
 		var oa := _clan_owner(a)
 		if oa == null:
 			continue
-		var apr: GameChar = _nearest_in(by_el.get(ELEMENTS[oa.el]["prey"], []), a.pos)
+		var apr: GameChar = _nearest_in(by_el.get(_prey_of(oa.el), []), a.pos)
 		if apr != null and apr.alive and not inside_own_cave(apr) and not inside_own_room(apr) and a.pos.distance_to(apr.pos) < CATCH_DIST:
 			_take_hit(apr, a)
 	# PROTECT clan defend their OWNER: briefly SLOW the owner's predator, or spend a black
@@ -2350,7 +2431,7 @@ func _check_catches() -> void:
 		if op == null:
 			continue
 		var lv := _clan_live(a.owner_peer)
-		var apd: GameChar = _nearest_in(by_el.get(ELEMENTS[op.el]["predator"], []), a.pos)
+		var apd: GameChar = _nearest_in(by_el.get(_pred_of(op.el), []), a.pos)
 		if apd and not inside_own_cave(apd) and apd.slow_timer <= 0.0 and a.pos.distance_to(apd.pos) < CATCH_DIST:
 			apd.slow_timer = SLOW_TIME     # brief slow-down, not a trip home
 			if lv:
@@ -2380,11 +2461,14 @@ func _check_catches() -> void:
 		for v in _co2_targets():
 			if _is_remote_human(v):
 				continue        # a guest detects its OWN CO₂ catch client-side → server_guest_caught (CO₂ reverts there)
+			if sky != null and not sky.same_layer(n, v):
+				continue
 			if n.pos.distance_to(v.pos) < _catch_dist(n, v):
 				var hit_player: bool = v.is_player or v.is_human   # any human hit → CO₂ spends its oxygen, drops to CO
+				var landed: bool = v.invuln_timer <= 0.0
 				_take_hit(v, n)
-				if hit_player:
-					_co2_to_co(n)
+				if hit_player or (sky != null and landed):
+					_co2_to_co(n)          # sky: every tag spends the cloud's oxygen (rivals included)
 				break
 	# while you're disguised, O₂ (whites) hunt the black figure and bite a heart off
 	if _is_disguised() and player and player.alive and player.invuln_timer <= 0.0 and not inside_own_room(player):
@@ -2396,7 +2480,7 @@ func _check_catches() -> void:
 				break
 	# only the player sips O₂ now — it supercharges sprint stamina (elements no longer
 	# need oxygen for anything; not collectible while you're a black figure)
-	if player and player.alive and not _is_disguised():
+	if player and player.alive and not _is_disguised() and (sky == null or player.busy == 0):
 		for n in npcs:
 			if n.kind == "o2" and n.alive and n.pos.distance_to(player.pos) < CATCH_DIST + 0.4:
 				_consume_o2(n)
@@ -2426,6 +2510,8 @@ func server_guest_caught(peer: int, by_nid: int) -> void:
 	var prey: GameChar = peer_actor.get(peer)
 	if prey == null or not prey.alive or prey.invuln_timer > 0.0 or inside_own_cave(prey) or inside_own_room(prey):
 		return
+	if sky != null and prey.busy != 0:
+		return
 	var attacker: GameChar = null
 	for c in all_chars():
 		if c.net_id == by_nid:
@@ -2434,10 +2520,12 @@ func server_guest_caught(peer: int, by_nid: int) -> void:
 	if attacker == null or not attacker.alive or attacker.is_twin:
 		return
 	var ok := false
-	if attacker.kind == "element" and attacker.el == ELEMENTS[prey.el]["predator"]:
+	if attacker.kind == "element" and _eats(attacker.el, prey.el):
 		ok = true
 	elif attacker.kind == "co2" and attacker.co_timer <= 0.0:
 		ok = true
+	if sky != null and not sky.same_layer(attacker, prey):
+		ok = false
 	if not ok or attacker.pos.distance_to(prey.pos) > CATCH_DIST + NET_REPORT_PAD:   # generous range guard (ghost was ~½RTT behind)
 		return
 	_take_hit(prey, attacker)
@@ -2459,7 +2547,9 @@ func server_guest_catch(peer: int, prey_nid: int) -> void:
 			break
 	if prey == null or not prey.alive or inside_own_cave(prey) or inside_own_room(prey):
 		return
-	if prey.el != ELEMENTS[pred.el]["prey"]:
+	if not _eats(pred.el, prey.el):
+		return
+	if sky != null and not sky.same_layer(pred, prey):
 		return
 	if pred.pos.distance_to(prey.pos) > CATCH_DIST + NET_REPORT_PAD:   # generous (the prey ghost was ~½RTT behind)
 		return
@@ -2477,6 +2567,8 @@ func _co2_targets() -> Array:
 			continue
 		if e.is_player and (_is_disguised() or hide_mine):
 			continue        # disguised, or safe at home → CO₂ ignore you
+		if sky != null and (e.busy != 0 or e.tier > ModeAscent.CO2_MAX_TIER):
+			continue        # smog is heavy: it never reaches above tier 2 of the spire
 		out.append(e)
 	if not hide_mine:
 		for a in allies:
@@ -2509,11 +2601,14 @@ func _take_hit(victim: GameChar, attacker: GameChar) -> void:
 	victim.hp -= 1
 	if attacker.kind == "element" and victim.kind == "element":
 		attacker.score += PTS_PREY
+	if sky != null:
+		sky.on_hit(victim, attacker)  # the 6 m shove — or, on the spire, a tier drop
 	if victim.hp <= 0:
 		_drop_key_on_death(victim)    # drop the key (and so the prisoner) where you fell, before respawn
 		_respawn(victim)
 	elif victim.is_player:
-		ui.toast("Hit!  %d hearts left" % victim.hp)
+		if sky == null or victim.tier == 0:
+			ui.toast("Hit!  %d hearts left" % victim.hp)
 		_update_hud_hearts()
 
 # A caught key-holder DROPS the key exactly where they fell — it sits there, re-grabbable, so
@@ -2543,7 +2638,9 @@ func _respawn(ch: GameChar) -> void:
 	ch.slow_timer = 0.0
 	ch.cave_time = 0.0
 	ch.vel = Vector3.ZERO
-	if cave_by_owner.has(ch.el):
+	if sky != null:
+		sky.on_respawn(ch)   # home sanctum (or Heart Isle once it is swallowed) — Spark + motes are kept
+	elif cave_by_owner.has(ch.el):
 		var c: Dictionary = cave_by_owner[ch.el]
 		ch.pos = Vector3(c["x"], 0, c["z"])
 		if ch.group:
@@ -2551,7 +2648,7 @@ func _respawn(ch: GameChar) -> void:
 	if ch.is_player:
 		if tower_mode:
 			_exit_tower(true)
-		ui.toast("Caught! Back to your castle.")
+		ui.toast("Out of hearts! Back home — your Spark is safe." if sky != null else "Caught! Back to your castle.")
 		_update_hud_hearts()
 
 func _disperse_ally(a: GameChar) -> void:
@@ -3073,22 +3170,32 @@ func _spawn_black_stones() -> void:
 	var dark := MeshLib.unlit_mat(MeshLib.rgb(0x2a2733))
 	var glow := MeshLib.unlit_mat(MeshLib.rgb(0x6a5f86), 0.4)
 	for i in N_BLACK_STONES:
-		var spot := random_spot()
-		for t in 20:
-			var s := random_spot()
-			if not _near_any_room(s):
-				spot = s
-				break
-		var n := Node3D.new()
-		var rock := MeshLib.sphere(0.55, dark, 12, 8)
-		rock.scale = Vector3(1.2, 0.85, 1.0)
-		n.add_child(rock)
-		var halo := MeshLib.disc(0.95, glow, 18)
-		halo.position.y = -0.4
-		n.add_child(halo)
+		var spot := _stone_spot()
+		var n: Node3D
+		if sky != null:
+			n = SkyBuilder.build_shard()   # the black stones are Meteor Shards up here
+		else:
+			n = Node3D.new()
+			var rock := MeshLib.sphere(0.55, dark, 12, 8)
+			rock.scale = Vector3(1.2, 0.85, 1.0)
+			n.add_child(rock)
+			var halo := MeshLib.disc(0.95, glow, 18)
+			halo.position.y = -0.4
+			n.add_child(halo)
 		n.position = Vector3(spot.x, 0.5, spot.z)
 		add_child(n)
 		black_stones.append({ "node": n, "pos": spot, "cooldown": 0.0 })
+
+func _stone_spot() -> Vector3:
+	if sky != null:
+		return sky.random_ground_spot()
+	var spot := random_spot()
+	for t in 20:
+		var s := random_spot()
+		if not _near_any_room(s):
+			spot = s
+			break
+	return spot
 
 func _free_black_stones() -> void:
 	for s in black_stones:
@@ -3103,26 +3210,22 @@ func _update_black_stones(dt: float) -> void:
 		if s["cooldown"] > 0.0:
 			s["cooldown"] -= dt
 			if s["cooldown"] <= 0.0:
-				var spot := random_spot()
-				for t in 20:
-					var c := random_spot()
-					if not _near_any_room(c):
-						spot = c
-						break
+				var spot := _stone_spot()
 				s["pos"] = spot
 				node.position = Vector3(spot.x, 0.5, spot.z)
 				node.visible = true
 			continue
 		node.position.y = 0.5 + sin(time_ms * 0.004 + node.position.x) * 0.12
 		node.rotation.y += dt * 0.7
-		if not _is_disguised() and player and player.alive and player.pos.distance_to(s["pos"]) < KEY_PICK_DIST:
+		if not _is_disguised() and player and player.alive and player.pos.distance_to(s["pos"]) < KEY_PICK_DIST \
+				and (sky == null or player.busy == 0):
 			node.visible = false
 			s["cooldown"] = 25.0
 			_start_disguise()
 
 func _start_disguise() -> void:
 	if disguise_node == null:
-		disguise_node = MeshLib.build_co2()
+		disguise_node = SkyBuilder.build_gas_visual("co2") if sky != null else MeshLib.build_co2()
 		MeshLib.add_blob_shadow(disguise_node, 1.85)
 		add_child(disguise_node)
 	disguise_node.visible = true
@@ -3204,6 +3307,8 @@ func _update_hud_hearts() -> void:
 		ui.set_hearts(player.hp, player.max_hp)
 
 func _update_hud_status() -> void:
+	if sky != null:
+		return   # ModeAscent owns the HUD in the sky world
 	var have_key: bool = has_key if mode == Mode.SINGLE else bool(has_key_by_el.get(player.el if player else "", false))
 	var s := "Clan %d/%d   ·   Key: %s" % [_my_clan().size(), _clan_cap(), ("yes" if have_key else "no")]
 	if o2_charges > 0:
@@ -3213,6 +3318,8 @@ func _update_hud_status() -> void:
 	ui.set_status(s)
 
 func _update_objective() -> void:
+	if sky != null:
+		return
 	var txt := "Steal your %s key from %s's castle" % [ELEMENTS[player.el]["label"], ELEMENTS[ELEMENTS[player.el]["predator"]]["label"]]
 	if won:
 		txt = "Rescued!"
@@ -3308,6 +3415,9 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	# (single-player keeps the full set.)
 	var n_o2 := N_O2 if mode == Mode.SINGLE else (0 if mode == Mode.SERVER else N_O2_ONLINE)
 	var n_co2 := N_CO2 if mode == Mode.SINGLE else (0 if mode == Mode.SERVER else N_CO2_ONLINE)
+	if sky != null and mode == Mode.SINGLE:
+		n_o2 = ModeAscent.N_BUBBLES    # the isles are small and the bridges narrow: fewer gases
+		n_co2 = ModeAscent.N_SMOG
 	for i in n_o2:
 		var o := make_character("o2")
 		o.pos = random_spot()
@@ -3326,7 +3436,10 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 		ui.show_hud()
 		ui.setup_task_icons(local_el, ELEMENTS[local_el]["predator"], ELEMENTS[local_el]["prey"])
 		ui.show_task_buttons(false)
-	_spawn_keys()
+	if sky != null:
+		sky.start_round()        # motes out, clocks to zero
+	else:
+		_spawn_keys()
 	_spawn_black_stones()
 	if mode != Mode.SERVER:
 		_update_hud_hearts()
@@ -3343,6 +3456,8 @@ func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool)
 	ch.is_human = is_human
 	ch.max_hp = BASE_HP
 	ch.hp = BASE_HP
+	if sky != null:
+		sky.setup_actor(ch)      # Ascent: 3 hearts, ground tier
 	# fan multiple same-element actors around the cave mouth so they don't stack
 	var idx: int = by_el[el].size()
 	ch.pos = _element_spawn_pos(el, idx)
@@ -3356,6 +3471,8 @@ func _spawn_element_actor(el: String, peer: int, is_human: bool, is_local: bool)
 	return ch
 
 func _element_spawn_pos(el: String, idx: int) -> Vector3:
+	if sky != null:
+		return sky.spawn_pos(el, idx)   # inside your home sanctum
 	var c: Dictionary = cave_by_owner[el]
 	var a: float = _element_spawn_angle(c, idx)
 	# spawn well clear of the cave mouth so the chase camera isn't looking through rocks
@@ -3597,6 +3714,9 @@ func _client_start_match(world_seed: int, humans: Array, net_ids: Dictionary, wo
 	player = make_character("element", local_el, true)
 	player.is_human = true
 	player.net_id = local_net_id
+	if sky != null:
+		sky.setup_actor(player)
+		sky.start_round()
 	player.pos = _element_spawn_pos(local_el, spawn_idx)
 	if player.group:
 		player.group.position = player.pos
@@ -3697,11 +3817,11 @@ func client_on_snapshot(adata: PackedFloat32Array, _meta: Dictionary) -> void:
 	var local_flags := 0
 	var local_hp := BASE_HP
 	var local_ack_seq := 0
-	var count := int((adata.size() - 1) / SNAP_FLOATS)
+	var count := int((adata.size() - 1) / snap_floats)
 	for k in count:
-		var b := 1 + k * SNAP_FLOATS
+		var b := 1 + k * snap_floats
 		var nid := int(adata[b])
-		var pos := Vector3(adata[b + 1], 0, adata[b + 2])
+		var pos := Vector3(adata[b + 1], adata[b + 8] if snap_floats > SNAP_FLOATS else 0.0, adata[b + 2])
 		var yaw := float(adata[b + 3])
 		var spd := float(adata[b + 4])
 		var flags := int(adata[b + 5])
@@ -3761,6 +3881,8 @@ func client_on_meta(meta: Dictionary) -> void:
 		player.max_hp = maxi(BASE_HP, mh)
 	if meta.has("kp"):
 		_client_sync_keys(meta["kp"])
+	if meta.has("sky") and sky != null:
+		sky.apply_meta(meta["sky"])           # Ascent: motes / rings / bell / seed vines / clock
 
 # CLIENT: the host freed `el`'s twin — mirror the cage opening locally (visual + collider,
 # so the guest's collision world stays identical to the host's) and cheer for my own team.
@@ -3895,6 +4017,8 @@ func _host_process(delta: float) -> void:
 		_run_deco_anims(time_ms)
 	if running:
 		time_left = maxf(0.0, time_left - dt)
+		if sky != null and sky.autopilot:
+			sky.drive_autopilot(dt)          # QA: the rival AI steers the host's avatar
 		_host_capture_local_input(dt)        # host's own avatar input -> net_input[my_id]
 		_tick_timers(dt)
 		for ch in actors:
@@ -3908,16 +4032,21 @@ func _host_process(delta: float) -> void:
 					_update_co2(n, dt)
 				else:
 					_update_o2(n, dt)
-		_host_update_teaching(dt)            # per-player clan recruiting at their hall
-		_host_update_training(dt)            # per-player self-training totem -> +1 max heart
+		if sky == null:
+			_host_update_teaching(dt)        # per-player clan recruiting at their hall
+			_host_update_training(dt)        # per-player self-training totem -> +1 max heart
 		for a in allies:
 			_update_ally(a, dt)              # host moves every player's clan (owner-relative)
 		_update_cave_timers(dt)
 		_check_catches()
-		_server_rescue(dt)
-		_host_update_keys(dt)                # show the carried key above its rescuer on the host too
+		if sky != null:
+			sky.tick(dt)                     # Ascent rules run on the host
+		else:
+			_server_rescue(dt)
+			_host_update_keys(dt)            # show the carried key above its rescuer on the host too
 		_host_sync_hud()
-		_host_refresh_channel()              # host's own training/teaching progress bar
+		if sky == null:
+			_host_refresh_channel()          # host's own training/teaching progress bar
 		_snap_accum += dt
 		var snap_step := 1.0 / SNAP_HZ
 		if _snap_accum >= snap_step:
@@ -3934,7 +4063,11 @@ func _host_process(delta: float) -> void:
 			ch.group.rotation.y = lerp_angle(ch.group.rotation.y, atan2(ch.vel.x, ch.vel.z), 1.0 - pow(0.001, dt))
 		if _should_animate_character(ch.group, ch.net_id):
 			ch.group.animate(time_ms, ch.vel.length())
+	if sky != null:
+		sky.frame(dt)
 	_update_camera(dt)
+	if sky != null:
+		_sky_debug_tick(delta)
 	if net_log:
 		_nl_host_tick(dt)
 
@@ -3968,6 +4101,8 @@ func _host_sync_hud() -> void:
 	if player == null:
 		return
 	local_el = player.el
+	if sky != null:
+		return   # ModeAscent.frame() draws the Ascent HUD
 	for el in ["fire", "water", "grass"]:
 		_net_rk[el] = bool(has_key_by_el.get(el, false))
 		_net_rt[el] = twin_by_el.get(el) != null
@@ -4023,6 +4158,8 @@ func _update_human_net(ch: GameChar, dt: float) -> void:
 		budget -= cdt
 
 func _apply_human_move(ch: GameChar, mx: float, mz: float, sprint: bool, yaw: float, dt: float) -> void:
+	if sky != null and (ch.busy != 0 or ch.kb_t > 0.0):
+		return   # falling / mid-flight / being shoved (the command is still consumed + acked)
 	var ln := minf(1.0, sqrt(mx * mx + mz * mz))
 	var target := Vector3.ZERO
 	if ln > 0.05:
@@ -4082,6 +4219,9 @@ func _pack_flags(ch: GameChar) -> int:
 	if ch.ally and ch.role == "": f |= 1 << 8     # idle (unassigned) ally → guest raises the command view
 	if ch.is_twin: f |= 1 << 9                    # freed twin → guests render the rescued sibling, never a threat/catch
 	if ch.cave_cooldown > 0.0: f |= 1 << 10       # keep-sanctum lockout → the guest predicts the same wall
+	if sky != null:
+		f |= (ch.tier & 7) << 11                  # bits 11-13: spire tier (changes the rendered height)
+		f |= (ch.busy & 3) << 14                  # bits 14-15: 1 falling / 2 flying (vent, shortcut pad)
 	return f
 
 func _broadcast_snapshot() -> void:
@@ -4095,7 +4235,7 @@ func _broadcast_snapshot() -> void:
 	# Every actor, every tick. Uniform host-clock keyframes let guests interpolate
 	# between real samples instead of switching in and out of dead reckoning.
 	var data := PackedFloat32Array()
-	data.resize(1 + list.size() * SNAP_FLOATS)
+	data.resize(1 + list.size() * snap_floats)
 	data[0] = float(time_ms) * 0.001
 	var i := 1
 	for ch in list:
@@ -4109,7 +4249,9 @@ func _broadcast_snapshot() -> void:
 		data[i + 5] = float(_pack_flags(ch))
 		data[i + 6] = float(ch.hp)
 		data[i + 7] = float(ch.last_input_seq if ch.is_human else 0)   # last guest cmd REPLAYED (the reconcile ack); host's own avatar = 0
-		i += SNAP_FLOATS
+		if snap_floats > SNAP_FLOATS:
+			data[i + 8] = ch.pos.y               # sky world: tiers, stairs, flights and falls have height
+		i += snap_floats
 	# Per-element rescue state + key positions, so each client can show its objective
 	# and render the (un-held) keys. This changes slowly, so we only attach it every
 	# META_EVERY-th snapshot (~6Hz); positions still go out at the full 30Hz. Saves the
@@ -4146,6 +4288,8 @@ func _broadcast_snapshot() -> void:
 			"clan": clan,                      # ally net_id -> owner peer
 			"mhp": mhp,                        # human net_id -> trained max hearts (self-training)
 		}
+		if sky != null:
+			meta["sky"] = sky.pack_meta()
 	if net:
 		net.broadcast_snapshot(data, meta)
 
@@ -4269,15 +4413,16 @@ func _nearest_human_of(el: String, from: Vector3) -> GameChar:
 				bd = d; best = h
 	return best
 
-func _server_end_match(reason: String, winner_el: String) -> void:
+func _server_end_match(reason: String, winner_el: String, standings_in: Array = []) -> void:
 	if ending:
 		return
 	ending = true
 	running = false
 	won = true
-	var standings: Array = []
-	for el in ["fire", "water", "grass"]:
-		standings.append({ "el": el, "score": _team_score(el), "winner": el == winner_el })
+	var standings: Array = standings_in
+	if standings.is_empty():
+		for el in ["fire", "water", "grass"]:
+			standings.append({ "el": el, "score": _team_score(el), "winner": el == winner_el })
 	if net:
 		net.broadcast_end(reason, winner_el, standings)
 	# the host doesn't receive its own broadcast — show it the end screen directly,
@@ -4299,15 +4444,22 @@ func _client_process(delta: float) -> void:
 	if local_net_id == 0 or player == null or not running:
 		_update_camera(dt)   # lobby/countdown backdrop; no prediction until GO
 		return
+	if sky != null and sky.autopilot:
+		sky.drive_autopilot(dt)          # QA: scripted guest
 	_client_predict_local(dt)
-	_client_update_training(dt)          # cosmetic self-training bar (host awards the heart via meta)
-	_client_update_teaching(dt)          # cosmetic clan-hall teaching bar (host summons the clan)
+	if sky == null:
+		_client_update_training(dt)      # cosmetic self-training bar (host awards the heart via meta)
+		_client_update_teaching(dt)      # cosmetic clan-hall teaching bar (host summons the clan)
 	_client_render_remote(dt)
 	_client_update_carried_keys()        # float carried keys above their rescuer
 	_client_threat_check(dt)             # report catches/O₂ sips against the ghosts I actually see
 	if cd >= 0.0:
 		_update_wind_leaves(minf(0.08, cd), time_ms)
+	if sky != null:
+		sky.frame(dt)                    # mirrored Ascent state → visuals + HUD
 	_update_camera(dt)
+	if sky != null:
+		_sky_debug_tick(delta)
 	_client_update_hud()
 	_client_clan_nudge()
 	if net_log:
@@ -4349,7 +4501,7 @@ func _client_predict_local(dt: float) -> void:
 	var seq := net.send_input(mx, mz, sprint, cam_yaw, dt)   # send this frame's command (+dt) for host replay; authoritative movement is the server's
 	# local prediction so it feels instant
 	_apply_human_move(player, mx, mz, sprint, cam_yaw, dt)
-	_pred_hist.append({ "seq": seq, "pos": player.pos, "vel": player.vel, "mx": mx, "mz": mz, "sprint": sprint, "yaw": cam_yaw, "dt": dt, "t": _now() })
+	_pred_hist.append({ "seq": seq, "pos": player.pos, "vel": player.vel, "mx": mx, "mz": mz, "sprint": sprint, "yaw": cam_yaw, "dt": dt, "t": _now(), "tier": player.tier })
 	while _pred_hist.size() > PRED_HIST_MAX:
 		_pred_hist.pop_front()
 	# Ease the last correction away (see _render_off); steady walking keeps it ~0 (no lag).
@@ -4379,6 +4531,19 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 	var server_vel := Vector3.ZERO
 	if server_spd > 0.04:
 		server_vel = Vector3(sin(server_yaw), 0, cos(server_yaw)) * server_spd
+	var srv_tier := (server_flags >> 11) & 7
+	if sky != null:
+		player.busy = (server_flags >> 14) & 3
+		if player.busy != 0:
+			# falling / mid-flight: the host scripts the motion — just ride it (eased)
+			var vis := _client_render_pos()
+			player.pos = server_pos
+			player.vel = Vector3.ZERO
+			player.tier = srv_tier
+			player.in_ramp = false
+			_render_off = (vis - player.pos).limit_length(REND_OFF_MAX)
+			_pred_hist.clear()
+			return
 	if ack_seq <= 0 or _pred_hist.is_empty():
 		_client_authority_fallback(server_pos, server_vel)
 		return
@@ -4397,6 +4562,8 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 	var ack_frame: Dictionary = _pred_hist[ack_idx]
 	var predicted_pos: Vector3 = ack_frame.get("pos", player.pos)
 	var error := server_pos - predicted_pos
+	# sky: a tier the host disagrees with (knocked down, carried up by a pad) is a correction too
+	var tier_bad := sky != null and srv_tier != int(ack_frame.get("tier", srv_tier))
 	if net_log:
 		var em := error.length()
 		_nl_skew = lerpf(_nl_skew, em, 0.1)
@@ -4404,7 +4571,7 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 		_nl_rtt = lerpf(_nl_rtt, (_now() - float(ack_frame.get("t", _now()))) * 1000.0, 0.1)
 		if em > RECONCILE_EPS:
 			_nl_snaps += 1
-	if error.length() <= RECONCILE_EPS:
+	if error.length() <= RECONCILE_EPS and not tier_bad:
 		var pending_small: Array = []
 		for j in range(ack_idx + 1, _pred_hist.size()):
 			pending_small.append(_pred_hist[j])
@@ -4416,17 +4583,21 @@ func _client_reconcile_local(server_pos: Vector3, server_yaw: float, server_spd:
 	var vis_before := _client_render_pos()
 	player.pos = server_pos
 	player.vel = server_vel
+	if sky != null:
+		player.tier = srv_tier
+		player.in_ramp = SkyLayout.in_wedge(srv_tier, server_pos.x, server_pos.z)
 	var pending: Array = []
 	for j in range(ack_idx + 1, _pred_hist.size()):
 		var st: Dictionary = _pred_hist[j]
 		_apply_human_move(player, float(st.get("mx", 0.0)), float(st.get("mz", 0.0)), bool(st.get("sprint", false)), float(st.get("yaw", 0.0)), float(st.get("dt", 0.0)))
 		st["pos"] = player.pos
 		st["vel"] = player.vel
+		st["tier"] = player.tier
 		pending.append(st)
 	_pred_hist = pending
 	if error.length() > REND_SNAP_DIST:
 		_render_off = Vector3.ZERO                       # teleport/respawn — let it snap
-		if inside_own_cave(player):
+		if inside_own_cave(player) and sky == null:
 			ui.toast("Caught! Back to your castle.")     # guests get the same respawn feedback
 	else:
 		_render_off = vis_before - player.pos
@@ -4444,6 +4615,9 @@ func _client_authority_fallback(server_pos: Vector3, server_vel: Vector3) -> voi
 		return
 	player.pos = server_pos
 	player.vel = server_vel
+	if sky != null:
+		player.tier = SkyLayout.tier_for_radius(sqrt(server_pos.x * server_pos.x + server_pos.z * server_pos.z), 5) if server_pos.y > 3.0 else 0
+		player.in_ramp = false
 	_render_off = Vector3.ZERO     # emergency snap (lost history) — no easing
 	_pred_hist.clear()
 	if player.group:
@@ -4556,6 +4730,8 @@ func _client_update_status() -> void:
 	ui.set_status(s)
 
 func _client_update_hud() -> void:
+	if sky != null:
+		return   # ModeAscent.frame() draws the Ascent HUD
 	ui.set_hearts(player.hp, maxi(player.max_hp, player.hp))
 	if bool(_net_rt.get(local_el, false)):
 		ui.set_objective("Escort your twin to the glowing circle behind your tower!")
@@ -4695,8 +4871,10 @@ func _client_threat_check(dt: float) -> void:
 	_hit_cooldown = maxf(0.0, _hit_cooldown - dt)
 	_catch_cooldown = maxf(0.0, _catch_cooldown - dt)
 	var me := _client_render_pos()
-	var pred_el: String = ELEMENTS[local_el]["predator"]
-	var prey_el: String = ELEMENTS[local_el]["prey"]
+	if sky != null and player.busy != 0:
+		return
+	var pred_el: String = _pred_of(local_el)      # honours the eclipse (mirrored clock)
+	var prey_el: String = _prey_of(local_el)
 	var caught_nid := 0   # a predator/CO₂ touched me → I report being caught
 	var catch_nid := 0    # I touched my prey → I report the catch
 	for nid in _net_actors:
@@ -4749,9 +4927,19 @@ func _show_end_screen(reason: String, winner_el: String, standings: Array) -> vo
 			"label": ELEMENTS[s["el"]]["label"], "color": MeshLib.rgb(GameUI.UI_COLORS[s["el"]]),
 			"score": s["score"], "me": s["el"] == local_el, "alive": true, "winner": bool(s.get("winner", false)),
 		})
+		if s.has("detail"):
+			out[i]["detail"] = s["detail"]
 	var title := "Round over"
 	var sub := "Final standings above."
-	if reason == "rescued":
+	if reason == "ascent" or reason == "ascent_time":
+		var how := "rang the Sky Bell three times" if reason == "ascent" else "held the highest Spark when the clock ran out"
+		if winner_el == local_el:
+			title = "You win!"
+			sub = "You %s." % how
+		else:
+			title = "%s wins!" % ELEMENTS[winner_el]["label"]
+			sub = "%s %s." % [ELEMENTS[winner_el]["label"], how]
+	elif reason == "rescued":
 		if winner_el == local_el:
 			title = "Your team freed %s!  🎉" % ELEMENTS[winner_el]["label"]
 			sub = "You brought your twin safely home. Rescue complete!"
@@ -4885,6 +5073,9 @@ func _ready_nettest() -> void:
 # the guest so catches fire and we see the visual-vs-authoritative closing distance.
 func _nt_drive(is_host: bool) -> void:
 	if not running:
+		return
+	if sky != null:
+		sky.autopilot = true   # Ascent QA: both sides play the round on the rival AI's brain
 		return
 	_nt_run_t += 1.0 / 30.0
 	if player != null and fmod(_nt_run_t, 2.0) < 1.0 / 30.0:
@@ -5073,6 +5264,128 @@ func _nt_rescue_beats() -> void:
 				if tw != null:
 					tw.pos = Vector3(hs["x"] + 1.0, 0, hs["z"])
 	_nt_beat += 1
+
+# ------------------------------------------------------------------ food chain
+# EVERY prey/predator decision goes through these three, so the Skyfall eclipse
+# (ModeAscent.eclipse_active) reverses the whole chain in one place.
+func _eats(a_el: String, b_el: String) -> bool:
+	if not ELEMENTS.has(a_el) or not ELEMENTS.has(b_el):
+		return false
+	if sky != null and sky.eclipse_active():
+		return ELEMENTS[b_el]["prey"] == a_el
+	return ELEMENTS[a_el]["prey"] == b_el
+
+# the element `el` can catch right now
+func _prey_of(el: String) -> String:
+	if sky != null and sky.eclipse_active():
+		return ELEMENTS[el]["predator"]
+	return ELEMENTS[el]["prey"]
+
+# the element that can catch `el` right now
+func _pred_of(el: String) -> String:
+	if sky != null and sky.eclipse_active():
+		return ELEMENTS[el]["prey"]
+	return ELEMENTS[el]["predator"]
+
+# ------------------------------------------------------------------ sky world glue
+# Keep the chase camera outside the spire drum that rises above the player's tier.
+func _sky_cam_dist(cp: Vector3, d: float) -> float:
+	var r2 := cp.x * cp.x + cp.z * cp.z
+	if player == null or player.tier >= SkyLayout.SPIRE_TIERS or r2 > (SkyLayout.HEART_R + CAM_DIST) * (SkyLayout.HEART_R + CAM_DIST):
+		return d
+	var R := SkyLayout.tier_inner(player.tier) + 0.8
+	var dx := sin(cam_yaw)
+	var dz := cos(cam_yaw)
+	var b := cp.x * dx + cp.z * dz
+	var c := r2 - R * R
+	if c <= 0.0:
+		return minf(d, 1.6)
+	var disc := b * b - c
+	if disc <= 0.0 or b >= 0.0:
+		return d
+	return clampf(-b - sqrt(disc) - 0.4, 1.6, d)
+
+# An Ascent round ended (three rings, or the 8:00 clock). Single-player shows the end
+# screen directly; the online host also tells its guests.
+func _sky_end(reason: String, winner_el: String, standings: Array) -> void:
+	if mode == Mode.HOST:
+		_server_end_match(reason, winner_el, standings)
+		return
+	ending = true
+	running = false
+	won = true
+	if player != null:
+		local_el = player.el
+	if ui != null:
+		_show_end_screen(reason, winner_el, standings.duplicate(true))
+	if OS.get_cmdline_user_args().has("autoquit"):
+		get_tree().quit()        # QA: hands-off rounds end the process with the round
+
+# Debug staging for screenshots / QA (all optional `key=value` user args, sky world only):
+#   skyt=<secs>      jump the round clock (eclipse / smog rises)
+#   skymotes=<n>     give every team n Sun Motes
+#   skytp=<x>,<z>[,<tier>]  place the player
+#   skyyaw=<deg>     camera yaw      skyrings=<n>  give the player's team n rings
+#   skycam=<x>,<y>,<z>,<lx>,<ly>,<lz>  park the camera   skyhud=0  hide the HUD   skyfog=<mult>
+#   skyshot=<path>   save a PNG of the viewport after skywait=<secs> (default 3) and quit
+var _sky_dbg := {}
+var _sky_dbg_parsed := false
+var _sky_dbg_t := 0.0
+
+func _sky_debug_setup() -> void:
+	for a in OS.get_cmdline_user_args():
+		var kv := String(a).split("=", true, 1)
+		if kv.size() == 2 and kv[0].begins_with("sky"):
+			_sky_dbg[kv[0]] = kv[1]
+	if _sky_dbg.is_empty() or sky == null or player == null:
+		return
+	if _sky_dbg.has("skyt"):
+		sky.elapsed = float(_sky_dbg["skyt"])
+	if _sky_dbg.has("skymotes"):
+		for el in sky.ELS:
+			sky.motes_el[el] = int(_sky_dbg["skymotes"])
+	if _sky_dbg.has("skyrings"):
+		sky.rings_el[player.el] = int(_sky_dbg["skyrings"])
+	if _sky_dbg.has("skytp"):
+		var v := String(_sky_dbg["skytp"]).split(",")
+		var k := int(v[2]) if v.size() > 2 else 0
+		player.tier = k
+		player.pos = Vector3(float(v[0]), float(k) * SkyLayout.SPIRE_TIER_H, float(v[1]))
+		player.in_ramp = SkyLayout.in_wedge(k, player.pos.x, player.pos.z)
+		cam_yaw = atan2(player.pos.x, player.pos.z)
+	if _sky_dbg.has("skyyaw"):
+		cam_yaw = deg_to_rad(float(_sky_dbg["skyyaw"]))
+	if _sky_dbg.has("skyhud"):
+		ui.visible = int(_sky_dbg["skyhud"]) != 0
+	if _sky_dbg.has("skyfog") and world_env != null:
+		world_env.environment.fog_density = FOG_DENSITY * float(_sky_dbg["skyfog"])
+
+func _sky_debug_tick(delta: float) -> void:
+	if not _sky_dbg_parsed:
+		_sky_dbg_parsed = true
+		if _sky_dbg.is_empty():
+			for a in OS.get_cmdline_user_args():    # online QA (nettest): only the capture keys apply
+				var kv := String(a).split("=", true, 1)
+				if kv.size() == 2 and kv[0] in ["skyshot", "skywait", "skyhud", "skycam"]:
+					_sky_dbg[kv[0]] = kv[1]
+	if not running:
+		return
+	if _sky_dbg.has("skycam"):
+		# skycam=<x>,<y>,<z>,<lookx>,<looky>,<lookz> — a parked vista camera
+		var c := String(_sky_dbg["skycam"]).split(",")
+		if c.size() >= 6:
+			_cam_freeze = true
+			camera.position = Vector3(float(c[0]), float(c[1]), float(c[2]))
+			camera.look_at(Vector3(float(c[3]), float(c[4]), float(c[5])), Vector3.UP)
+	if not _sky_dbg.has("skyshot"):
+		return
+	_sky_dbg_t += delta
+	if _sky_dbg_t >= float(_sky_dbg.get("skywait", "3")):
+		var img := get_viewport().get_texture().get_image()
+		img.save_png(String(_sky_dbg["skyshot"]))
+		print("[skyshot] saved %s" % String(_sky_dbg["skyshot"]))
+		_sky_dbg.erase("skyshot")
+		get_tree().quit()
 
 func _fmt_time(s: float) -> String:
 	var m := int(s) / 60

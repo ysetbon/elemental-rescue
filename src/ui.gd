@@ -24,9 +24,18 @@ var bg: TextureRect
 var start_root: Control
 var worlds_root: Control                 # intro page 1: pick a world (then start_root picks the element)
 var _tag_label: Label = null             # element-page tagline (world-specific wording)
+var _hint_label: Label = null            # element-page how-to-play footer (world-specific)
+var sky_box: PanelContainer = null       # Skyfall Isles: round clock + eclipse + smog countdowns
+var sky_clock: Label = null
+var sky_eclipse: Label = null
+var sky_smog: Label = null
+var whiteout: ColorRect = null           # Skyfall Isles: falling through the clouds
+var mote_row: HBoxContainer = null       # Skyfall Isles: "Sun Motes" + one drawn pip per mote
+var _mote_state := Vector3i(-1, -1, -1)
 var end_root: Control
 var hud_root: Control
 var radar: RadarControl
+var radar_mask: Panel
 
 var timer_label: Label
 var board_box: HBoxContainer
@@ -150,7 +159,24 @@ func _make_label(text: String, size: int, col: Color = TEXT) -> Label:
 const TAGLINES := {
 	"castle": "Your twin is caged in the old dungeon yard. Your key is locked in your rival's castle:\nraid it, free your twin, and walk them home to your keep. Pick your element:",
 	"town": "Your twin is caged at the old zoo. Your key lies near your rival's camp:\nsteal it, free your twin, and walk them home to your cave. Pick your element:",
+	"sky": "ASCENT — light your Spark from three Sun Motes, climb the Sky Spire,\nand ring the Sky Bell three times before anyone else. Pick your element:",
 }
+
+# the how-to-play footer of the element page, per world
+const HINT_RESCUE := "Hearts: a touch from your rival or CO₂ costs a heart — at zero you're sent home (you're never out)\n" \
+	+ "Training totem in your garden: earn an extra heart   ·   Clan hall in your courtyard: teach to summon a clan, then click them to assign tasks\n" \
+	+ "Whoever hits you (or your clan) is slowed 5s   ·   your key sits on the treasury pedestal inside the castle of the element that EATS you\n" \
+	+ "Steal your key → free your twin at the dungeon yard → bring them to the glowing circle behind your tower to WIN\n" \
+	+ "Grab a black stone (Pac-Man power-up): chase & eat your predator, CO₂ ignore you — but O₂ hunt you\n" \
+	+ "Sip white O₂ to supercharge your sprint (slower drain, faster recovery)\n" \
+	+ "WASD move   ·   Shift sprint   ·   drag mouse to look"
+const HINT_SKY := "Three Sun Motes in your colour float on the outer isles — one is always on your PREY's home isle. Touch all three to light your Spark\n" \
+	+ "A lit Spark opens the Sky Spire: climb the ramps, or stand on your own shortcut pad (Fire vent · Water lift · Leaf vine) opposite each ramp\n" \
+	+ "Stand in the ring on the top platform for 2s to ring the bell — first to 3 rings wins   ·   a tag on the spire costs a heart AND a tier\n" \
+	+ "A predator's touch shoves you 6 m — mind the edges: walk off and you fall through the clouds\n" \
+	+ "Every 75s the ECLIPSE reverses the food chain for 15s   ·   every minute the smog sea rises and swallows the outer isles\n" \
+	+ "Fire rides thermal vents · Water surfs sky streams · Leaf walks vines and can grow a vine bridge on a seed (stand 1.5s)\n" \
+	+ "WASD move   ·   Shift sprint   ·   drag mouse to look"
 
 # Intro page 1 — pick one of the two worlds (aerial snapshot on each card).
 func _build_worlds() -> void:
@@ -177,9 +203,12 @@ func _build_worlds() -> void:
 	_add_world_card(row, "town", "TWILIGHT TOWN",
 		"The original cozy map — school, playground\nand the old zoo where your twin waits",
 		"res://art/world_town.png")
+	_add_world_card(row, "sky", "SKYFALL ISLES",
+		"ASCENT — floating isles over a cloud sea:\nlight your Spark, climb the spire, ring the bell",
+		"res://art/world_sky.png")
 
 func _add_world_card(parent: Node, kind: String, name_: String, desc: String, img_path: String) -> void:
-	var s := 1.6 if mobile else 1.0
+	var s := 1.15 if mobile else 1.0   # three cards must still fit a phone's width
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(340, 292) * s
 	var sb := StyleBoxFlat.new()
@@ -222,6 +251,8 @@ func _show_element_page(kind: String) -> void:
 	countdown_label.text = ""
 	if _tag_label != null:
 		_tag_label.text = TAGLINES.get(kind, TAGLINES["castle"])
+	if _hint_label != null:
+		_hint_label.text = HINT_SKY if kind == "sky" else HINT_RESCUE
 
 func _build_start() -> void:
 	_build_worlds()
@@ -263,15 +294,8 @@ func _build_start() -> void:
 	back_btn.pressed.connect(func() -> void: show_start())
 	v.add_child(_center(back_btn))
 
-	var hint := _make_label(
-		"Hearts: a touch from your rival or CO₂ costs a heart — at zero you're sent home (you're never out)\n"
-		+ "Training totem in your garden: earn an extra heart   ·   Clan hall in your courtyard: teach to summon a clan, then click them to assign tasks\n"
-		+ "Whoever hits you (or your clan) is slowed 5s   ·   your key sits on the treasury pedestal inside the castle of the element that EATS you\n"
-		+ "Steal your key → free your twin at the dungeon yard → bring them to the glowing circle behind your tower to WIN\n"
-		+ "Grab a black stone (Pac-Man power-up): chase & eat your predator, CO₂ ignore you — but O₂ hunt you\n"
-		+ "Sip white O₂ to supercharge your sprint (slower drain, faster recovery)\n"
-		+ "WASD move   ·   Shift sprint   ·   drag mouse to look",
-		13, Color(1, 1, 1, 0.85))
+	var hint := _make_label(HINT_RESCUE, 13, Color(1, 1, 1, 0.85))
+	_hint_label = hint
 	v.add_child(hint)
 
 func _add_card(parent: Node, el: String, name_: String, rel: String, online := false) -> void:
@@ -434,6 +458,11 @@ func _build_lobby() -> void:
 	row.add_child(leaveb)
 
 func _build_hud() -> void:
+	whiteout = ColorRect.new()
+	whiteout.color = Color(1, 1, 1, 0)
+	whiteout.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	whiteout.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(whiteout)
 	hud_root = Control.new()
 	hud_root.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	hud_root.position = Vector2(12, 12)
@@ -449,6 +478,24 @@ func _build_hud() -> void:
 	timer_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	timer_label.custom_minimum_size = Vector2(190, 0)
 	timer_label.text = "Find your key"
+
+	# Skyfall Isles clocks (hidden in the other worlds)
+	sky_box = _pill_panel(v)
+	sky_box.visible = false
+	var skv := VBoxContainer.new()
+	skv.add_theme_constant_override("separation", 1)
+	sky_box.add_child(skv)
+	sky_clock = _make_label_left("", 15)
+	skv.add_child(sky_clock)
+	sky_eclipse = _make_label_left("", 13, _c(0x6b4fb3))
+	skv.add_child(sky_eclipse)
+	sky_smog = _make_label_left("", 12, _c(0x6c6578))
+	skv.add_child(sky_smog)
+	# Sun Mote pips: drawn dots, not glyphs (the web build's font has no symbol glyphs)
+	mote_row = HBoxContainer.new()
+	mote_row.add_theme_constant_override("separation", 6)
+	skv.add_child(mote_row)
+	mote_row.add_child(_make_label_left("Sun Motes", 12))
 
 	# hearts = a row of little element-figure icons (filled = colour, empty = faded)
 	var hearts_pill := _pill_panel(v)
@@ -476,6 +523,7 @@ func _build_hud() -> void:
 	status_label.text = ""
 	cave_label = _pill(v)
 	cave_label.visible = false
+	(cave_label.get_parent() as Control).visible = false   # no empty pill until there is text
 
 	# channel bar (self-training / clan teaching progress)
 	channel_box = _pill_panel(v)
@@ -539,10 +587,22 @@ func _pill(parent: Node) -> Label:
 	return l
 
 func _build_radar() -> void:
+	# the dial is a round mask (clip_children) so map content never spills past its rim
+	radar_mask = Panel.new()
+	var msb := StyleBoxFlat.new()
+	msb.bg_color = Color.WHITE
+	msb.set_corner_radius_all(67)
+	msb.corner_detail = 16
+	radar_mask.add_theme_stylebox_override("panel", msb)
+	radar_mask.clip_children = CanvasItem.CLIP_CHILDREN_ONLY
+	radar_mask.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	radar_mask.position = Vector2(-149, 15)
+	radar_mask.size = Vector2(134, 134)
+	radar_mask.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(radar_mask)
 	radar = RadarControl.new()
-	radar.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	radar.position = Vector2(-152, 12)
-	add_child(radar)
+	radar.position = Vector2(-3, -3)
+	radar_mask.add_child(radar)
 
 func _build_toast_countdown() -> void:
 	toast_label = _make_label("", 16)
@@ -732,6 +792,8 @@ func _hide_all() -> void:
 	end_root.visible = false
 	hud_root.visible = false
 	radar.visible = false
+	if radar_mask: radar_mask.visible = false
+	if whiteout: whiteout.color.a = 0.0
 	if task_root: task_root.visible = false
 	if online_root: online_root.visible = false
 	if lobby_root: lobby_root.visible = false
@@ -778,6 +840,8 @@ func show_hud() -> void:
 	bg.visible = false
 	hud_root.visible = true
 	radar.visible = true
+	radar_mask.visible = true
+	if sky_box: sky_box.visible = false   # the sky world re-shows it every frame (set_sky_info)
 
 func show_end(rows: Array, title: String, sub: String) -> void:
 	_hide_all()
@@ -803,7 +867,7 @@ func show_end(rows: Array, title: String, sub: String) -> void:
 		var nm := _make_label_left((("★ " if r["winner"] else "") + r["label"] + ("" if r["alive"] else "  (out)")), 18, r["color"])
 		nm.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		hb.add_child(nm)
-		var sc := _make_label(str(r["score"]) + " pts", 18, TEXT)
+		var sc := _make_label(String(r["detail"]) if r.has("detail") else str(r["score"]) + " pts", 18, TEXT)
 		hb.add_child(sc)
 		standings_box.add_child(row)
 
@@ -814,7 +878,7 @@ func set_timer(text: String) -> void:
 func set_board(entries: Array) -> void:
 	for e in entries:
 		var lbl: Label = board_labels[e["el"]]
-		lbl.text = e["label"] + " " + str(e["score"])
+		lbl.text = String(e["text"]) if e.has("text") else e["label"] + " " + str(e["score"])
 		lbl.modulate.a = 1.0 if e["alive"] else 0.35
 		if e["me"]:
 			lbl.add_theme_color_override("font_color", _c(0xf2a23c))
@@ -865,6 +929,7 @@ func set_channel(label: String, pct: float) -> void:
 
 func set_cave(text: String) -> void:
 	cave_label.visible = text != ""
+	(cave_label.get_parent() as Control).visible = text != ""   # hide the pill too, not just its label
 	cave_label.text = text
 
 func set_stamina(pct: float) -> void:
@@ -877,3 +942,42 @@ func toast(msg: String) -> void:
 
 func set_countdown(text: String) -> void:
 	countdown_label.text = text
+
+# Skyfall Isles: round clock, eclipse countdown (violet + bold while it is ON) and the smog sea.
+func set_sky_info(clock: String, eclipse: String, eclipse_on: bool, smog: String) -> void:
+	if sky_box == null:
+		return
+	sky_box.visible = true
+	sky_clock.text = "TIME  " + clock
+	sky_eclipse.text = eclipse
+	sky_eclipse.add_theme_color_override("font_color", _c(0xd0392b) if eclipse_on else _c(0x6b4fb3))
+	sky_smog.text = smog
+
+func set_whiteout(a: float) -> void:
+	if whiteout:
+		whiteout.color.a = clampf(a, 0.0, 1.0)
+
+# Skyfall Isles: n of `total` Sun Motes absorbed — filled pips in the element's colour.
+func set_mote_pips(n: int, total: int, col: Color) -> void:
+	if mote_row == null:
+		return
+	var key := Vector3i(n, total, int(col.to_rgba32() & 0x7fffffff))
+	if key == _mote_state:
+		return
+	_mote_state = key
+	while mote_row.get_child_count() > 1:
+		var c := mote_row.get_child(mote_row.get_child_count() - 1)
+		mote_row.remove_child(c)
+		c.queue_free()
+	for i in total:
+		var pip := Panel.new()
+		pip.custom_minimum_size = Vector2(13, 13)
+		pip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sb := StyleBoxFlat.new()
+		sb.set_corner_radius_all(7)
+		sb.set_border_width_all(2)
+		sb.border_color = col.darkened(0.15)
+		sb.bg_color = col if i < n else Color(col.r, col.g, col.b, 0.12)
+		pip.add_theme_stylebox_override("panel", sb)
+		mote_row.add_child(pip)

@@ -107,6 +107,59 @@ where you're *going* (not where you are) to cut you off, fleers slip toward open
 ground instead of trapping themselves in a corner, and the CO₂ pack spreads out to
 cover more of the map.
 
+## Skyfall Isles — Ascent
+
+The third world on the intro page is a different game: **floating islands at golden
+hour over an endless cloud sea**, and a race called **Ascent** — *light your Spark
+from three Sun Motes, climb the Sky Spire, and ring the Sky Bell three times before
+anyone else.* No clans, cages, keys or home tower up here.
+
+![Skyfall Isles — the whole archipelago, rendered in-engine](art/world_sky.png)
+
+- **The isles.** Heart Isle carries the Sky Spire. Around it: three home isles
+  (Fire's obsidian **Ember Crag**, Water's lagoon **Tide Atoll**, Leaf's **Canopy
+  Grove**) each with a safe sanctum, three wild isles (Windmill, Ruin, Crystal) and
+  six small islets, joined by plank bridges. Walk off any edge and you fall through
+  the clouds, then respawn at home.
+- **Each element travels its own way.** Fire's thermal vent flings it straight from
+  Ember Crag to Heart Isle. Water surfs the sky stream at double speed (everyone
+  else wades it). Leaf walks a private vine — and can stand on a **seed** for 1.5 s
+  to grow a vine bridge from the other homes to Heart Isle that anyone may use for
+  10 s.
+- **Gather.** Three Sun Motes in your colour float on the outer isles; one is
+  *always on your prey's home isle*, so everybody has to raid. Touch all three and
+  your Spark ignites — motes are never lost to a fall or a knockout.
+- **Climb.** The spire door opens only for a lit Spark. Five ring terraces, 6 m
+  apart; one stair per tier, each 72° further round than the last. Opposite every
+  stair are three shortcut pads — a Fire vent, a Water lift, a Leaf vine — and
+  yours carries you up a tier (4 s recharge). Catches only happen between actors on
+  the same tier, and a tag on the spire costs a heart **and a tier**.
+- **Ring.** Stand in the glowing ring on the top platform for 2 s to ring the bell.
+  It swings for 4 s after any ring. First to three rings wins; at 8:00 the highest
+  Spark wins.
+- **The Eclipse.** Every 75 s the food chain **reverses** for 15 s: your predator
+  becomes your prey. The rim glow under each rival (red = it eats you, green = you
+  eat it) flips with it.
+- **The smog sea.** Every minute the cloud sea rises and swallows a ring of the map
+  (outer islets, then the homes, then the wild isles). Swallowed ground slows you
+  and costs a heart every 2 s.
+- **Shoves.** Up here a predator's touch also shoves you 6 m — near an edge, that
+  is a long way down. CO₂ drifts as smog clouds, O₂ as breeze bubbles, and the
+  black stones are Meteor Shards.
+
+**The whole world is modelled in Blender.** `tools/blender/build_sky_assets.py`
+builds every asset procedurally (headless `bpy`) and exports one GLB each to
+`models/sky/`; `tools/blender/assemble_world.py` places them into one scene, saved
+as `tools/blender/skyfall_isles.blend` and exported as the single file the game
+loads, `models/sky/skyfall_world.glb`. To rebuild:
+
+```sh
+uv venv -p 3.11 ~/bpy-venv && uv pip install -p ~/bpy-venv/bin/python bpy numpy
+~/bpy-venv/bin/python tools/blender/build_sky_assets.py     # every asset GLB (+ previews)
+~/bpy-venv/bin/python tools/blender/assemble_world.py       # skyfall_world.glb + the .blend
+godot --headless --path . --import
+```
+
 ## Controls
 
 | Action | Input |
@@ -129,7 +182,11 @@ To jump straight into a round (skipping the menu) for quick testing:
 godot --path . -- autostart           # play as Fire
 godot --path . -- autostart water     # play as Water
 godot --path . -- autostart grass     # play as Leaf
+godot --path . -- autostart fire sky  # straight into an Ascent round on the Skyfall Isles
 ```
+
+Hands-off Ascent QA: add `autopilot autoquit` to let the rival AI drive your avatar
+too, and `--headless --fixed-fps 20` to fast-forward a whole round in seconds.
 
 ## Under the hood
 
@@ -137,8 +194,8 @@ The code lives in `src/`, the scenes in `scenes/` (`main.tscn` is the entry
 point), and the imported art in `models/`; `project.godot` and `icon.svg` stay at
 the project root where Godot expects them.
 
-Everything except the three elemental bodies is built procedurally in code
-(`src/mesh_lib.gd`) — castles, houses, props, the gas molecules, caves and the
+Everything in the castle and town worlds except the three elemental bodies is built
+procedurally in code (`src/mesh_lib.gd`) — castles, houses, props, the gas molecules, caves and the
 storybook materials — so the project stays self‑contained. The fire/water/leaf bodies are
 imported GLB meshes (`models/Fire3.glb`, `models/Water3.glb`, `models/Leaf3.glb`); their legs are
 generated at load time and auto‑seated into each body so they always connect
@@ -153,6 +210,14 @@ Key scripts (under `src/`):
 - `world_builder.gd` — lays out the three castles (walls, gardens, keeps,
   home towers, portraits, beds), the dungeon yard, hamlets and river.
 - `ui.gd` / `radar.gd` — HUD, scoreboard and minimap.
+- `sky_layout.gd` — the Skyfall Isles map as pure data: isles, bridges, element
+  routes, the spire's tiers / stairs / pads, the walkable test and the nav graph.
+- `sky_builder.gd` — loads the Blender-authored world (`models/sky/skyfall_world.glb`),
+  reads its `col_*` helpers, adds the cloud-sea / smog shaders and golden-hour sky.
+- `sky_view.gd` — what moves up there: motes, Spark orbs, the bell, seed vines, the
+  smog front, the eclipse tint.
+- `mode_ascent.gd` — every Skyfall / Ascent rule (eclipse, shove, falling, motes,
+  the tier layer, pads, bell, smog sea, win), the rival AI and the online mirror.
 
 It began life as a Three.js prototype (`elemental-tag.html`) and was ported to
 Godot.
