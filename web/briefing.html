@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ascent Briefing - Elemental Rescue</title>
+<meta name="description" content="How to play Ascent on the Skyfall Isles: the goal, how to climb, the four tier tasks, caged friends, and what to avoid.">
+<!-- The game site is cross-origin isolated (COEP require-corp), so the font stylesheet is fetched in CORS mode. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito+Sans:opsz,wght@6..12,400;6..12,600;6..12,800&display=swap">
+<style>
+/* Layout: a pre-round briefing card set — goal on top, then three do-this tiles,
+   a how-to-climb strip, the four tier tasks, caged friends, an avoid/collect grid,
+   your element's row, and the keys. */
+:root {
+  --bg: #f1eef8; --surface: #ffffff; --ink: #2b2740; --muted: #686181; --line: #d8d1e8;
+  --gold: #b8741a; --gold-soft: #fff3d6; --mode: #17808a;
+  --fire: #d9532a; --water: #3878d3; --leaf: #3f8f3c;
+  --danger: #c0392b; --danger-soft: #fde9e5; --good: #2f8a4a; --good-soft: #e3f3e6;
+  --f-display: "Fredoka", ui-rounded, "Trebuchet MS", system-ui, sans-serif;
+  --f-body: "Nunito Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17142a; --surface: #221e38; --ink: #ece8f8; --muted: #a8a1c2; --line: #3a3457;
+    --gold: #f1b65a; --gold-soft: #3a2e14; --mode: #58cdd8;
+    --fire: #ff8456; --water: #74a8ff; --leaf: #8bcf74;
+    --danger: #ff7b6b; --danger-soft: #3b1d1c; --good: #7fd197; --good-soft: #1c3324;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17142a; --surface: #221e38; --ink: #ece8f8; --muted: #a8a1c2; --line: #3a3457;
+  --gold: #f1b65a; --gold-soft: #3a2e14; --mode: #58cdd8;
+  --fire: #ff8456; --water: #74a8ff; --leaf: #8bcf74;
+  --danger: #ff7b6b; --danger-soft: #3b1d1c; --good: #7fd197; --good-soft: #1c3324;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--f-body); font-size: 16.5px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 56px;
+}
+.wrap { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 40px; }
+h1, h2, h3 { font-family: var(--f-display); line-height: 1.15; margin: 0; text-wrap: balance; }
+h1 { font-size: clamp(2.3rem, 6.5vw, 3.6rem); font-weight: 700; color: var(--mode); }
+h2 { font-size: 1.5rem; font-weight: 600; }
+h3 { font-size: 1.12rem; font-weight: 600; }
+p { margin: 0; }
+img { display: block; width: 100%; height: auto; }
+.label { font-size: 0.76rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+kbd {
+  font-family: var(--f-body); font-weight: 800; font-size: 0.93em;
+  background: var(--ink); color: var(--bg); border-radius: 7px; padding: 1px 8px 2px;
+  box-shadow: 0 3px 0 color-mix(in srgb, var(--ink) 55%, #000); white-space: nowrap;
+}
+section { display: flex; flex-direction: column; gap: 16px; }
+
+/* goal */
+.goal { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 26px; align-items: center; }
+.goal-text { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.goal-text .big { font-size: 1.3rem; font-weight: 600; line-height: 1.4; }
+.goal img { border-radius: 16px; border: 1px solid var(--line); }
+.win { color: var(--muted); }
+
+/* three steps */
+.three { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; counter-reset: s; }
+.three li { counter-increment: s; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.three img { border-radius: 12px; border: 1px solid var(--line); aspect-ratio: 4 / 3; object-fit: cover; }
+.three h3::before {
+  content: counter(s); display: inline-grid; place-items: center; width: 1.7em; height: 1.7em;
+  margin-right: 0.45em; border-radius: 50%; background: var(--mode); color: var(--bg); font-size: 0.85em;
+}
+
+/* climb */
+.climb { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.climb > div { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.climb img { border-radius: 12px; border: 1px solid var(--line); }
+.climb ul { margin: 0; padding-left: 1.15em; display: flex; flex-direction: column; gap: 7px; }
+.pads { display: flex; flex-wrap: wrap; gap: 8px 16px; font-weight: 600; }
+.dot { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%; margin-right: 0.35em; vertical-align: -0.02em; }
+
+/* tier tasks */
+.cards.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tier { align-self: flex-start; font-family: var(--f-display); font-weight: 600; font-size: 0.82rem; border-radius: 999px; padding: 1px 10px; background: var(--gold-soft); color: var(--gold); }
+.lead { max-width: 68ch; }
+
+/* avoid / collect */
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.card { background: var(--surface); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--line); }
+.card img { aspect-ratio: 4 / 3; object-fit: cover; }
+.card div { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 5px; }
+.card p { font-size: 0.95rem; }
+.tag { align-self: flex-start; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; border-radius: 999px; padding: 1px 9px; }
+.tag.bad { background: var(--danger-soft); color: var(--danger); }
+.tag.ok { background: var(--good-soft); color: var(--good); }
+
+/* elements table */
+.well { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 0.95rem; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+tbody tr:last-child td { border-bottom: 0; }
+td:first-child { font-family: var(--f-display); font-weight: 600; white-space: nowrap; }
+
+.keys { display: flex; flex-wrap: wrap; gap: 10px 26px; }
+.keys span { white-space: nowrap; }
+@media (max-width: 900px) { .cards.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .goal, .climb { grid-template-columns: minmax(0, 1fr); }
+  .three { grid-template-columns: minmax(0, 1fr); }
+  .three img { aspect-ratio: 16 / 9; }
+}
+@media (max-width: 480px) { .cards, .cards.four { grid-template-columns: minmax(0, 1fr); } }
+.back { margin-bottom: -18px; }
+.back a { font-weight: 800; color: var(--mode); text-decoration: none; border-bottom: 2px solid currentColor; padding-bottom: 1px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="back"><a href="./">Back to the game</a></p>
+  <section class="goal" aria-labelledby="goal-h">
+    <div class="goal-text">
+      <span class="label">Skyfall Isles · before the round</span>
+      <h1 id="goal-h">Ascent</h1>
+      <p class="big">Light your Spark from three Sun Motes, climb the Sky Spire, and ring the Sky Bell three times before anyone else.</p>
+      <p class="win">You race two rival elements. A round lasts at most 8 minutes. If nobody has rung three times by then, whoever stands highest on the spire wins.</p>
+    </div>
+    <img src="briefing/world.jpg" alt="The Skyfall Isles: floating islands joined by plank bridges around the Sky Spire" width="1200" height="675">
+  </section>
+
+  <section aria-labelledby="do-h">
+    <h2 id="do-h">What you do</h2>
+    <ol class="three">
+      <li>
+        <img src="briefing/mote.jpg" alt="Water on Ember Crag beside a blue Sun Mote, with a pillar of light rising from it" width="640" height="480">
+        <h3>Gather 3 Sun Motes</h3>
+        <p>They glow in your colour and show as stars on the radar. One is always on the home isle of the element you can catch. Touch a mote to absorb it. You never lose motes, even if you fall.</p>
+      </li>
+      <li>
+        <img src="briefing/door.jpg" alt="Water with a lit Spark at the foot of the spire, beside the stairs" width="640" height="360">
+        <h3>Climb the spire</h3>
+        <p>With three motes your Spark lights and the spire door on Heart Isle opens. Five terraces lead up. Each of the first four sets you a task before it lets you higher.</p>
+      </li>
+      <li>
+        <img src="briefing/bell.jpg" alt="Fire standing in the ring under the Sky Bell with the ringing bar filling" width="640" height="360">
+        <h3>Ring the bell 3 times</h3>
+        <p>On the top platform, stand in the glowing ring for 2 seconds to ring once. The bell swings for 4 seconds before it can ring again.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="climb-h">
+    <h2 id="climb-h">How to climb</h2>
+    <div class="climb">
+      <div>
+        <img src="briefing/pads.jpg" alt="A terrace of the spire with a vine ladder and a water lift against the wall" width="640" height="360">
+        <img src="briefing/hint.jpg" alt="The in-game hint: an E key cap with the text Climb your vine ladder up to tier 1, or just stand on the pad" width="756" height="180">
+      </div>
+      <div>
+        <ul>
+          <li><strong>Stairs:</strong> one flight per tier, open to everyone. Walk up with <kbd>W</kbd>. Each flight is a fifth of a turn further round than the last.</li>
+          <li><strong>Your shortcut:</strong> opposite the stairs sit three pads. Stand next to yours and press <kbd>E</kbd>, or step on it, and it lifts you one tier. It then recharges for 4 seconds.</li>
+          <li>The other two pads belong to the other elements and do nothing for you.</li>
+          <li>On terraces 1 to 4 both ways up are locked until you finish that terrace's task. A gold shimmer across the stairs means locked.</li>
+          <li>A hint appears at the top left whenever you are near something you can use. It tells you what to press, or why it will not work.</li>
+        </ul>
+        <p class="pads">
+          <span><span class="dot" style="background:var(--fire)"></span>Fire: vent</span>
+          <span><span class="dot" style="background:var(--water)"></span>Water: lift</span>
+          <span><span class="dot" style="background:var(--leaf)"></span>Leaf: vine ladder</span>
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="task-h">
+    <h2 id="task-h">A task on every tier</h2>
+    <div class="climb">
+      <div>
+        <img src="briefing/stone.jpg" alt="Leaf on tier 1 beside a task stone with a glowing gold rune; the hint at the top left reads E, read the task stone to get tier 1's task" width="960" height="540">
+      </div>
+      <div>
+        <ul>
+          <li>Each of terraces 1 to 4 has a <strong>task stone</strong>. It shows as a gold diamond on the radar.</li>
+          <li>Walk up to it and press <kbd>E</kbd>, or stand beside it for a moment. The task appears at the top left.</li>
+          <li>Do the task and that terrace's stairs and your shortcut open. They stay open for the rest of the round, even if you are knocked down.</li>
+          <li>The rune tells you the state: gold means it has a task for you, your colour means the task is running, green means done.</li>
+          <li>Your rivals have to do the same four tasks.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="cards four">
+      <article class="card">
+        <img src="briefing/task1.jpg" alt="Leaf on Roost Rock between two cages, each holding a small elemental, with a watchtower behind" width="640" height="480">
+        <div><span class="tier">Tier 1</span><h3>Free a caged friend</h3>
+        <p>Open any cage. Cages are the squares on the radar. Two stand on Heart Isle right below you. One you opened earlier counts.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/task2.jpg" alt="Water crossing the bridge to Beacon Isle, where a gold ring glows at the foot of a striped lighthouse" width="640" height="480">
+        <div><span class="tier">Tier 2</span><h3>Light the beacon</h3>
+        <p>Cross to Beacon Isle and stand in the gold ring at the lighthouse for 3 seconds. Its lamp then burns in your colour.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/task3.jpg" alt="Fire arriving at the Sun Shrine, where a golden key floats over the altar under a sun-disc arch" width="640" height="480">
+        <div><span class="tier">Tier 3</span><h3>Fetch the Sun Key</h3>
+        <p>Touch the key on the Sun Shrine's altar, then carry it back up to the tier 3 stone.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/task4.jpg" alt="Water on tier 4 next to a glowing sun seal set in the floor, with the Sky Bell above" width="640" height="480">
+        <div><span class="tier">Tier 4</span><h3>Hold the Sun Seal</h3>
+        <p>Stand on the seal on that terrace for 6 seconds. A tag from a rival starts the count again.</p></div>
+      </article>
+    </div>
+    <p class="lead win">If the smog sea has already swallowed Beacon Isle, the stone lets you pass. A Sun Key on swallowed ground drifts to safe ground, and the radar follows it.</p>
+  </section>
+
+  <section aria-labelledby="friend-h">
+    <h2 id="friend-h">Caged friends</h2>
+    <div class="cards">
+      <article class="card">
+        <img src="briefing/cage.jpg" alt="Leaf beside a cage on Roost Rock; the hint at the top left reads E, free the little Water, it will chase and slow Fire for you" width="640" height="480">
+        <div><span class="tag ok">Free them</span><h3>Open a cage</h3>
+        <p>Stand next to a cage and press <kbd>E</kbd>. The little one inside joins you. You can have two at a time, and an empty cage refills after 30 seconds.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/hunter.jpg" alt="A small Water helper chasing Fire across a home isle" width="640" height="480">
+        <div><span class="tag ok">Helps</span><h3>A hunter</h3>
+        <p>If the little one can eat one of your rivals, it chases that rival, circles it and slows it every few seconds. A Leaf who frees a Water gets a Fire-chaser.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/guard.jpg" alt="Leaf on Roost Rock with a small Water and a small Fire beside it, both in rings of Leaf's colour, between two opened cages" width="640" height="480">
+        <div><span class="tag ok">Helps</span><h3>A guard</h3>
+        <p>Otherwise it stays at your side and throws itself at dark smog clouds, turning them harmless. It can soak up two. Here the little Fire guards Leaf.</p></div>
+      </article>
+    </div>
+    <p class="lead win">The hint on each cage says which kind you will get. A helper leaves after 90 seconds. A rival that eats its element can send it home with a touch, and you can do the same to theirs. Hunters cannot follow anyone above tier 2.</p>
+  </section>
+
+  <section aria-labelledby="avoid-h">
+    <h2 id="avoid-h">What to avoid, and what helps</h2>
+    <div class="cards">
+      <article class="card">
+        <img src="briefing/predator.jpg" alt="Water, with a red ring under it, closing in on Fire" width="560" height="420">
+        <div><span class="tag bad">Avoid</span><h3>The element that eats you</h3>
+        <p>A red ring under a rival means it can catch you. One touch costs a heart and shoves you 6 metres. On the spire it knocks you down a tier instead. A green ring means you can catch it.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/smog.jpg" alt="A dark smog cloud drifting next to Water" width="560" height="420">
+        <div><span class="tag bad">Avoid</span><h3>Dark smog clouds</h3>
+        <p>They drift over the gaps and chase you. A touch costs a heart, then the cloud turns pale and harmless for a while. They are slower than you and never climb above tier 2.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/edge.jpg" alt="A narrow plank bridge leading to the spire, high above the clouds" width="560" height="350">
+        <div><span class="tag bad">Avoid</span><h3>The edges</h3>
+        <p>Walk or get shoved off an isle or a bridge and you fall through the clouds. You come back at home after 3 seconds, with your motes.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/smogsea.jpg" alt="An islet sunk in smog with the smog wall behind it and a warning in the HUD" width="560" height="315">
+        <div><span class="tag bad">Avoid</span><h3>The rising smog sea</h3>
+        <p>Every minute it swallows another ring of the map, from the outside in. Ground inside it slows you and costs a heart every 2 seconds. The radar shows the line.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/eclipse.jpg" alt="The spire under a violet eclipse sky, with the HUD reading Eclipse, chain reversed" width="560" height="315">
+        <div><span class="tag bad">Careful</span><h3>The eclipse</h3>
+        <p>Every 75 seconds the chain reverses for 15 seconds. Your prey can catch you and you can catch your hunter. The countdown is always on screen.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/bubble.jpg" alt="A white breeze bubble floating next to Water" width="560" height="420">
+        <div><span class="tag ok">Collect</span><h3>White breeze bubbles</h3>
+        <p>These are good. Touch one to boost your sprint. They are harmless unless you are disguised by a Meteor Shard.</p></div>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="el-h">
+    <h2 id="el-h">Your element</h2>
+    <div class="well">
+      <table>
+        <thead><tr><th>You are</th><th>You catch</th><th>You flee</th><th>Your raid mote is on</th><th>Your own way to Heart Isle</th></tr></thead>
+        <tbody>
+          <tr><td style="color:var(--fire)">Fire</td><td>Leaf</td><td>Water</td><td>Canopy Grove</td><td>Stand on the thermal vent at Ember Crag and it flings you across.</td></tr>
+          <tr><td style="color:var(--water)">Water</td><td>Fire</td><td>Leaf</td><td>Ember Crag</td><td>Surf the sky stream from Tide Atoll at double speed.</td></tr>
+          <tr><td style="color:var(--leaf)">Leaf</td><td>Water</td><td>Fire</td><td>Tide Atoll</td><td>Walk the vine from Canopy Grove. Only Leaf can walk it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="win">Everyone can also reach Heart Isle over the plank bridges from the three wild isles. Your home sanctum is safe from rivals and smog clouds for 30 seconds at a time.</p>
+  </section>
+
+  <section aria-labelledby="keys-h">
+    <h2 id="keys-h">Keys</h2>
+    <p class="keys">
+      <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move</span>
+      <span><kbd>Shift</kbd> sprint</span>
+      <span><kbd>E</kbd> or <kbd>Space</kbd> climb your shortcut</span>
+      <span><kbd>E</kbd> read a task stone</span>
+      <span><kbd>E</kbd> open a cage</span>
+      <span>drag the mouse to look around</span>
+    </p>
+    <p class="win">You have 3 hearts. At zero you go home with full hearts and keep your Spark.</p>
+  </section>
+</div>
+</body>
+</html>

@@ -26,6 +26,15 @@ const ISLET_WILD_DIST := 140.0   # one small islet outside each wild isle
 const ISLET_WILD_R := 7.0
 const ISLET_HOME_DIST := 160.0   # ...and one outside each home isle
 const ISLET_HOME_R := 6.0
+# Three small task isles close in round Heart Isle, each with its own sub-tower
+# and a plank spoke to Heart Isle (see SkyQuests for what happens on them).
+const TASK_DIST := 49.0
+const TASK_R := 9.5
+const TASK_ISLES := [
+	{ "id": "roost", "ang": 5.0, "name": "Roost Rock", "glb": "isle_roost" },
+	{ "id": "beacon", "ang": 125.0, "name": "Beacon Isle", "glb": "isle_beacon" },
+	{ "id": "shrine", "ang": 245.0, "name": "Sun Shrine", "glb": "isle_shrine" },
+]
 
 const BRIDGE_HW := 2.0           # plank bridges are 4 m wide
 const BRIDGE_PAIRS := [
@@ -37,6 +46,8 @@ const BRIDGE_PAIRS := [
 	# the dead-end islets
 	["w30", "i30"], ["w150", "i150"], ["w270", "i270"],
 	["h_fire", "ih_fire"], ["h_water", "ih_water"], ["h_grass", "ih_grass"],
+	# the task isles hang off Heart Isle
+	["roost", "heart"], ["beacon", "heart"], ["shrine", "heart"],
 ]
 
 # ---- element routes: each home's private way to Heart Isle
@@ -104,6 +115,8 @@ static func ensure() -> void:
 		_add("i%d" % int(w["ang"]), w["ang"], ISLET_WILD_DIST, ISLET_WILD_R, "islet", { "glb": "islet_small_a" })
 	for el in ["fire", "water", "grass"]:
 		_add("ih_" + el, HOME_ANG[el], ISLET_HOME_DIST, ISLET_HOME_R, "islet", { "glb": "islet_small_b" })
+	for t in TASK_ISLES:
+		_add(t["id"], t["ang"], TASK_DIST, TASK_R, "task", { "name": t["name"], "glb": t["glb"] })
 	for p in BRIDGE_PAIRS:
 		var a: Dictionary = NODES[p[0]]
 		var b: Dictionary = NODES[p[1]]

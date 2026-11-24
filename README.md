@@ -112,15 +112,25 @@ cover more of the map.
 The third world on the intro page is a different game: **floating islands at golden
 hour over an endless cloud sea**, and a race called **Ascent** — *light your Spark
 from three Sun Motes, climb the Sky Spire, and ring the Sky Bell three times before
-anyone else.* No clans, cages, keys or home tower up here.
+anyone else.* No clans or home tower up here — but every terrace of the spire sets
+you a task, and there are caged friends to free who will fight on your side.
 
 ![Skyfall Isles — the whole archipelago, rendered in-engine](art/world_sky.png)
+
+**New to Ascent?** Under the Skyfall Isles card on the world page is a button,
+*How to play Ascent — open the briefing*. It opens an illustrated one-page briefing
+(the goal, how to climb, the four tier tasks, caged friends, what to avoid) in the
+browser; nothing is shown in-game before a round. The page is
+[`web/briefing.html`](web/briefing.html) with its pictures in `web/briefing/`, so it
+is served next to the web build (a Godot re-export leaves those files alone).
 
 - **The isles.** Heart Isle carries the Sky Spire. Around it: three home isles
   (Fire's obsidian **Ember Crag**, Water's lagoon **Tide Atoll**, Leaf's **Canopy
   Grove**) each with a safe sanctum, three wild isles (Windmill, Ruin, Crystal) and
-  six small islets, joined by plank bridges. Walk off any edge and you fall through
-  the clouds, then respawn at home.
+  six small islets, joined by plank bridges. Close in round Heart Isle hang three
+  small **task isles**, each with its own sub-tower: **Roost Rock** (a watchtower
+  hung with cages), **Beacon Isle** (a lighthouse) and the **Sun Shrine**. Walk off
+  any edge and you fall through the clouds, then respawn at home.
 - **Each element travels its own way.** Fire's thermal vent flings it straight from
   Ember Crag to Heart Isle. Water surfs the sky stream at double speed (everyone
   else wades it). Leaf walks a private vine — and can stand on a **seed** for 1.5 s
@@ -132,8 +142,39 @@ anyone else.* No clans, cages, keys or home tower up here.
 - **Climb.** The spire door opens only for a lit Spark. Five ring terraces, 6 m
   apart; one stair per tier, each 72° further round than the last. Opposite every
   stair are three shortcut pads — a Fire vent, a Water lift, a Leaf vine — and
-  yours carries you up a tier (4 s recharge). Catches only happen between actors on
+  yours carries you up a tier (4 s recharge): step on it, or press **E** beside it.
+  A hint pops up at the top left whenever you are near something you can use,
+  saying what to press or why it won't work for you. Catches only happen between actors on
   the same tier, and a tag on the spire costs a heart **and a tier**.
+- **Tasks.** Terraces 1–4 each have a **task stone**. The stair *and* your shortcut
+  pad on that terrace stay locked (a gold shimmer) until you read the stone
+  (**E**, or just stand beside it) and do its task — a different one on every tier:
+  1. **Free a caged friend** — open any cage (one you opened earlier counts).
+  2. **Light the beacon** — stand in the glowing ring at the lighthouse on Beacon
+     Isle for 3 s; the lamp then burns in your colour.
+  3. **Fetch the Sun Key** — take it from the Sun Shrine's altar and carry it back
+     up to the stone.
+  4. **Hold the Sun Seal** — stand on the seal on that terrace for 6 s; a tag
+     resets it.
+
+  Tasks belong to your element team and stay done, so a tier you unlocked is still
+  open after you are knocked down. Rivals do the same tasks. If the smog sea has
+  already swallowed a task's isle, the Sun Key drifts to safe ground and the beacon
+  task is waived. A wind chime on each terrace mends one heart for a hurt climber.
+- **Caged friends.** Seven cages (two on Roost Rock, one on each wild isle, two
+  against the spire wall on Heart Isle) each hold a small elemental; an opened cage
+  refills after 30 s. Open one (**E**, or stand beside it) and the little one works
+  for you — it can be your own element or another:
+  - if it **can eat one of your rivals** it hunts that rival: it circles them and
+    darts in every few seconds to slow them (a Leaf who frees a Water gets a
+    Fire-chaser);
+  - otherwise it **guards you**: it stays at your side and throws itself at smog
+    clouds, spending their oxygen.
+
+  You can have two at a time. A helper lasts 90 s, or until it has soaked two smog
+  clouds, or until a rival that eats its element touches it. Hunters, like the
+  smog, cannot follow above tier 2. Cages show as squares on the radar; task
+  targets as gold diamonds.
 - **Ring.** Stand in the glowing ring on the top platform for 2 s to ring the bell.
   It swings for 4 s after any ring. First to three rings wins; at 8:00 the highest
   Spark wins.
@@ -218,6 +259,8 @@ Key scripts (under `src/`):
   smog front, the eclipse tint.
 - `mode_ascent.gd` — every Skyfall / Ascent rule (eclipse, shove, falling, motes,
   the tier layer, pads, bell, smog sea, win), the rival AI and the online mirror.
+- `sky_quests.gd` — the tier tasks (task stones, beacon, Sun Key, Sun Seal), the
+  cages and the little helpers they free, plus what the rival AI does about them.
 
 It began life as a Three.js prototype (`elemental-tag.html`) and was ported to
 Godot.

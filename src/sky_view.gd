@@ -28,6 +28,14 @@ var _base_amb := Color.WHITE
 var _base_sun := Color.WHITE
 var _base_fog := Color.WHITE
 var _t := 0.0
+# tier tasks + cages (SkyQuests)
+var _stones: Array = []               # [{ node, rune, k }]
+var _cages: Array = []                # [{ root, bars, captive, el }]
+var _chimes: Array = []               # [Node3D] for terraces 1..4
+var _locks: Array = []                # [MeshInstance3D] shimmer across the stair foot of tiers 1..4
+var _key_node: Node3D = null
+var _seal_glow: Node = null
+var _lamp_light: OmniLight3D = null
 
 func mode():
 	return game.sky
@@ -48,7 +56,14 @@ func setup() -> void:
 	_build_vines()
 	_build_front()
 	_build_door_and_pads()
+	_build_quest_props()
 	_build_bell_sound()
+
+func _exit_tree() -> void:
+	for cg in _cages:
+		var cap = cg["captive"]
+		if cap != null and is_instance_valid(cap):
+			cap.queue_free()
 
 func reset_round() -> void:
 	for n in _mote_nodes:
@@ -142,6 +157,189 @@ func _build_door_and_pads() -> void:
 			add_child(disc)
 			_pad_glows.append({ "node": disc, "k": k, "el": el })
 
+func _prop(asset: String, fallback: Callable) -> Node3D:
+	var n := SkyBuilder.instance(asset)
+	if n == null:
+		n = fallback.call()
+	add_child(n)
+	return n
+
+# Task stones, cages, wind chimes, the Sun Key, the Sun Seal and the task locks.
+func _build_quest_props() -> void:
+	var gold := Color(0.98, 0.76, 0.18)
+	for k in range(1, SkyQuests.TASK_TIERS + 1):
+		var y := float(k) * SkyLayout.SPIRE_TIER_H
+		var sp := SkyQuests.stone_pos(k)
+		var stone := _prop("task_stone", func(): return MeshLib.box(0.9, 1.5, 0.6, MeshLib.lit_mat(MeshLib.rgb(0x9a8f80))))
+		stone.position = Vector3(sp.x, y, sp.y)
+		stone.rotation.y = PI / 2.0 - deg_to_rad(SkyLayout.ang_of(sp.x, sp.y))     # the tablet faces out, toward the terrace
+		_stones.append({ "node": stone, "rune": stone.find_child("rune", true, false), "k": k })
+		var cp := SkyQuests.chime_pos(k)
+		var chime := _prop("wind_chime", func(): return MeshLib.box(0.3, 0.9, 0.3, MeshLib.unlit_mat(Color.WHITE)))
+		chime.position = Vector3(cp.x, y, cp.y)
+		_chimes.append(chime)
+		# the lock: a shimmer across the foot of this tier's stair until the task is done
+		var a := SkyLayout.ramp_ang(k)
+		var r: float = SkyLayout.tier_inner(k) + float(SkyLayout.SPIRE_RAMP_RUN[k]) + 0.1
+		var w := 2.0 * r * sin(deg_to_rad(SkyLayout.SPIRE_RAMP_ARC * 0.5))
+		var lm := MeshLib.unlit_mat(gold, 0.34)
+		lm.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var lock := MeshLib.box(w, 3.2, 0.12, lm)
+		lock.position = SkyLayout.pol3(a, r, y + 1.6)
+		lock.rotation.y = PI / 2.0 - deg_to_rad(a)
+		add_child(lock)
+		_locks.append(lock)
+	for i in SkyQuests.CAGE_SPOTS.size():
+		var p: Vector3 = SkyQuests.CAGE_SPOTS[i]
+		var cage := _prop("helper_cage", func(): return MeshLib.cyl(1.1, 1.1, 0.2, MeshLib.lit_mat(MeshLib.rgb(0x6b5a48)), 12))
+		cage.position = p
+		# the padlock faces the open ground: outward on Heart Isle, toward the isle's middle elsewhere
+		var face := SkyLayout.ang_of(p.x, p.z)
+		var node := SkyLayout.node_of(p.x, p.z)
+		if node != "heart" and node != "":
+			var is_: Dictionary = SkyLayout.NODES[node]
+			face = SkyLayout.ang_of(float(is_["x"]) - p.x, float(is_["z"]) - p.z)
+		cage.rotation.y = PI / 2.0 - deg_to_rad(face)
+		_cages.append({ "root": cage, "bars": cage.find_child("bars", true, false), "captive": null, "el": "" })
+	_key_node = _prop("sun_key", func(): return MeshLib.box(0.3, 1.0, 0.1, MeshLib.unlit_mat(gold)))
+	SkyBuilder.set_override(_key_node, SkyBuilder.tinted_glow(gold * 1.15))
+	_key_node.visible = false
+	var sl := SkyQuests.seal_pos()
+	var seal := _prop("sun_seal", func(): return MeshLib.disc(SkyQuests.SEAL_R, MeshLib.lit_mat(MeshLib.rgb(0xb9a98c)), 24))
+	# the terrace is narrower than the seal's rim: shrink it to sit inside the band
+	seal.scale = Vector3.ONE * minf(1.0, (SkyLayout.tier_outer(4) - SkyLayout.tier_inner(4)) * 0.5 / 2.2 * 0.94)
+	seal.position = Vector3(sl.x, 4.0 * SkyLayout.SPIRE_TIER_H + 0.02, sl.y)
+	_seal_glow = seal.find_child("seal_glow", true, false)
+	# the lighthouse lamp throws real light once somebody has lit it
+	var lamp = named.get("beacon_lamp")
+	if lamp != null and is_instance_valid(lamp):
+		_lamp_light = OmniLight3D.new()
+		_lamp_light.omni_range = 26.0
+		_lamp_light.light_energy = 0.0
+		_lamp_light.shadow_enabled = false
+		_lamp_light.position = Vector3(0, 0.6, 0)
+		(lamp as Node3D).add_child(_lamp_light)
+
+func _update_quests(m, dt: float) -> void:
+	var q: SkyQuests = m.quests
+	if q == null:
+		return
+	var my_el: String = m._local_el()
+	var me: GameChar = game.player
+	var my_col: Color = MeshLib.rgb(game.ELEMENTS[my_el]["glow"]) if my_el != "" else Color.WHITE
+	var gold := Color(0.98, 0.76, 0.18)
+	var dim := Color(0.26, 0.27, 0.33)
+	var pulse := 0.75 + 0.25 * sin(_t * 4.0)
+	var front := q.frontier(my_el) if my_el != "" else 99
+	var act := int(q.active.get(my_el, 0)) if my_el != "" else 0
+	# ---- task stones: gold = it has a task for you, your colour = that task is running, dim = done / not yet
+	for st in _stones:
+		var k := int(st["k"])
+		var c := dim
+		if k == front:
+			c = (my_col * 1.1) if act == k else gold * (0.8 + 0.5 * pulse)
+		elif k < front:
+			c = Color(0.45, 0.8, 0.55)
+		if st["rune"] != null and is_instance_valid(st["rune"]):
+			_set_tint(st["rune"], "rune", c)
+		if k - 1 < _locks.size():
+			var lock: MeshInstance3D = _locks[k - 1]
+			lock.visible = my_el != "" and not q.can_go_up(my_el, k)
+			if lock.visible:
+				(lock.material_override as StandardMaterial3D).albedo_color.a = 0.24 + 0.1 * sin(_t * 3.0 + float(k))
+	# ---- wind chimes sway; a resting one hangs dull
+	for i in _chimes.size():
+		var ch: Node3D = _chimes[i]
+		var resting: bool = float(q.chime_rest[i]) > 0.0
+		ch.rotation.z = sin(_t * 1.7 + float(i) * 1.3) * (0.03 if resting else 0.1)
+		ch.rotation.y += dt * (0.15 if resting else 0.6)
+		_set_tint(ch, "chime", Color(0.4, 0.42, 0.48) if resting else Color(1.0, 0.92, 0.7))
+	# ---- cages: bars + a small captive while someone is inside
+	for i in mini(_cages.size(), q.cages.size()):
+		var cg: Dictionary = _cages[i]
+		var el: String = q.cages[i]["el"]
+		if el != String(cg["el"]):
+			cg["el"] = el
+			var old = cg["captive"]
+			if old != null and is_instance_valid(old):
+				old.queue_free()
+			cg["captive"] = null
+			if el != "":
+				var cap: CharVisual = game._build_char_visual("element", el)
+				cap.scale = Vector3.ONE * 0.5
+				var root: Node3D = cg["root"]
+				cap.position = root.position + Vector3(0, 0.16, 0)
+				cap.rotation.y = root.rotation.y
+				cg["captive"] = cap
+		# an opened cage folds down flat (bars gone, its dome resting on the base) until a new captive arrives
+		var croot: Node3D = cg["root"]
+		croot.scale.y = lerpf(croot.scale.y, 1.0 if el != "" else 0.22, clampf(dt * 7.0, 0.0, 1.0))
+		var bars = cg["bars"]
+		if bars != null and is_instance_valid(bars):
+			(bars as Node3D).visible = el != "" or croot.scale.y > 0.6
+		var cv = cg["captive"]
+		if cv != null and is_instance_valid(cv):
+			(cv as Node3D).position.y = 0.16 + absf(sin(_t * 3.0 + float(i))) * 0.12     # hopping to be let out
+			(cv as CharVisual).animate(game.time_ms, 0.0)
+	# ---- the Sun Key: on the altar (or wherever it drifted), or over my head while I carry it
+	var ks := int(q.key_state.get(my_el, 0)) if my_el != "" else 0
+	_key_node.visible = ks != 0 and (ks == 1 or (me != null and me.group != null))
+	if _key_node.visible:
+		if ks == 1:
+			var kp: Vector3 = q.key_pos[my_el]
+			var on_altar: bool = kp.distance_to(SkyQuests.shrine_pos()) < 0.5
+			_key_node.position = Vector3(kp.x, (0.75 if on_altar else 0.25) + sin(_t * 2.4) * 0.15, kp.z)
+			_key_node.scale = Vector3.ONE * 1.25
+		else:
+			_key_node.position = me.pos + Vector3(0, 2.5 + sin(_t * 3.0) * 0.1, 0)
+			_key_node.scale = Vector3.ONE * 0.8
+		_key_node.rotation.y += dt * 1.8
+	var ag = named.get("altar_glow")
+	if ag != null and is_instance_valid(ag):
+		_set_tint(ag, "altar", gold * (0.9 + 0.5 * pulse) if ks == 1 else Color(0.85, 0.7, 0.4))
+	# ---- the Sun Seal glows while its task runs
+	if _seal_glow != null and is_instance_valid(_seal_glow):
+		var sc := dim
+		if act == 4:
+			sc = gold * (0.8 + 0.5 * pulse)
+		elif front > 4:
+			sc = Color(0.45, 0.8, 0.55)
+		_set_tint(_seal_glow, "seal", sc)
+	# ---- the lighthouse: its lamp burns in the colour of whoever lit it last; the ring calls you during the task
+	var lamp = named.get("beacon_lamp")
+	if lamp != null and is_instance_valid(lamp):
+		var lc := Color(0.3, 0.32, 0.4)
+		if q.beacon_el != "":
+			lc = MeshLib.rgb(game.ELEMENTS[q.beacon_el]["glow"]) * (1.15 + 0.2 * sin(_t * 2.0))
+		_set_tint(lamp, "lamp", lc)
+		if _lamp_light != null:
+			_lamp_light.light_energy = 2.2 if q.beacon_el != "" else 0.0
+			_lamp_light.light_color = lc
+	var ring = named.get("beacon_ring")
+	if ring != null and is_instance_valid(ring):
+		_set_tint(ring, "ring", gold * (0.8 + 0.5 * pulse) if act == 2 else dim)
+	# ---- helpers wear a ring in their team's colour (host: the actor's body, guests: its ghost)
+	for nid in q.helper_team:
+		var node: Node3D = null
+		if game.mode == game.Mode.CLIENT:
+			node = game.ghosts.get(nid)
+		else:
+			for h in q.helpers:
+				if h.net_id == nid:
+					node = h.group
+		if node == null or not is_instance_valid(node) or node.has_meta("team_ring"):
+			continue
+		var tm := TorusMesh.new()
+		tm.inner_radius = 1.5; tm.outer_radius = 1.85
+		tm.rings = 20; tm.ring_segments = 4
+		var tr := MeshInstance3D.new()
+		tr.mesh = tm
+		tr.position.y = 0.15
+		tr.scale = Vector3(1.0, 0.3, 1.0)
+		tr.material_override = MeshLib.unlit_mat(MeshLib.rgb(game.ELEMENTS[q.helper_team[nid]]["glow"]), 0.9)
+		node.add_child(tr)
+		node.set_meta("team_ring", tr)
+
 # The bell is synthesised (a strike + inharmonic partials) — no audio asset needed.
 func _build_bell_sound() -> void:
 	if DisplayServer.get_name() == "headless":
@@ -187,6 +385,7 @@ func update(dt: float) -> void:
 	_update_motes(m, dt)
 	_update_bell(m, dt)
 	_update_props(m, dt)
+	_update_quests(m, dt)
 	_update_actor_fx(m)
 
 func _update_eclipse(m, dt: float) -> void:
@@ -314,7 +513,7 @@ func _update_props(m, dt: float) -> void:
 	for pg in _pad_glows:
 		var node: MeshInstance3D = pg["node"]
 		var mine: bool = pg["el"] == my_el
-		node.visible = mine and m.lit(my_el)
+		node.visible = mine and m.quests.can_go_up(my_el, int(pg["k"]))
 		if node.visible and me != null:
 			var ready: bool = me.pad_cd <= 0.0
 			node.scale = Vector3.ONE * ((1.0 + 0.12 * sin(_t * 5.0)) if ready and me.tier == int(pg["k"]) else 0.85)

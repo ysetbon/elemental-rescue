@@ -473,6 +473,10 @@ func _build_banner_leaves() -> void:
 		ti += 1
 
 # ------------------------------------------------------------------- setup
+func _exit_tree() -> void:
+	if sky != null:
+		sky.dispose()
+
 func _ready() -> void:
 	if OS.get_cmdline_user_args().has("testclient"):
 		_ready_testclient()   # dev hook: headless lobby smoke-test (see _ready_testclient)
@@ -847,6 +851,8 @@ func _rebuild_world(world_seed: int) -> void:
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
+	if sky != null:
+		sky.dispose()
 	sky = null
 	sky_view = null
 	if world_kind == "sky":
@@ -1271,6 +1277,8 @@ func _client_radar_blips(blips: Array) -> void:
 		var g = ghosts.get(nid)
 		if g == null or not is_instance_valid(g):
 			continue
+		if sky != null and (fl & (1 << 9)) != 0:
+			continue                             # Ascent's little cage helpers are not radar blips
 		var kind: String = _KIND_NAME[fl & 3]
 		var col: Color
 		if kind == "o2":
@@ -2328,6 +2336,8 @@ func make_character(kind: String, el: String = "", is_player: bool = false) -> G
 	# old 120-arena town, so everyone strides faster to keep travel times reasonable.
 	# Chase balance is untouched (all relative speeds preserved).
 	ch.speed = (10.2 if kind == "co2" else (6.0 if kind == "o2" else 11.0)) * PACE
+	if sky != null and kind != "element":
+		ch.speed *= ModeAscent.GAS_SPEED   # sky: smog clouds + breeze bubbles drift slower than you run
 	if kind == "element":
 		ch.radar_color = MeshLib.rgb(ELEMENTS[el]["color"])
 	elif kind == "o2":
@@ -3904,7 +3914,7 @@ func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	var el: String = _EL_NAME[(flags >> 2) & 3]
 	var cv := _build_char_visual(kind, el)
 	if (flags & (1 << 9)) != 0:            # freed twin → the smaller rescued sibling (see _release_twin)
-		cv.scale = Vector3.ONE * 0.8
+		cv.scale = Vector3.ONE * (SkyQuests.HELPER_SCALE if sky != null else 0.8)
 	if (flags & (1 << 7)) != 0:            # clan ally → render at clan scale + a selection shroud
 		cv.scale = Vector3.ONE * CLAN_SCALE
 		var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
@@ -4229,6 +4239,8 @@ func _broadcast_snapshot() -> void:
 	list.append_array(actors)
 	list.append_array(npcs)
 	list.append_array(allies)            # recruited clan allies replicate as normal ghosts
+	if sky != null:
+		list.append_array(sky.quests.helpers)   # freed cage helpers (flagged as twins: small + friendly)
 	for el in twin_by_el:
 		if twin_by_el[el] != null:
 			list.append(twin_by_el[el])
@@ -5327,6 +5339,7 @@ func _sky_end(reason: String, winner_el: String, standings: Array) -> void:
 #   skytp=<x>,<z>[,<tier>]  place the player
 #   skyyaw=<deg>     camera yaw      skyrings=<n>  give the player's team n rings
 #   skycam=<x>,<y>,<z>,<lx>,<ly>,<lz>  park the camera   skyhud=0  hide the HUD   skyfog=<mult>
+#   skykey=<key>     hold a key down (e.g. skykey=E next to your pad)
 #   skyshot=<path>   save a PNG of the viewport after skywait=<secs> (default 3) and quit
 var _sky_dbg := {}
 var _sky_dbg_parsed := false
@@ -5346,17 +5359,80 @@ func _sky_debug_setup() -> void:
 			sky.motes_el[el] = int(_sky_dbg["skymotes"])
 	if _sky_dbg.has("skyrings"):
 		sky.rings_el[player.el] = int(_sky_dbg["skyrings"])
-	if _sky_dbg.has("skytp"):
+	if _sky_dbg.has("skytasks"):
+		# skytasks=N: every team has finished the first N tier tasks; skytask=K: mine has been given task K
+		for el in sky.ELS:
+			sky.quests.done[el] = int(_sky_dbg["skytasks"])
+	if _sky_dbg.has("skytask"):
+		sky.quests._accept(player.el, int(_sky_dbg["skytask"]))
+	if _sky_dbg.has("skytp") and not String(_sky_dbg["skytp"]).contains(","):
+		# skytp=mote|smog|bubble|predator — stand a few metres from the nearest one
+		var what := String(_sky_dbg["skytp"])
+		var tgt := Vector3.ZERO
+		var found := false
+		if what == "mote":
+			for m in sky.motes:
+				if m["el"] == player.el and not m["taken"]:
+					tgt = m["pos"]; found = true
+					break
+		elif what == "predator":
+			for a in actors:
+				if a != player and _eats(a.el, player.el):
+					a.pos = player.pos + Vector3(4.5, 0, 1.0)   # bring the rival to us instead
+					found = false
+					break
+		else:
+			for n in npcs:
+				if n.kind == ("co2" if what == "smog" else "o2"):
+					tgt = n.pos; found = true
+					break
+		if found:
+			var isle := SkyLayout.node_of(tgt.x, tgt.z)
+			var c := Vector3.ZERO
+			if isle != "":
+				c = Vector3(SkyLayout.NODES[isle]["x"], 0, SkyLayout.NODES[isle]["z"])
+			var off := (c - tgt)
+			off.y = 0
+			off = off.normalized() * 4.0 if off.length() > 4.5 else Vector3(3.0, 0, 2.0)
+			if what == "mote":
+				player.pos = Vector3(tgt.x + off.x, 0, tgt.z + off.z)
+			else:
+				for n in npcs:                                   # bring the gas to us (it may be over a gap)
+					if n.kind == ("co2" if what == "smog" else "o2"):
+						n.pos = player.pos + Vector3(5.0, 0, -2.0)
+						break
+			cam_yaw = atan2(-off.x, -off.z) + PI
+	elif _sky_dbg.has("skytp"):
 		var v := String(_sky_dbg["skytp"]).split(",")
 		var k := int(v[2]) if v.size() > 2 else 0
 		player.tier = k
 		player.pos = Vector3(float(v[0]), float(k) * SkyLayout.SPIRE_TIER_H, float(v[1]))
 		player.in_ramp = SkyLayout.in_wedge(k, player.pos.x, player.pos.z)
 		cam_yaw = atan2(player.pos.x, player.pos.z)
+	if _sky_dbg.has("skyhelp"):
+		# skyhelp=N: open the N nearest full cages for my team
+		for _i in int(_sky_dbg["skyhelp"]):
+			var bi := -1
+			var bd := 1.0e20
+			for i in sky.quests.cages.size():
+				var cg: Dictionary = sky.quests.cages[i]
+				if String(cg["el"]) != "" and player.pos.distance_to(cg["pos"]) < bd:
+					bd = player.pos.distance_to(cg["pos"]); bi = i
+			if bi >= 0:
+				sky.quests._free_cage(bi, player)
 	if _sky_dbg.has("skyyaw"):
 		cam_yaw = deg_to_rad(float(_sky_dbg["skyyaw"]))
 	if _sky_dbg.has("skyhud"):
 		ui.visible = int(_sky_dbg["skyhud"]) != 0
+	if _sky_dbg.has("skyclean"):
+		ui.countdown_label.visible = false                       # no 3-2-1 overlay in early captures
+	if _sky_dbg.has("skykey"):
+		# skykey=E — hold a key down (QA for key prompts such as "E to climb")
+		var ev := InputEventKey.new()
+		ev.physical_keycode = OS.find_keycode_from_string(String(_sky_dbg["skykey"]))
+		ev.keycode = ev.physical_keycode
+		ev.pressed = true
+		Input.parse_input_event(ev)
 	if _sky_dbg.has("skyfog") and world_env != null:
 		world_env.environment.fog_density = FOG_DENSITY * float(_sky_dbg["skyfog"])
 

@@ -39,6 +39,13 @@ static func build(game) -> void:
 	else:
 		_build_fallback(view)
 	_register_sanctums()
+	# cages + task stones: placed clear of the Blender props, then made solid
+	SkyQuests.place(game.obstacles)
+	for cp in SkyQuests.CAGE_SPOTS:
+		game.obstacles.append({ "x": cp.x, "z": cp.z, "r": SkyQuests.CAGE_R })
+	for k in range(1, SkyQuests.TASK_TIERS + 1):
+		var sp := SkyQuests.stone_pos(k)
+		game.obstacles.append({ "x": sp.x, "z": sp.y, "r": SkyQuests.STONE_R })
 	view.setup()
 	game.sky_view = view
 

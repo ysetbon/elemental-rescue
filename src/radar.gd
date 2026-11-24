@@ -76,6 +76,19 @@ func _draw() -> void:
 		if Vector2(bp.x - px, bp.y - pz).length() > range_:
 			continue
 		var p := Vector2(to_x.call(bp.x), to_z.call(bp.y))
+		if b.has("shape"):
+			if String(b["shape"]) == "cage":
+				# a cage with a friend inside: a barred square in the captive's colour
+				draw_rect(Rect2(p - Vector2(4.5, 4.5), Vector2(9, 9)), Color(1, 1, 1, 0.9))
+				draw_rect(Rect2(p - Vector2(3.2, 3.2), Vector2(6.4, 6.4)), b["color"])
+				draw_rect(Rect2(p - Vector2(4.5, 4.5), Vector2(9, 9)), Color(0.25, 0.22, 0.3), false, 1.2)
+			else:
+				# a task marker (stone, Sun Key, beacon, seal): a gold diamond
+				var dm := PackedVector2Array([p + Vector2(0, -6.5), p + Vector2(5.2, 0), p + Vector2(0, 6.5), p + Vector2(-5.2, 0)])
+				draw_colored_polygon(dm, b["color"])
+				dm.append(dm[0])
+				draw_polyline(dm, Color.WHITE, 1.4)
+			continue
 		if b.has("mote"):
 			# a Sun Mote: a little four-point star in your colour
 			draw_colored_polygon(PackedVector2Array([p + Vector2(0, -5.5), p + Vector2(1.6, -1.6), p + Vector2(5.5, 0), p + Vector2(1.6, 1.6),

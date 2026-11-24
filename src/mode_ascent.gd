@@ -55,8 +55,12 @@ const AI_GATHER_SPEED := 0.62    # …and stroll while hunting motes, so a human
 const AI_FLEE_BOOST := 1.22      # but they bolt when something that eats them is close
 const N_SMOG := 4                # single-player CO₂ smog clouds / O₂ breeze bubbles in this world
 const N_BUBBLES := 10
+const GAS_SPEED := 0.8           # smog clouds / breeze bubbles move at 80% of their castle-world speed
 const ELS := ["fire", "water", "grass"]
 const SHORT_NAME := { "fire": "vent", "water": "lift", "grass": "vine" }
+const PAD_NAME := { "fire": "fire vent", "water": "water lift", "grass": "vine ladder" }
+const PAD_KEY_REACH := 2.6       # press E this close to your own pad and you climb at once
+const HINT_REACH := 4.8          # how close before the "what do I press" popup appears
 const BUSY_NONE := 0
 const BUSY_FALL := 1
 const BUSY_FLY := 2
@@ -64,6 +68,7 @@ const BUSY_FLY := 2
 # ------------------------------------------------------------------ state
 var g                                 # the Game node
 var view = null                       # SkyView (null on a visual-less server)
+var quests: SkyQuests = null          # tier tasks, task isles, cages + helpers
 var elapsed := 0.0                    # seconds since GO
 var over := false
 var motes: Array = []                 # [{ el, pos:Vector3, taken, rel_t, from:Vector3, to:Vector3, drift }]
@@ -86,6 +91,14 @@ var _fall_view := 0.0                 # seconds the local player has been fallin
 func _init(game) -> void:
 	g = game
 	SkyLayout.ensure()
+	quests = SkyQuests.new(self)
+
+# ModeAscent and SkyQuests point at each other; cut the loop when the world is torn down
+func dispose() -> void:
+	if quests != null:
+		quests.m = null
+		quests.g = null
+	view = null
 
 # ------------------------------------------------------------------ clocks
 func eclipse_active() -> bool:
@@ -167,6 +180,7 @@ func start_round() -> void:
 		rings_el[el] = 0
 		tier_el[el] = 0
 	motes.clear()
+	quests.reset()
 	if g.mode != g.Mode.CLIENT:
 		_place_motes()
 	if view:
@@ -299,9 +313,9 @@ func constrain(ch: GameChar) -> void:
 		elif nr <= R + run and insec:
 			if not ch.in_ramp:
 				if nr >= R + run - SkyLayout.SPIRE_RAMP_MOUTH:
-					if k == 0 and not lit(ch.el):
-						nr = R + run + 0.05      # the spire door stays shut
-						_door_closed(ch)
+					if not quests.can_go_up(ch.el, k):
+						nr = R + run + 0.05      # the spire door / this tier's task lock stays shut
+						_door_closed(ch, k)
 					else:
 						ch.in_ramp = true
 				else:
@@ -344,10 +358,13 @@ func _enter_tier(ch: GameChar, k: int) -> void:
 	if ch.is_player and g.ui and k > 0:
 		g.ui.toast("Bell platform! Stand in the glowing ring to ring." if k == SPIRE_TIERS else "Tier %d of %d" % [k, SPIRE_TIERS])
 
-func _door_closed(ch: GameChar) -> void:
+func _door_closed(ch: GameChar, k: int = 0) -> void:
 	if ch.is_player and g.ui and _door_msg_cd <= 0.0:
 		_door_msg_cd = 3.0
-		g.ui.toast("The spire door opens only for a lit Spark — gather %d Sun Motes." % ASCENT_MOTES_NEEDED)
+		if k == 0:
+			g.ui.toast("The spire door opens only for a lit Spark — gather %d Sun Motes." % ASCENT_MOTES_NEEDED)
+		else:
+			g.ui.toast(quests.locked_text(ch.el, k))
 
 func _start_fall(ch: GameChar) -> void:
 	if g.mode == g.Mode.CLIENT:
@@ -382,6 +399,7 @@ func _launch(ch: GameChar, to: Vector3, to_tier: int, dur: float, arc: float) ->
 func on_hit(victim: GameChar, attacker: GameChar) -> void:
 	victim.ring_prog = 0.0
 	victim.pad_t = 0.0
+	quests.on_hit(victim)
 	if attacker != null and attacker.kind == "element":
 		attacker.slow_timer = g.SLOW_TIME        # counter-slow, whoever the victim is
 	if victim.kind != "element":
@@ -395,7 +413,7 @@ func on_hit(victim: GameChar, attacker: GameChar) -> void:
 		victim.tier = nt
 		victim.tier_at = elapsed
 		victim.pos = Vector3(p.x, 0.0, p.y)
-		victim.in_ramp = SkyLayout.in_wedge(nt, p.x, p.y) and (nt > 0 or lit(victim.el))
+		victim.in_ramp = SkyLayout.in_wedge(nt, p.x, p.y) and quests.can_go_up(victim.el, nt)
 		victim.pos.y = SkyLayout.height_at(nt, p.x, p.y)
 		victim.vel = Vector3.ZERO
 		if victim.is_player and g.ui:
@@ -447,6 +465,7 @@ func tick(dt: float) -> void:
 			tier_el[ch.el] = maxi(int(tier_el[ch.el]), ch.tier)
 	_tick_seeds(dt)
 	_tick_motes(dt)
+	quests.tick(dt)
 	_announce()
 	if autopilot or _trace:
 		_debug_log(dt)
@@ -467,18 +486,7 @@ func _tick_actor(ch: GameChar, dt: float) -> void:
 			_land_after_fall(ch)
 		return
 	if ch.busy == BUSY_FLY:
-		ch.busy_t += dt
-		var t := clampf(ch.busy_t / maxf(ch.fly_dur, 0.01), 0.0, 1.0)
-		var e := t * t * (3.0 - 2.0 * t)
-		ch.pos = ch.fly_from.lerp(ch.fly_to, e)
-		ch.pos.y += sin(PI * t) * ch.fly_arc
-		if t >= 1.0:
-			ch.busy = BUSY_NONE
-			ch.pos = ch.fly_to
-			ch.vel = Vector3.ZERO
-			if ch.fly_tier != ch.tier:
-				_enter_tier(ch, ch.fly_tier)
-			ch.in_ramp = SkyLayout.in_wedge(ch.tier, ch.pos.x, ch.pos.z)
+		advance_fly(ch, dt)
 		return
 	if ch.kb_t > 0.0:
 		var step := minf(dt, ch.kb_t)
@@ -503,6 +511,21 @@ func _tick_actor(ch: GameChar, dt: float) -> void:
 		_tick_vent(ch, dt)
 	_tick_pad(ch, dt)
 	_tick_bell(ch, dt)
+
+# one step of a vent / pad / helper leap
+func advance_fly(ch: GameChar, dt: float) -> void:
+	ch.busy_t += dt
+	var t := clampf(ch.busy_t / maxf(ch.fly_dur, 0.01), 0.0, 1.0)
+	var e := t * t * (3.0 - 2.0 * t)
+	ch.pos = ch.fly_from.lerp(ch.fly_to, e)
+	ch.pos.y += sin(PI * t) * ch.fly_arc
+	if t >= 1.0:
+		ch.busy = BUSY_NONE
+		ch.pos = ch.fly_to
+		ch.vel = Vector3.ZERO
+		if ch.fly_tier != ch.tier:
+			_enter_tier(ch, ch.fly_tier)
+		ch.in_ramp = SkyLayout.in_wedge(ch.tier, ch.pos.x, ch.pos.z) and quests.can_go_up(ch.el, ch.tier)
 
 func _land_after_fall(ch: GameChar) -> void:
 	ch.busy = BUSY_NONE
@@ -575,13 +598,16 @@ func _tick_vent(ch: GameChar, dt: float) -> void:
 # Your own shortcut pad (opposite the ramp) carries you up one tier.
 func _tick_pad(ch: GameChar, dt: float) -> void:
 	var k := ch.tier
-	if k >= SPIRE_TIERS or ch.pad_cd > 0.0 or (k == 0 and not lit(ch.el)) or radius(ch.pos) > SkyLayout.HEART_R:
+	if k >= SPIRE_TIERS or ch.pad_cd > 0.0 or not quests.can_go_up(ch.el, k) or radius(ch.pos) > SkyLayout.HEART_R:
 		ch.pad_t = 0.0
 		return
 	var pp := SkyLayout.pad_pos(k, ch.el)
-	if Vector2(ch.pos.x, ch.pos.z).distance_to(pp) < SkyLayout.SHORTCUT_R:
+	var pd := Vector2(ch.pos.x, ch.pos.z).distance_to(pp)
+	# the local player may also just press E next to the pad (see the hint popup)
+	var keyed: bool = ch.is_player and pd < PAD_KEY_REACH and _climb_pressed()
+	if pd < SkyLayout.SHORTCUT_R or keyed:
 		ch.pad_t += dt
-		if ch.pad_t >= SHORTCUT_CHARGE:
+		if ch.pad_t >= SHORTCUT_CHARGE or keyed:
 			_stat("pad_lifts")
 			ch.pad_t = 0.0
 			ch.pad_cd = SHORTCUT_COOLDOWN
@@ -589,6 +615,95 @@ func _tick_pad(ch: GameChar, dt: float) -> void:
 			_launch(ch, Vector3(land.x, float(k + 1) * SPIRE_TIER_H, land.y), k + 1, PAD_FLIGHT, 1.2)
 	else:
 		ch.pad_t = 0.0
+
+func _climb_pressed() -> bool:
+	return Input.is_physical_key_pressed(KEY_E) or Input.is_physical_key_pressed(KEY_SPACE)
+
+# What can the player use right here, and what do they press? Returns [key, text]
+# for the top-left hint popup (key "" = no key cap, text "" = no popup).
+func _context_hint(p: GameChar) -> Array:
+	if p.busy != BUSY_NONE or not p.alive or not g.running:
+		return ["", ""]
+	var el := p.el
+	var k := p.tier
+	var me := Vector2(p.pos.x, p.pos.z)
+	var r := me.length()
+	# keys only where a keyboard drives this avatar's pad directly (guests' pads
+	# charge on the host, phones have no keys) — everyone can simply stand on it
+	var keys: bool = g.mode != g.Mode.CLIENT and not g.mobile
+	var qh: Array = quests.hint(p)
+	if not qh.is_empty():
+		return qh
+	if k >= SPIRE_TIERS:
+		if r > BELL_ZONE_R and bell_settle <= 0.0:
+			return ["", "Step into the glowing ring and hold still for 2 s to ring the bell"]
+		return ["", ""]
+	if r <= SkyLayout.HEART_R + 1.0:
+		# ---- the three shortcut pads on this tier (vent / lift / vine ladder)
+		var near_el := ""
+		var bd := HINT_REACH
+		for e in ELS:
+			var d := me.distance_to(SkyLayout.pad_pos(k, e))
+			if d < bd:
+				bd = d
+				near_el = e
+		if near_el != "":
+			if near_el != el:
+				return ["", "That is %s's %s — only %s can ride it. Yours is the %s (your glowing pad on this tier)" % [
+					g.ELEMENTS[near_el]["label"], PAD_NAME[near_el], g.ELEMENTS[near_el]["label"], PAD_NAME[el]]]
+			if k == 0 and not lit(el):
+				return ["", "Your %s is asleep. First collect your %d Sun Motes (you have %d) — they are the stars in your colour on the radar. Then come back and it will carry you up." % [
+					PAD_NAME[el], ASCENT_MOTES_NEEDED, int(motes_el[el])]]
+			if k >= 1 and not quests.can_go_up(el, k):
+				return ["", quests.locked_text(el, k)]
+			if p.pad_cd > 0.0:
+				return ["", "Your %s is recharging… %ds" % [PAD_NAME[el], int(ceil(p.pad_cd))]]
+			var up := ("the bell platform" if k + 1 >= SPIRE_TIERS else "tier %d" % (k + 1))
+			if keys:
+				return ["E", "Climb your %s up to %s  (or just stand on the pad)" % [PAD_NAME[el], up]]
+			return ["", "Stand on the glowing pad to ride your %s up to %s" % [PAD_NAME[el], up]]
+		# ---- the stair up from this tier (tier 0: the spire door)
+		var R := SkyLayout.tier_inner(k)
+		var run := float(SkyLayout.SPIRE_RAMP_RUN[k])
+		var arc := absf(SkyLayout.ang_diff(SkyLayout.ang_of(me.x, me.y), SkyLayout.ramp_ang(k))) * deg_to_rad(1.0) * r
+		if arc < R * deg_to_rad(SPIRE_RAMP_ARC * 0.5) + 3.0 and r < R + run + 3.5 and r >= R - 0.2:
+			if k == 0 and not lit(el):
+				return ["", "The spire door is shut. First collect your %d Sun Motes (you have %d) — the stars in your colour on the radar." % [ASCENT_MOTES_NEEDED, int(motes_el[el])]]
+			if k >= 1 and not quests.can_go_up(el, k):
+				return ["", quests.locked_text(el, k)]
+			var up2 := ("the bell platform" if k + 1 >= SPIRE_TIERS else "tier %d" % (k + 1))
+			return ["W" if keys else "", "Walk up the stairs to %s" % up2]
+	if k == 0:
+		# ---- thermal vents
+		for v in [SkyLayout.VENT_HOME, SkyLayout.VENT_HEART]:
+			if me.distance_to(v) < HINT_REACH:
+				if el != "fire":
+					return ["", "Fire's thermal vent — only Fire can ride it (you just get a hop)"]
+				return ["", "Thermal vent — stand on it and it flings you to %s" % ("Heart Isle" if v == SkyLayout.VENT_HOME else "Ember Crag")]
+		# ---- seed gaps
+		for i in SkyLayout.SEEDS.size():
+			var sd: Dictionary = SkyLayout.SEEDS[i]
+			if me.distance_to(sd["ma"]) < HINT_REACH or me.distance_to(sd["mb"]) < HINT_REACH:
+				var left := float(seed_until[i]) - elapsed
+				if left > 0.0:
+					return ["", "The vine bridge is up — cross now!  %ds left" % int(ceil(left))]
+				if el == "grass":
+					return ["", "Seed — stand on it for 1.5 s to grow a vine bridge across the gap (anyone may cross for 10 s)"]
+				return ["", "A sprouting seed — only a Leaf can grow the vine bridge here"]
+		# ---- the private routes, where they leave an isle
+		var node := SkyLayout.node_of(me.x, me.y)
+		if node != "":
+			var is_: Dictionary = SkyLayout.NODES[node]
+			var rim: bool = me.distance_to(Vector2(is_["x"], is_["z"])) > float(is_["r"]) - 6.0
+			if rim and SkyLayout.seg_dist(me.x, me.y, SkyLayout.VINE["ax"], SkyLayout.VINE["az"], SkyLayout.VINE["bx"], SkyLayout.VINE["bz"]) < SkyLayout.VINE_HW + 2.5:
+				if el == "grass":
+					return ["W" if keys else "", "Your vine — walk it straight to %s" % ("Heart Isle" if node == "h_grass" else "Canopy Grove")]
+				return ["", "Leaf's vine — only Leaf can walk it. Step on it and you fall!"]
+			if rim and SkyLayout.seg_dist(me.x, me.y, SkyLayout.STREAM["ax"], SkyLayout.STREAM["az"], SkyLayout.STREAM["bx"], SkyLayout.STREAM["bz"]) < SkyLayout.STREAM_HW + 1.5:
+				if el == "water":
+					return ["W" if keys else "", "Your sky stream — surf it at double speed"]
+				return ["", "Water's sky stream — you can wade across, but slowly"]
+	return ["", ""]
 
 func _tick_bell(ch: GameChar, dt: float) -> void:
 	if ch.tier != SPIRE_TIERS or radius(ch.pos) > BELL_ZONE_R or bell_settle > 0.0:
@@ -724,7 +839,7 @@ func _debug_log(dt: float) -> void:
 	for ch in g.actors:
 		parts.append("%s%s hp%d T%d m%d r%d (%.0f,%.0f)%s" % [ch.el.substr(0, 1).to_upper(), "*" if ch.is_human else "", ch.hp, ch.tier,
 			int(motes_el[ch.el]), int(rings_el[ch.el]), ch.pos.x, ch.pos.z, [" ", " FALL", " FLY"][ch.busy]])
-	print("[ascent %s] ecl=%s smog=%.0f | %s" % [g._fmt_time(elapsed), str(eclipse_active()), smog_r(), " | ".join(parts)])
+	print("[ascent %s] ecl=%s smog=%.0f tasks=%s helpers=%d | %s" % [g._fmt_time(elapsed), str(eclipse_active()), smog_r(), str(quests.done.values()), quests.helpers.size(), " | ".join(parts)])
 	if OS.has_environment("ASCENT_TRACE"):
 		for ch in g.actors:
 			var pth: Array = ch.ai.get("path", [])
@@ -897,7 +1012,17 @@ static func _closest_on(px: float, pz: float, s: Dictionary) -> Vector2:
 
 func _goal_dir(ch: GameChar) -> Vector3:
 	if ch.tier > 0:
+		var qd = quests.spire_dir(ch)
+		if qd != null:
+			return qd
 		return _spire_dir(ch)
+	# a task errand on the ground (a cage, the lighthouse, the Sun Key) comes first
+	var er: Dictionary = quests.ground_errand(ch)
+	if not er.is_empty():
+		return _errand_dir(ch, er)
+	if ch.ai.has("errand"):
+		ch.ai.erase("errand")
+		ch.ai["path_t"] = 0.0
 	if lit(ch.el):
 		if radius(ch.pos) <= SkyLayout.HEART_R:
 			return _spire_dir(ch)
@@ -924,8 +1049,29 @@ func _goal_dir(ch: GameChar) -> Vector3:
 		st["path_t"] = 0.6 + randf() * 0.3
 	return _follow_path(ch)
 
+func _errand_dir(ch: GameChar, er: Dictionary) -> Vector3:
+	var pt: Vector2 = er["pt"]
+	var me := Vector2(ch.pos.x, ch.pos.z)
+	var d := me.distance_to(pt)
+	if d <= float(er["stop"]):
+		return Vector3.ZERO
+	var st: Dictionary = ch.ai
+	var node := _node_near(Vector3(pt.x, 0.0, pt.y))
+	# the last few metres on the same isle: straight at it
+	if d < 7.0 and SkyLayout.node_of(me.x, me.y) == node:
+		return Vector3(pt.x - me.x, 0.0, pt.y - me.y)
+	if float(st["path_t"]) <= 0.0 or not st.has("path") or String(st.get("errand", "")) != String(er["key"]):
+		st["errand"] = er["key"]
+		st["path"] = _build_path(ch, node, pt)
+		st["path_t"] = 0.6 + randf() * 0.3
+	var dir := _follow_path(ch)
+	return dir if dir != Vector3.ZERO else Vector3(pt.x - me.x, 0.0, pt.y - me.y)
+
 func _mote_node(m: Dictionary) -> String:
 	var p: Vector3 = m["to"] if float(m["drift"]) >= 0.0 else m["pos"]
+	return _node_near(p)
+
+func _node_near(p: Vector3) -> String:
 	var id := SkyLayout.node_of(p.x, p.z)
 	if id != "":
 		return id
@@ -1167,11 +1313,13 @@ func frame(dt: float) -> void:
 			for mo in motes:
 				if not mo["taken"]:
 					seen += 1
-			print("[ascent-guest %s] me=%s hp%d T%d busy%d (%.0f,%.0f,y%.1f)  motes=%s rings=%s tiers=%s  motes-left=%d bell=%.1f ecl=%s smog=%.0f ghosts=%d" % [
+			print("[ascent-guest %s] me=%s hp%d T%d busy%d (%.0f,%.0f,y%.1f)  motes=%s rings=%s tiers=%s  motes-left=%d bell=%.1f ecl=%s smog=%.0f ghosts=%d tasks=%s active=%s helpers=%s cages=%s" % [
 				g._fmt_time(elapsed), me.el, me.hp, me.tier, me.busy, me.pos.x, me.pos.z, me.pos.y, str(motes_el), str(rings_el), str(tier_el),
-				seen, bell_settle, str(eclipse_active()), smog_r(), g.ghosts.size()])
+				seen, bell_settle, str(eclipse_active()), smog_r(), g.ghosts.size(), str(quests.done.values()), str(quests.active.values()),
+				str(quests.helper_team), str(quests.cages.map(func(c): return String(c["el"]).substr(0, 1)))])
 	var lp: GameChar = g.player
 	_fall_view = (_fall_view + dt) if (lp != null and lp.busy == BUSY_FALL) else 0.0
+	quests.frame(dt)
 	if view:
 		view.update(dt)
 	_update_hud()
@@ -1202,6 +1350,10 @@ func _update_hud() -> void:
 		obj = "Climb!  Tier %d / %d  —  ramp, or your %s pad on the far side" % [k, SPIRE_TIERS, SHORT_NAME[el]]
 	else:
 		obj = "Ring the Sky Bell — stand in the ring  (%d / %d)" % [int(rings_el[el]), BELL_RINGS_TO_WIN]
+	if n >= ASCENT_MOTES_NEEDED:
+		var qo: String = quests.objective(el, k)
+		if qo != "":
+			obj = qo
 	if p.busy == BUSY_FALL:
 		obj = "Falling through the clouds…"
 	ui.set_objective(obj)
@@ -1213,6 +1365,7 @@ func _update_hud() -> void:
 		s += "   ·   Breeze %d/%d" % [g.o2_charges, g.O2_CHARGE_CAP]
 	if g._is_disguised():
 		s += "   ·   Shard %ds" % int(ceil(g.disguise_timer))
+	s += quests.status_bits(el)
 	ui.set_status(s)
 	ui.set_hearts(p.hp, maxi(p.max_hp, p.hp))
 	# the role line follows the chain: it flips for the 15 s of an eclipse
@@ -1231,6 +1384,8 @@ func _update_hud() -> void:
 		entries.append({ "el": e, "label": g.ELEMENTS[e]["label"], "score": 0, "alive": true, "me": e == el,
 			"text": "%s  T%d · %d/%d" % [g.ELEMENTS[e]["label"], int(tier_el[e]), int(rings_el[e]), BELL_RINGS_TO_WIN] })
 	ui.set_board(entries)
+	var hint := _context_hint(p)
+	ui.set_hint(hint[0], hint[1])
 	ui.radar.sky_smog_r = smog_r()
 	ui.radar.sky_el = el
 	ui.radar.sky_vines = vines_mask()
@@ -1240,7 +1395,10 @@ func _update_hud() -> void:
 	if el == "grass":
 		for i in seed_grow.size():
 			sg = maxf(sg, float(seed_grow[i]))
-	if rp > 0.0:
+	var qc: Array = quests.channel(p)
+	if not qc.is_empty():
+		ui.set_channel(qc[0], qc[1])
+	elif rp > 0.0:
 		ui.set_channel("Ringing the Sky Bell", rp)
 	elif k == SPIRE_TIERS and bell_settle > 0.0 and radius(p.pos) <= BELL_ZONE_R:
 		ui.set_channel("The bell is swinging…", 1.0 - bell_settle / BELL_SETTLE)
@@ -1268,6 +1426,7 @@ func radar_blips(blips: Array) -> void:
 		if not m["taken"] and m["el"] == el:
 			var mp: Vector3 = m["pos"]
 			blips.append({ "pos": Vector2(mp.x, mp.z), "color": col, "o2": false, "mote": true })
+	quests.radar_blips(blips, el, g.player.tier if g.player != null else 0)
 	if not ping.is_empty():
 		blips.append({ "pos": Vector2(ping["x"], ping["z"]), "color": MeshLib.rgb(g.ELEMENTS[ping["el"]]["color"]), "o2": false, "ping": float(ping["t"]) })
 
@@ -1294,6 +1453,7 @@ func pack_meta() -> Dictionary:
 		"sv": [snappedf(maxf(0.0, float(seed_until[0]) - elapsed), 0.1), snappedf(maxf(0.0, float(seed_until[1]) - elapsed), 0.1)],
 		"sg": [snappedf(float(seed_grow[0]), 0.01), snappedf(float(seed_grow[1]), 0.01)],
 		"rp": rp,
+		"q": quests.pack(),
 	}
 	if not ping.is_empty():
 		d["pg"] = [snappedf(float(ping["x"]), 0.1), snappedf(float(ping["z"]), 0.1), int(_EL_IDX[ping["el"]]), snappedf(float(ping["t"]), 0.1)]
@@ -1336,6 +1496,8 @@ func apply_meta(d: Dictionary) -> void:
 		seed_grow[i] = float(sg[i]) if i < sg.size() else 0.0
 	var rp: Dictionary = d.get("rp", {})
 	ring_view = float(rp.get(str(g.local_net_id), 0.0))
+	if d.has("q"):
+		quests.apply(d["q"])
 	if d.has("pg"):
 		var pg: Array = d["pg"]
 		ping = { "x": float(pg[0]), "z": float(pg[1]), "el": ELS[int(pg[2])], "t": float(pg[3]) }

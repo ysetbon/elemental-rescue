@@ -42,10 +42,15 @@ for a in (30, 150, 270):
     ISLES["i%d" % a] = (float(a), 140.0, 7.0, "islet_small_a")
 for el, a in HOME_ANG.items():
     ISLES["ih_" + el] = (a, 160.0, 6.0, "islet_small_b")
+# task isles with sub-towers (r 9.5, 49 m out; one spoke each to Heart)
+TASK_ISLES = {"roost": (5.0, "isle_roost"), "beacon": (125.0, "isle_beacon"), "shrine": (245.0, "isle_shrine")}
+for tid, (a, asset_name) in TASK_ISLES.items():
+    ISLES[tid] = (a, 49.0, 9.5, asset_name)
 BRIDGES = [("w30", "h_grass"), ("h_grass", "w150"), ("w150", "h_fire"), ("h_fire", "w270"), ("w270", "h_water"),
            ("h_water", "w30"), ("w30", "heart"), ("w150", "heart"), ("w270", "heart"),
            ("w30", "i30"), ("w150", "i150"), ("w270", "i270"),
-           ("h_fire", "ih_fire"), ("h_water", "ih_water"), ("h_grass", "ih_grass")]
+           ("h_fire", "ih_fire"), ("h_water", "ih_water"), ("h_grass", "ih_grass"),
+           ("roost", "heart"), ("beacon", "heart"), ("shrine", "heart")]
 SEEDS = {"seed_0_a": (-92.43, -42.97), "seed_0_b": (-24.24, -3.60), "seed_1_a": (92.43, -42.97), "seed_1_b": (24.24, -3.60)}
 PAD_OFF = {"fire": -32.0, "water": 0.0, "grass": 32.0}
 PAD_ASSET = {"fire": "shortcut_vent_up", "water": "shortcut_lift_up", "grass": "shortcut_vine_up"}
