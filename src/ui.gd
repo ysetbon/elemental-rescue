@@ -208,12 +208,52 @@ func _build_worlds() -> void:
 	_add_world_card(row, "town", "TWILIGHT TOWN",
 		"The original cozy map — school, playground\nand the old zoo where your twin waits",
 		"res://art/world_town.png")
-	_add_world_card(row, "sky", "SKYFALL ISLES",
+	var sky_col := _add_world_card(row, "sky", "SKYFALL ISLES",
 		"ASCENT — floating isles over a cloud sea:\nlight your Spark, climb the spire, ring the bell",
 		"res://art/world_sky.png")
+	# Ascent has more rules than the rescue worlds: a link to the illustrated briefing
+	# page sits under its card (it opens in the browser — nothing is shown in-game).
+	var s := 1.15 if mobile else 1.0
+	var link := Button.new()
+	link.text = "How to play Ascent — open the briefing"
+	link.custom_minimum_size = Vector2(340, 40) * s
+	link.add_theme_font_size_override("font_size", int(15 * s))
+	link.add_theme_color_override("font_color", _c(0x5a3a20))
+	link.add_theme_color_override("font_hover_color", _c(0x5a3a20))
+	link.add_theme_color_override("font_pressed_color", _c(0x5a3a20))
+	link.add_theme_color_override("font_focus_color", _c(0x5a3a20))
+	var lsb := StyleBoxFlat.new()
+	lsb.bg_color = Color(1, 1, 1, 0.82)
+	lsb.set_corner_radius_all(14)
+	lsb.set_border_width_all(2)
+	lsb.border_color = _c(0xf2a55a)
+	link.add_theme_stylebox_override("normal", lsb)
+	var lsb_h := lsb.duplicate()
+	lsb_h.bg_color = Color(1, 1, 1, 1.0)
+	link.add_theme_stylebox_override("hover", lsb_h)
+	link.add_theme_stylebox_override("pressed", lsb_h)
+	link.add_theme_stylebox_override("focus", lsb_h)
+	link.pressed.connect(_open_briefing)
+	sky_col.add_child(link)
 
-func _add_world_card(parent: Node, kind: String, name_: String, desc: String, img_path: String) -> void:
+# The Ascent briefing is a web page shipped next to the web build (web/briefing.html).
+const BRIEFING_URL := "https://elemental-rescue.onrender.com/briefing.html"
+func _open_briefing() -> void:
+	if OS.has_feature("web"):
+		# a new tab beside the game; if the browser blocks the pop-up, go there in this tab
+		# (the page has a link back to the game)
+		JavaScriptBridge.eval("(function(){var u=new URL('briefing.html',location.href).href;var w=window.open(u,'_blank');if(!w){location.href=u;}})()", true)
+		return
+	var local := ProjectSettings.globalize_path("res://web/briefing.html")
+	OS.shell_open(local if FileAccess.file_exists(local) else BRIEFING_URL)
+
+# Adds a world card in its own column and returns that column (for extras under the card).
+func _add_world_card(parent: Node, kind: String, name_: String, desc: String, img_path: String) -> VBoxContainer:
 	var s := 1.15 if mobile else 1.0   # three cards must still fit a phone's width
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 10)
+	col.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	parent.add_child(col)
 	var btn := Button.new()
 	btn.custom_minimum_size = Vector2(340, 292) * s
 	var sb := StyleBoxFlat.new()
@@ -246,7 +286,8 @@ func _add_world_card(parent: Node, kind: String, name_: String, desc: String, im
 	btn.pressed.connect(func() -> void:
 		world_selected.emit(kind)
 		_show_element_page(kind))
-	parent.add_child(btn)
+	col.add_child(btn)
+	return col
 
 # Intro page 2 — the world is chosen; pick your element (or go online).
 func _show_element_page(kind: String) -> void:

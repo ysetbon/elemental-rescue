@@ -117,6 +117,13 @@ you a task, and there are caged friends to free who will fight on your side.
 
 ![Skyfall Isles — the whole archipelago, rendered in-engine](art/world_sky.png)
 
+**New to Ascent?** Under the Skyfall Isles card on the world page is a button,
+*How to play Ascent — open the briefing*. It opens an illustrated one-page briefing
+(the goal, how to climb, the four tier tasks, caged friends, what to avoid) in the
+browser; nothing is shown in-game before a round. The page is
+[`web/briefing.html`](web/briefing.html) with its pictures in `web/briefing/`, so it
+is served next to the web build (a Godot re-export leaves those files alone).
+
 - **The isles.** Heart Isle carries the Sky Spire. Around it: three home isles
   (Fire's obsidian **Ember Crag**, Water's lagoon **Tide Atoll**, Leaf's **Canopy
   Grove**) each with a safe sanctum, three wild isles (Windmill, Ruin, Crystal) and

@@ -11,7 +11,7 @@ const port = Number(process.argv[2]) || 8765;
 const types = {
   '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'application/wasm',
   '.pck': 'application/octet-stream', '.png': 'image/png', '.svg': 'image/svg+xml',
-  '.json': 'application/json', '.ico': 'image/x-icon', '.audio': 'application/octet-stream',
+  '.json': 'application/json', '.jpg': 'image/jpeg', '.css': 'text/css', '.ico': 'image/x-icon', '.audio': 'application/octet-stream',
 };
 
 http.createServer((req, res) => {
