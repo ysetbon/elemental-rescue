@@ -164,17 +164,20 @@ is served next to the web build (a Godot re-export leaves those files alone).
 - **Caged friends.** Seven cages (two on Roost Rock, one on each wild isle, two
   against the spire wall on Heart Isle) each hold a small elemental; an opened cage
   refills after 30 s. Open one (**E**, or stand beside it) and the little one works
-  for you — it can be your own element or another:
-  - if it **can eat one of your rivals** it hunts that rival: it circles them and
-    darts in every few seconds to slow them (a Leaf who frees a Water gets a
-    Fire-chaser);
-  - otherwise it **guards you**: it stays at your side and throws itself at smog
-    clouds, spending their oxygen.
+  for you. It can be your own element or the one you catch — but **not the element
+  that eats you**: a little Fire will not come with a Leaf (those cages show as a
+  thin outline on the radar instead of a filled square). A helper:
+  - **protects you** — a smog cloud that comes near you is intercepted and its
+    oxygen spent;
+  - **harasses the rival it can eat** whenever that rival is in your area: it
+    circles them and darts in every few seconds to slow them (a Leaf who frees a
+    Water gets a Fire-chaser);
+  - otherwise **keeps its distance** — it waits where it is and only trots closer
+    once you are well away, so it is not under your feet.
 
   You can have two at a time. A helper lasts 90 s, or until it has soaked two smog
-  clouds, or until a rival that eats its element touches it. Hunters, like the
-  smog, cannot follow above tier 2. Cages show as squares on the radar; task
-  targets as gold diamonds.
+  clouds, or until a rival that eats its element touches it. Helpers, like the
+  smog, do not climb above tier 2. Task targets show as gold diamonds on the radar.
 - **Ring.** Stand in the glowing ring on the top platform for 2 s to ring the bell.
   It swings for 4 s after any ring. First to three rings wins; at 8:00 the highest
   Spark wins.

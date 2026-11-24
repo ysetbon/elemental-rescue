@@ -200,7 +200,7 @@ td:first-child { font-family: var(--f-display); font-weight: 600; white-space: n
       <article class="card">
         <img src="briefing/task1.jpg" alt="Leaf on Roost Rock between two cages, each holding a small elemental, with a watchtower behind" width="640" height="480">
         <div><span class="tier">Tier 1</span><h3>Free a caged friend</h3>
-        <p>Open any cage. Cages are the squares on the radar. Two stand on Heart Isle right below you. One you opened earlier counts.</p></div>
+        <p>Open any cage you are allowed to. They are the filled squares on the radar, and two stand on Heart Isle right below you. One you opened earlier counts.</p></div>
       </article>
       <article class="card">
         <img src="briefing/task2.jpg" alt="Water crossing the bridge to Beacon Isle, where a gold ring glows at the foot of a striped lighthouse" width="640" height="480">
@@ -223,24 +223,29 @@ td:first-child { font-family: var(--f-display); font-weight: 600; white-space: n
 
   <section aria-labelledby="friend-h">
     <h2 id="friend-h">Caged friends</h2>
-    <div class="cards">
+    <div class="cards four">
       <article class="card">
-        <img src="briefing/cage.jpg" alt="Leaf beside a cage on Roost Rock; the hint at the top left reads E, free the little Water, it will chase and slow Fire for you" width="640" height="480">
+        <img src="briefing/cage.jpg" alt="Leaf beside a cage on Roost Rock; the hint at the top left reads E, free the little Water, it will slow Fire near you and soak up smog clouds" width="640" height="480">
         <div><span class="tag ok">Free them</span><h3>Open a cage</h3>
         <p>Stand next to a cage and press <kbd>E</kbd>. The little one inside joins you. You can have two at a time, and an empty cage refills after 30 seconds.</p></div>
       </article>
       <article class="card">
-        <img src="briefing/hunter.jpg" alt="A small Water helper chasing Fire across a home isle" width="640" height="480">
-        <div><span class="tag ok">Helps</span><h3>A hunter</h3>
-        <p>If the little one can eat one of your rivals, it chases that rival, circles it and slows it every few seconds. A Leaf who frees a Water gets a Fire-chaser.</p></div>
+        <img src="briefing/nofree.jpg" alt="Leaf beside a cage holding a little Fire; the hint reads: Fire eats Leaf, so it will not come with you, look for another cage" width="640" height="480">
+        <div><span class="tag bad">Not this one</span><h3>Not the one that eats you</h3>
+        <p>You can free your own element or the one you catch. The element that eats you stays in its cage. On the radar those cages are a thin outline, the ones you can open are filled.</p></div>
       </article>
       <article class="card">
-        <img src="briefing/guard.jpg" alt="Leaf on Roost Rock with a small Water and a small Fire beside it, both in rings of Leaf's colour, between two opened cages" width="640" height="480">
-        <div><span class="tag ok">Helps</span><h3>A guard</h3>
-        <p>Otherwise it stays at your side and throws itself at dark smog clouds, turning them harmless. It can soak up two. Here the little Fire guards Leaf.</p></div>
+        <img src="briefing/hunter.jpg" alt="A small Water helper chasing Fire across a home isle" width="640" height="480">
+        <div><span class="tag ok">Helps</span><h3>It slows your rival</h3>
+        <p>When the rival it can eat comes into your area, it circles them and slows them every few seconds. A Leaf who frees a Water gets a Fire-chaser.</p></div>
+      </article>
+      <article class="card">
+        <img src="briefing/guard.jpg" alt="Leaf on Roost Rock with a little Water and a little Leaf waiting a few steps away, each in a ring of Leaf's colour" width="640" height="480">
+        <div><span class="tag ok">Helps</span><h3>It guards you, from a distance</h3>
+        <p>A dark smog cloud that comes near you gets intercepted and turned harmless. The rest of the time it waits a few steps off and only catches up once you have moved well away.</p></div>
       </article>
     </div>
-    <p class="lead win">The hint on each cage says which kind you will get. A helper leaves after 90 seconds. A rival that eats its element can send it home with a touch, and you can do the same to theirs. Hunters cannot follow anyone above tier 2.</p>
+    <p class="lead win">The hint on each cage says what the little one will do. A helper leaves after 90 seconds or after soaking up two clouds. A rival that eats its element can send it home with a touch, and you can do the same to theirs. Helpers do not climb above tier 2.</p>
   </section>
 
   <section aria-labelledby="avoid-h">

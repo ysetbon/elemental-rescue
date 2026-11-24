@@ -176,7 +176,7 @@ const HINT_RESCUE := "Hearts: a touch from your rival or CO₂ costs a heart —
 	+ "WASD move   ·   Shift sprint   ·   drag mouse to look"
 const HINT_SKY := "Three Sun Motes in your colour float on the outer isles — one is always on your PREY's home isle. Touch all three to light your Spark\n" \
 	+ "A lit Spark opens the Sky Spire: climb the stairs, or step on your own shortcut pad (Fire vent · Water lift · Leaf vine ladder) and press E\n" \
-	+ "Each terrace has a TASK STONE: read it (E) and do its task to unlock the way up   ·   open a CAGE (E) and the little one inside slows a rival or guards you from smog\n" \
+	+ "Each terrace has a TASK STONE: read it (E) and do its task to unlock the way up   ·   open a CAGE (E) for a little helper — any but the element that eats you\n" \
 	+ "Stand in the ring on the top platform for 2s to ring the bell — first to 3 rings wins   ·   a tag on the spire costs a heart AND a tier\n" \
 	+ "A predator's touch shoves you 6 m — mind the edges: walk off and you fall through the clouds\n" \
 	+ "Every 75s the ECLIPSE reverses the food chain for 15s   ·   every minute the smog sea rises and swallows the outer isles\n" \
