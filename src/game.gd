@@ -5327,6 +5327,7 @@ func _sky_end(reason: String, winner_el: String, standings: Array) -> void:
 #   skytp=<x>,<z>[,<tier>]  place the player
 #   skyyaw=<deg>     camera yaw      skyrings=<n>  give the player's team n rings
 #   skycam=<x>,<y>,<z>,<lx>,<ly>,<lz>  park the camera   skyhud=0  hide the HUD   skyfog=<mult>
+#   skykey=<key>     hold a key down (e.g. skykey=E next to your pad)
 #   skyshot=<path>   save a PNG of the viewport after skywait=<secs> (default 3) and quit
 var _sky_dbg := {}
 var _sky_dbg_parsed := false
@@ -5357,6 +5358,13 @@ func _sky_debug_setup() -> void:
 		cam_yaw = deg_to_rad(float(_sky_dbg["skyyaw"]))
 	if _sky_dbg.has("skyhud"):
 		ui.visible = int(_sky_dbg["skyhud"]) != 0
+	if _sky_dbg.has("skykey"):
+		# skykey=E — hold a key down (QA for key prompts such as "E to climb")
+		var ev := InputEventKey.new()
+		ev.physical_keycode = OS.find_keycode_from_string(String(_sky_dbg["skykey"]))
+		ev.keycode = ev.physical_keycode
+		ev.pressed = true
+		Input.parse_input_event(ev)
 	if _sky_dbg.has("skyfog") and world_env != null:
 		world_env.environment.fog_density = FOG_DENSITY * float(_sky_dbg["skyfog"])
 

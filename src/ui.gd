@@ -30,6 +30,10 @@ var sky_clock: Label = null
 var sky_eclipse: Label = null
 var sky_smog: Label = null
 var whiteout: ColorRect = null           # Skyfall Isles: falling through the clouds
+var hint_box: PanelContainer = null      # context hint popup ("[E] Climb your vine ladder…")
+var hint_key: PanelContainer = null
+var hint_key_label: Label = null
+var hint_label: Label = null
 var mote_row: HBoxContainer = null       # Skyfall Isles: "Sun Motes" + one drawn pip per mote
 var _mote_state := Vector3i(-1, -1, -1)
 var end_root: Control
@@ -171,7 +175,7 @@ const HINT_RESCUE := "Hearts: a touch from your rival or CO₂ costs a heart —
 	+ "Sip white O₂ to supercharge your sprint (slower drain, faster recovery)\n" \
 	+ "WASD move   ·   Shift sprint   ·   drag mouse to look"
 const HINT_SKY := "Three Sun Motes in your colour float on the outer isles — one is always on your PREY's home isle. Touch all three to light your Spark\n" \
-	+ "A lit Spark opens the Sky Spire: climb the ramps, or stand on your own shortcut pad (Fire vent · Water lift · Leaf vine) opposite each ramp\n" \
+	+ "A lit Spark opens the Sky Spire: climb the stairs, or step on your own shortcut pad (Fire vent · Water lift · Leaf vine ladder) and press E\n" \
 	+ "Stand in the ring on the top platform for 2s to ring the bell — first to 3 rings wins   ·   a tag on the spire costs a heart AND a tier\n" \
 	+ "A predator's touch shoves you 6 m — mind the edges: walk off and you fall through the clouds\n" \
 	+ "Every 75s the ECLIPSE reverses the food chain for 15s   ·   every minute the smog sea rises and swallows the outer isles\n" \
@@ -478,6 +482,41 @@ func _build_hud() -> void:
 	timer_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	timer_label.custom_minimum_size = Vector2(190, 0)
 	timer_label.text = "Find your key"
+
+	# context hint: pops up when you are near something you can use (a ladder, a
+	# lift, stairs…) and says what to press / do. Hidden otherwise.
+	hint_box = PanelContainer.new()
+	var hsb := StyleBoxFlat.new()
+	hsb.bg_color = Color(1.0, 0.95, 0.78, 0.97)
+	hsb.set_corner_radius_all(12)
+	hsb.set_border_width_all(2)
+	hsb.border_color = _c(0xf2a23c)
+	hsb.content_margin_left = 10; hsb.content_margin_right = 12
+	hsb.content_margin_top = 7; hsb.content_margin_bottom = 7
+	hint_box.add_theme_stylebox_override("panel", hsb)
+	hint_box.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	hint_box.visible = false
+	v.add_child(hint_box)
+	var hrow2 := HBoxContainer.new()
+	hrow2.add_theme_constant_override("separation", 9)
+	hint_box.add_child(hrow2)
+	hint_key = PanelContainer.new()
+	var ksb := StyleBoxFlat.new()
+	ksb.bg_color = _c(0x3a3550)
+	ksb.set_corner_radius_all(7)
+	ksb.border_width_bottom = 3
+	ksb.border_color = _c(0x211d30)
+	ksb.content_margin_left = 9; ksb.content_margin_right = 9
+	ksb.content_margin_top = 2; ksb.content_margin_bottom = 3
+	hint_key.add_theme_stylebox_override("panel", ksb)
+	hint_key.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hrow2.add_child(hint_key)
+	hint_key_label = _make_label("E", 17, Color.WHITE)
+	hint_key.add_child(hint_key_label)
+	hint_label = _make_label_left("", 14, _c(0x5a3a20))
+	hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	hint_label.custom_minimum_size = Vector2(250, 0)
+	hrow2.add_child(hint_label)
 
 	# Skyfall Isles clocks (hidden in the other worlds)
 	sky_box = _pill_panel(v)
@@ -842,6 +881,7 @@ func show_hud() -> void:
 	radar.visible = true
 	radar_mask.visible = true
 	if sky_box: sky_box.visible = false   # the sky world re-shows it every frame (set_sky_info)
+	if hint_box: hint_box.visible = false
 
 func show_end(rows: Array, title: String, sub: String) -> void:
 	_hide_all()
@@ -981,3 +1021,15 @@ func set_mote_pips(n: int, total: int, col: Color) -> void:
 		sb.bg_color = col if i < n else Color(col.r, col.g, col.b, 0.12)
 		pip.add_theme_stylebox_override("panel", sb)
 		mote_row.add_child(pip)
+
+# Context hint popup (top-left, under the objective). `key` is drawn as a key cap
+# ("E", "W") — pass "" for a hint with no key. Empty text hides the popup.
+func set_hint(key: String, text: String) -> void:
+	if hint_box == null:
+		return
+	hint_box.visible = text != ""
+	if text == "":
+		return
+	hint_key.visible = key != ""
+	hint_key_label.text = key
+	hint_label.text = text

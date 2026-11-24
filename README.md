@@ -132,7 +132,9 @@ anyone else.* No clans, cages, keys or home tower up here.
 - **Climb.** The spire door opens only for a lit Spark. Five ring terraces, 6 m
   apart; one stair per tier, each 72° further round than the last. Opposite every
   stair are three shortcut pads — a Fire vent, a Water lift, a Leaf vine — and
-  yours carries you up a tier (4 s recharge). Catches only happen between actors on
+  yours carries you up a tier (4 s recharge): step on it, or press **E** beside it.
+  A hint pops up at the top left whenever you are near something you can use,
+  saying what to press or why it won't work for you. Catches only happen between actors on
   the same tier, and a tag on the spire costs a heart **and a tier**.
 - **Ring.** Stand in the glowing ring on the top platform for 2 s to ring the bell.
   It swings for 4 s after any ring. First to three rings wins; at 8:00 the highest

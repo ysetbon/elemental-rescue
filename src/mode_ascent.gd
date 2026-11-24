@@ -57,6 +57,9 @@ const N_SMOG := 4                # single-player CO₂ smog clouds / O₂ breeze
 const N_BUBBLES := 10
 const ELS := ["fire", "water", "grass"]
 const SHORT_NAME := { "fire": "vent", "water": "lift", "grass": "vine" }
+const PAD_NAME := { "fire": "fire vent", "water": "water lift", "grass": "vine ladder" }
+const PAD_KEY_REACH := 2.6       # press E this close to your own pad and you climb at once
+const HINT_REACH := 4.8          # how close before the "what do I press" popup appears
 const BUSY_NONE := 0
 const BUSY_FALL := 1
 const BUSY_FLY := 2
@@ -579,9 +582,12 @@ func _tick_pad(ch: GameChar, dt: float) -> void:
 		ch.pad_t = 0.0
 		return
 	var pp := SkyLayout.pad_pos(k, ch.el)
-	if Vector2(ch.pos.x, ch.pos.z).distance_to(pp) < SkyLayout.SHORTCUT_R:
+	var pd := Vector2(ch.pos.x, ch.pos.z).distance_to(pp)
+	# the local player may also just press E next to the pad (see the hint popup)
+	var keyed: bool = ch.is_player and pd < PAD_KEY_REACH and _climb_pressed()
+	if pd < SkyLayout.SHORTCUT_R or keyed:
 		ch.pad_t += dt
-		if ch.pad_t >= SHORTCUT_CHARGE:
+		if ch.pad_t >= SHORTCUT_CHARGE or keyed:
 			_stat("pad_lifts")
 			ch.pad_t = 0.0
 			ch.pad_cd = SHORTCUT_COOLDOWN
@@ -589,6 +595,87 @@ func _tick_pad(ch: GameChar, dt: float) -> void:
 			_launch(ch, Vector3(land.x, float(k + 1) * SPIRE_TIER_H, land.y), k + 1, PAD_FLIGHT, 1.2)
 	else:
 		ch.pad_t = 0.0
+
+func _climb_pressed() -> bool:
+	return Input.is_physical_key_pressed(KEY_E) or Input.is_physical_key_pressed(KEY_SPACE)
+
+# What can the player use right here, and what do they press? Returns [key, text]
+# for the top-left hint popup (key "" = no key cap, text "" = no popup).
+func _context_hint(p: GameChar) -> Array:
+	if p.busy != BUSY_NONE or not p.alive or not g.running:
+		return ["", ""]
+	var el := p.el
+	var k := p.tier
+	var me := Vector2(p.pos.x, p.pos.z)
+	var r := me.length()
+	# keys only where a keyboard drives this avatar's pad directly (guests' pads
+	# charge on the host, phones have no keys) — everyone can simply stand on it
+	var keys: bool = g.mode != g.Mode.CLIENT and not g.mobile
+	if k >= SPIRE_TIERS:
+		if r > BELL_ZONE_R and bell_settle <= 0.0:
+			return ["", "Step into the glowing ring and hold still for 2 s to ring the bell"]
+		return ["", ""]
+	if r <= SkyLayout.HEART_R + 1.0:
+		# ---- the three shortcut pads on this tier (vent / lift / vine ladder)
+		var near_el := ""
+		var bd := HINT_REACH
+		for e in ELS:
+			var d := me.distance_to(SkyLayout.pad_pos(k, e))
+			if d < bd:
+				bd = d
+				near_el = e
+		if near_el != "":
+			if near_el != el:
+				return ["", "That is %s's %s — only %s can ride it. Yours is the %s (your glowing pad on this tier)" % [
+					g.ELEMENTS[near_el]["label"], PAD_NAME[near_el], g.ELEMENTS[near_el]["label"], PAD_NAME[el]]]
+			if k == 0 and not lit(el):
+				return ["", "Your %s — it wakes up once your Spark is lit (3 Sun Motes)" % PAD_NAME[el]]
+			if p.pad_cd > 0.0:
+				return ["", "Your %s is recharging… %ds" % [PAD_NAME[el], int(ceil(p.pad_cd))]]
+			var up := ("the bell platform" if k + 1 >= SPIRE_TIERS else "tier %d" % (k + 1))
+			if keys:
+				return ["E", "Climb your %s up to %s  (or just stand on the pad)" % [PAD_NAME[el], up]]
+			return ["", "Stand on the glowing pad to ride your %s up to %s" % [PAD_NAME[el], up]]
+		# ---- the stair up from this tier (tier 0: the spire door)
+		var R := SkyLayout.tier_inner(k)
+		var run := float(SkyLayout.SPIRE_RAMP_RUN[k])
+		var arc := absf(SkyLayout.ang_diff(SkyLayout.ang_of(me.x, me.y), SkyLayout.ramp_ang(k))) * deg_to_rad(1.0) * r
+		if arc < R * deg_to_rad(SPIRE_RAMP_ARC * 0.5) + 3.0 and r < R + run + 3.5 and r >= R - 0.2:
+			if k == 0 and not lit(el):
+				return ["", "The spire door — it opens once your Spark is lit (3 Sun Motes)"]
+			var up2 := ("the bell platform" if k + 1 >= SPIRE_TIERS else "tier %d" % (k + 1))
+			return ["W" if keys else "", "Walk up the stairs to %s" % up2]
+	if k == 0:
+		# ---- thermal vents
+		for v in [SkyLayout.VENT_HOME, SkyLayout.VENT_HEART]:
+			if me.distance_to(v) < HINT_REACH:
+				if el != "fire":
+					return ["", "Fire's thermal vent — only Fire can ride it (you just get a hop)"]
+				return ["", "Thermal vent — stand on it and it flings you to %s" % ("Heart Isle" if v == SkyLayout.VENT_HOME else "Ember Crag")]
+		# ---- seed gaps
+		for i in SkyLayout.SEEDS.size():
+			var sd: Dictionary = SkyLayout.SEEDS[i]
+			if me.distance_to(sd["ma"]) < HINT_REACH or me.distance_to(sd["mb"]) < HINT_REACH:
+				var left := float(seed_until[i]) - elapsed
+				if left > 0.0:
+					return ["", "The vine bridge is up — cross now!  %ds left" % int(ceil(left))]
+				if el == "grass":
+					return ["", "Seed — stand on it for 1.5 s to grow a vine bridge across the gap (anyone may cross for 10 s)"]
+				return ["", "A sprouting seed — only a Leaf can grow the vine bridge here"]
+		# ---- the private routes, where they leave an isle
+		var node := SkyLayout.node_of(me.x, me.y)
+		if node != "":
+			var is_: Dictionary = SkyLayout.NODES[node]
+			var rim: bool = me.distance_to(Vector2(is_["x"], is_["z"])) > float(is_["r"]) - 6.0
+			if rim and SkyLayout.seg_dist(me.x, me.y, SkyLayout.VINE["ax"], SkyLayout.VINE["az"], SkyLayout.VINE["bx"], SkyLayout.VINE["bz"]) < SkyLayout.VINE_HW + 2.5:
+				if el == "grass":
+					return ["W" if keys else "", "Your vine — walk it straight to %s" % ("Heart Isle" if node == "h_grass" else "Canopy Grove")]
+				return ["", "Leaf's vine — only Leaf can walk it. Step on it and you fall!"]
+			if rim and SkyLayout.seg_dist(me.x, me.y, SkyLayout.STREAM["ax"], SkyLayout.STREAM["az"], SkyLayout.STREAM["bx"], SkyLayout.STREAM["bz"]) < SkyLayout.STREAM_HW + 1.5:
+				if el == "water":
+					return ["W" if keys else "", "Your sky stream — surf it at double speed"]
+				return ["", "Water's sky stream — you can wade across, but slowly"]
+	return ["", ""]
 
 func _tick_bell(ch: GameChar, dt: float) -> void:
 	if ch.tier != SPIRE_TIERS or radius(ch.pos) > BELL_ZONE_R or bell_settle > 0.0:
@@ -1231,6 +1318,8 @@ func _update_hud() -> void:
 		entries.append({ "el": e, "label": g.ELEMENTS[e]["label"], "score": 0, "alive": true, "me": e == el,
 			"text": "%s  T%d · %d/%d" % [g.ELEMENTS[e]["label"], int(tier_el[e]), int(rings_el[e]), BELL_RINGS_TO_WIN] })
 	ui.set_board(entries)
+	var hint := _context_hint(p)
+	ui.set_hint(hint[0], hint[1])
 	ui.radar.sky_smog_r = smog_r()
 	ui.radar.sky_el = el
 	ui.radar.sky_vines = vines_mask()
