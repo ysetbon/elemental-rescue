@@ -45,3 +45,24 @@ var steer_dir := Vector3.ZERO
 var steer_phase: int = randi() & 1
 
 var radar_color := Color.WHITE
+
+# --- Skyfall Isles / Ascent (see ModeAscent) ---
+var tier: int = 0                 # spire terrace: 0 = ground layer, 1..5 = tiers (5 = bell platform)
+var in_ramp: bool = false         # on the stair wedge climbing to the next tier
+var busy: int = 0                 # 0 walking | 1 falling through the clouds | 2 flying (vent / shortcut pad)
+var busy_t: float = 0.0
+var fly_dur: float = 0.0
+var fly_from := Vector3.ZERO
+var fly_to := Vector3.ZERO
+var fly_tier: int = 0
+var fly_arc: float = 0.0
+var kb_vel := Vector3.ZERO        # the 6 m shove after a predator's touch
+var kb_t: float = 0.0
+var ring_prog: float = 0.0        # 0..1 bell-ring channel
+var pad_t: float = 0.0            # shortcut pad charge
+var pad_cd: float = 0.0           # shortcut pad recharge
+var vent_t: float = 0.0
+var vent_lock: bool = false       # just landed on a vent: step off before it fires again
+var smog_t: float = 0.0           # time spent in the smog sea since the last heart it cost
+var tier_at: float = 0.0          # round time this actor reached its current tier (tie-break)
+var ai: Dictionary = {}           # rival AI scratch state (path, target, chase timers)
