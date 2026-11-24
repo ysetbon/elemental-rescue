@@ -1271,6 +1271,8 @@ func _client_radar_blips(blips: Array) -> void:
 		var g = ghosts.get(nid)
 		if g == null or not is_instance_valid(g):
 			continue
+		if sky != null and (fl & (1 << 9)) != 0:
+			continue                             # Ascent's little cage helpers are not radar blips
 		var kind: String = _KIND_NAME[fl & 3]
 		var col: Color
 		if kind == "o2":
@@ -3906,7 +3908,7 @@ func _client_get_ghost(nid: int, flags: int) -> CharVisual:
 	var el: String = _EL_NAME[(flags >> 2) & 3]
 	var cv := _build_char_visual(kind, el)
 	if (flags & (1 << 9)) != 0:            # freed twin → the smaller rescued sibling (see _release_twin)
-		cv.scale = Vector3.ONE * 0.8
+		cv.scale = Vector3.ONE * (SkyQuests.HELPER_SCALE if sky != null else 0.8)
 	if (flags & (1 << 7)) != 0:            # clan ally → render at clan scale + a selection shroud
 		cv.scale = Vector3.ONE * CLAN_SCALE
 		var sel := MeshLib.sphere(1.25, MeshLib.unlit_mat(MeshLib.rgb(0x8c8c96), 0.45), 14, 10)
@@ -4231,6 +4233,8 @@ func _broadcast_snapshot() -> void:
 	list.append_array(actors)
 	list.append_array(npcs)
 	list.append_array(allies)            # recruited clan allies replicate as normal ghosts
+	if sky != null:
+		list.append_array(sky.quests.helpers)   # freed cage helpers (flagged as twins: small + friendly)
 	for el in twin_by_el:
 		if twin_by_el[el] != null:
 			list.append(twin_by_el[el])
@@ -5349,6 +5353,23 @@ func _sky_debug_setup() -> void:
 			sky.motes_el[el] = int(_sky_dbg["skymotes"])
 	if _sky_dbg.has("skyrings"):
 		sky.rings_el[player.el] = int(_sky_dbg["skyrings"])
+	if _sky_dbg.has("skytasks"):
+		# skytasks=N: every team has finished the first N tier tasks; skytask=K: mine has been given task K
+		for el in sky.ELS:
+			sky.quests.done[el] = int(_sky_dbg["skytasks"])
+	if _sky_dbg.has("skytask"):
+		sky.quests._accept(player.el, int(_sky_dbg["skytask"]))
+	if _sky_dbg.has("skyhelp"):
+		# skyhelp=N: open the N nearest full cages for my team
+		for _i in int(_sky_dbg["skyhelp"]):
+			var bi := -1
+			var bd := 1.0e20
+			for i in sky.quests.cages.size():
+				var cg: Dictionary = sky.quests.cages[i]
+				if String(cg["el"]) != "" and player.pos.distance_to(cg["pos"]) < bd:
+					bd = player.pos.distance_to(cg["pos"]); bi = i
+			if bi >= 0:
+				sky.quests._free_cage(bi, player)
 	if _sky_dbg.has("skytp") and not String(_sky_dbg["skytp"]).contains(","):
 		# skytp=mote|smog|bubble|predator — stand a few metres from the nearest one
 		var what := String(_sky_dbg["skytp"])
