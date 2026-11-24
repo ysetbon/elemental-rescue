@@ -921,6 +921,7 @@ func set_channel(label: String, pct: float) -> void:
 
 func set_cave(text: String) -> void:
 	cave_label.visible = text != ""
+	(cave_label.get_parent() as Control).visible = text != ""   # hide the pill too, not just its label
 	cave_label.text = text
 
 func set_stamina(pct: float) -> void:

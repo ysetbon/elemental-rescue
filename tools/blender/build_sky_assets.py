@@ -4,6 +4,10 @@
     ~/bpy-venv/bin/python tools/blender/build_sky_assets.py sky_bell   # a subset
     ... --no-preview   skips the preview renders
 
+Previews render with EEVEE on Mesa's software GL; a bare container needs
+`apt-get install -y libegl1 libegl-mesa0 libgl1-mesa-dri libgles2` for that (the GLB
+export itself needs no GPU - use --no-preview without those packages).
+
 One function per asset (registered with @asset). Each builds its objects into an
 empty scene; main() exports models/sky/<name>.glb and renders previews/<name>.png.
 See sky_lib.py for the coordinate / colour conventions shared with the Godot code.

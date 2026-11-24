@@ -362,8 +362,11 @@ void fragment() {
 	float n = texture(noise_tex, p * 0.012 + vec2(TIME * 0.012, -TIME * 0.008)).r * 0.6
 		+ texture(noise_tex, p * 0.037 - vec2(TIME * 0.02, TIME * 0.011)).r * 0.4;
 	float edge = smoothstep(safe_r - 2.0 - n * 5.0, safe_r + 4.0, r);
+	// nothing before the first rise; melt into the cloud sea past the map's rim
+	float on = 1.0 - smoothstep(184.0, 189.5, safe_r);
+	float rim = 1.0 - smoothstep(196.0, 250.0, r);
 	ALBEDO = mix(vec3(0.34, 0.29, 0.42), vec3(0.52, 0.47, 0.58), n);
-	ALPHA = edge * (0.62 + n * 0.3);
+	ALPHA = edge * (0.62 + n * 0.3) * on * rim;
 }
 """
 

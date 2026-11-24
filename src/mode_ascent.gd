@@ -50,7 +50,11 @@ const SHOVE_TIME := 0.3          # the 6 m shove plays out over this long
 const FALL_TIME := 3.0           # seconds from stepping off an edge to respawning
 const FALL_CAM_TIME := 1.0       # the camera follows the fall this long, then white-out
 const PAD_FLIGHT := 0.75
-const AI_SPEED := 0.94           # rivals jog a touch slower than a (sprint-capable) human
+const AI_SPEED := 0.9            # rivals jog a touch slower than a (sprint-capable) human…
+const AI_GATHER_SPEED := 0.62    # …and stroll while hunting motes, so a human who hustles gets there first
+const AI_FLEE_BOOST := 1.22      # but they bolt when something that eats them is close
+const N_SMOG := 4                # single-player CO₂ smog clouds / O₂ breeze bubbles in this world
+const N_BUBBLES := 10
 const ELS := ["fire", "water", "grass"]
 const SHORT_NAME := { "fire": "vent", "water": "lift", "grass": "vine" }
 const BUSY_NONE := 0
@@ -158,6 +162,7 @@ func start_round() -> void:
 	_last_eclipse = false
 	_last_rise = 0
 	_was_lit = false
+	stats = {}
 	for el in ELS:
 		motes_el[el] = 0
 		rings_el[el] = 0
@@ -286,6 +291,7 @@ func constrain(ch: GameChar) -> void:
 		var insec := SkyLayout.in_sector(nang, k)
 		if nr < R:
 			if insec and ch.in_ramp:
+				_stat("ramp_climbs")
 				k += 1                           # top of the stair: the next terrace
 				ch.in_ramp = false
 				_enter_tier(ch, k)
@@ -349,6 +355,11 @@ func _door_closed(ch: GameChar) -> void:
 func _start_fall(ch: GameChar) -> void:
 	if g.mode == g.Mode.CLIENT:
 		return                                   # the host decides; the busy flag arrives by snapshot
+	_stat("falls")
+	if _trace:
+		var pth: Array = ch.ai.get("path", [])
+		print("[fall %s] %s%s at (%.1f,%.1f) vel=(%.1f,%.1f) kb=%.2f flee=%s vines=%d next=%s" % [g._fmt_time(elapsed), ch.el, "*" if ch.is_human else "",
+			ch.pos.x, ch.pos.z, ch.vel.x, ch.vel.z, ch.kb_t, str(ch.ai.get("flee", false)), vines_mask(), str(pth[0]) if not pth.is_empty() else "-"])
 	ch.busy = BUSY_FALL
 	ch.busy_t = FALL_TIME
 	ch.ring_prog = 0.0
@@ -380,6 +391,7 @@ func on_hit(victim: GameChar, attacker: GameChar) -> void:
 		return
 	if victim.tier > 0:
 		# on the spire a tag costs height instead of a shove
+		_stat("tier_drops")
 		var nt: int = maxi(0, victim.tier - SPIRE_HIT_DROP)
 		var ang := SkyLayout.ang_of(victim.pos.x, victim.pos.z)
 		var p := SkyLayout.pol(ang, SkyLayout.band_mid(nt))
@@ -395,11 +407,13 @@ func on_hit(victim: GameChar, attacker: GameChar) -> void:
 		var d := flat(victim.pos - attacker.pos)
 		if d.length() < 0.05:
 			d = Vector3(randf() - 0.5, 0.0, randf() - 0.5)
+		_stat("shoves")
 		victim.kb_vel = d.normalized() * (SHOVE_DIST / SHOVE_TIME)
 		victim.kb_t = SHOVE_TIME
 
 # Game._respawn calls this (0 hearts → home, keeping the Spark and its motes).
 func on_respawn(ch: GameChar) -> void:
+	_stat("knockouts")
 	ch.tier = 0
 	ch.busy = BUSY_NONE
 	ch.in_ramp = false
@@ -437,7 +451,7 @@ func tick(dt: float) -> void:
 	_tick_seeds(dt)
 	_tick_motes(dt)
 	_announce()
-	if autopilot:
+	if autopilot or _trace:
 		_debug_log(dt)
 	if elapsed >= ASCENT_ROUND_TIME:
 		_finish_on_time()
@@ -508,6 +522,7 @@ func _land_after_fall(ch: GameChar) -> void:
 		ch.group.position = ch.pos
 
 func _smog_hit(ch: GameChar) -> void:
+	_stat("smog_hits")
 	ch.hp -= 1
 	if ch.hp <= 0:
 		g._respawn(ch)
@@ -547,6 +562,7 @@ func _tick_vent(ch: GameChar, dt: float) -> void:
 	if dh < SkyLayout.VENT_R or dc < SkyLayout.VENT_R:
 		ch.vent_t += dt
 		if ch.vent_t >= SkyLayout.VENT_DWELL:
+			_stat("vent_flights")
 			ch.vent_t = 0.0
 			ch.vent_lock = true
 			var to: Vector2 = SkyLayout.VENT_HEART if dh < dc else SkyLayout.VENT_HOME
@@ -566,6 +582,7 @@ func _tick_pad(ch: GameChar, dt: float) -> void:
 	if Vector2(ch.pos.x, ch.pos.z).distance_to(pp) < SkyLayout.SHORTCUT_R:
 		ch.pad_t += dt
 		if ch.pad_t >= SHORTCUT_CHARGE:
+			_stat("pad_lifts")
 			ch.pad_t = 0.0
 			ch.pad_cd = SHORTCUT_COOLDOWN
 			var land := SkyLayout.pol(SkyLayout.pad_ang(k, ch.el), maxf(1.6, SkyLayout.tier_inner(k) - 1.3))
@@ -582,6 +599,7 @@ func _tick_bell(ch: GameChar, dt: float) -> void:
 		_ring(ch)
 
 func _ring(ch: GameChar) -> void:
+	_stat("rings")
 	rings_el[ch.el] = int(rings_el[ch.el]) + 1
 	bell_settle = BELL_SETTLE
 	ch.score += 50
@@ -622,6 +640,7 @@ func _tick_seeds(dt: float) -> void:
 		if on:
 			seed_grow[i] = float(seed_grow[i]) + dt / SkyLayout.SEED_GROW
 			if float(seed_grow[i]) >= 1.0:
+				_stat("seed_vines")
 				seed_grow[i] = 0.0
 				seed_until[i] = elapsed + SkyLayout.SEED_LIFE
 				if g.ui and g.player and g.player.el == "grass":
@@ -646,6 +665,7 @@ func _tick_motes(dt: float) -> void:
 			m["rel_t"] = float(m["rel_t"]) + dt
 			if float(m["rel_t"]) >= MOTE_RELOCATE_DELAY:
 				m["rel_t"] = 0.0
+				_stat("mote_relocations")
 				m["from"] = m["pos"]
 				m["to"] = _safe_mote_spot(m["pos"])
 				m["drift"] = 0.0
@@ -696,6 +716,10 @@ func _announce() -> void:
 			g.ui.toast("☁ The smog sea rises!  Safe ground shrinks to %dm" % int(smog_goal()))
 
 var _dbg_t := 0.0
+var _trace := OS.has_environment("ASCENT_LOG")
+var stats := {}                       # QA counters (falls, drops, shoves, rings, pads, vents, seeds, smog hits, KOs)
+func _stat(k: String) -> void:
+	stats[k] = int(stats.get(k, 0)) + 1
 # QA trace for hands-off rounds (`-- autostart fire sky autopilot`): one line every 15 s.
 func _debug_log(dt: float) -> void:
 	_dbg_t -= dt
@@ -750,8 +774,8 @@ func _finish(winner_el: String, reason: String) -> void:
 			"winner": el == winner_el,
 			"detail": "🔔 %d   ·   tier %d   ·   motes %d" % [int(s["rings"]), int(s["tier"]), int(motes_el[el])],
 		})
-	print("[ascent] round over at %s — %s wins (%s)  rings=%s tiers=%s motes=%s" % [
-		g._fmt_time(elapsed), winner_el, reason, str(rings_el), str(tier_el), str(motes_el)])
+	print("[ascent] round over at %s — %s wins (%s)  rings=%s motes=%s  stats=%s" % [
+		g._fmt_time(elapsed), winner_el, reason, str(rings_el), str(motes_el), str(stats)])
 	g._sky_end(reason, winner_el, standings)
 
 # ------------------------------------------------------------------ rival AI
@@ -780,7 +804,7 @@ func ai_dir(ch: GameChar, dt: float) -> Vector3:
 	for n in g.npcs:
 		if n.kind == "co2" and n.alive and n.co_timer <= 0.0 and n.tier == ch.tier and not safe_home:
 			var d2 := flat_dist(ch.pos, n.pos)
-			if d2 < minf(td, 9.0):
+			if d2 < minf(td, 11.0):
 				td = d2; threat_pos = n.pos
 	var dir := Vector3.ZERO
 	if prey != null and float(st["chase_cd"]) <= 0.0 and chase_t < 2.5:
@@ -792,16 +816,27 @@ func ai_dir(ch: GameChar, dt: float) -> Vector3:
 			st["chase_cd"] = 3.0
 		if prey == null:
 			st["chase_t"] = 0.0
-		dir = _goal_dir(ch)
+		# a beat to gloat over each new mote, and a breather after being chased down a stair
+		# (otherwise prey yo-yos on the stair in front of a predator that holds the terrace)
+		var seen := int(st.get("motes_seen", 0))
+		if int(motes_el[ch.el]) > seen:
+			st["motes_seen"] = int(motes_el[ch.el])
+			st["hold"] = 1.6
+		if ch.tier < int(st.get("last_tier", 0)) and bool(st.get("flee", false)):
+			st["hold"] = 2.5
+		st["last_tier"] = ch.tier
+		st["hold"] = float(st.get("hold", 0.0)) - dt
+		dir = Vector3.ZERO if float(st["hold"]) > 0.0 else _goal_dir(ch)
 	if dir.length_squared() > 1e-6:
 		dir = dir.normalized()
+	st["flee"] = td < 13.0 and ch.invuln_timer <= 0.0
 	if td < 13.0 and ch.invuln_timer <= 0.0:
 		var away := flat(ch.pos - threat_pos)
 		if away.length_squared() > 1e-6:
 			dir = dir * 0.6 + away.normalized() * ((13.0 - td) / 13.0 * 1.6)
 			if dir.length_squared() > 1e-6:
 				dir = dir.normalized()
-	if ch.tier == 0 and dir != Vector3.ZERO and radius(ch.pos) > SkyLayout.HEART_R - 0.5:
+	if ch.tier == 0 and dir != Vector3.ZERO:
 		dir = _edge_safe(ch, dir)
 	return dir
 
@@ -825,17 +860,27 @@ func _edge_safe(ch: GameChar, dir: Vector3) -> Vector3:
 		if not found:
 			return Vector3.ZERO
 	if SkyLayout.node_of(ch.pos.x, ch.pos.z) == "":
-		# on a bridge / route: pull toward the nearest centre line
+		# on a bridge / route: there is only forward or back. Lock the heading to the
+		# span's axis (so a panicked swerve can't carry us over the side) and lean
+		# back toward its centre line.
 		var best_d := INF
+		var best_s: Dictionary = {}
 		var pull := Vector3.ZERO
 		for s in _segments_for(ch.el, vm):
 			var q := _closest_on(ch.pos.x, ch.pos.z, s)
 			var d := Vector2(q.x - ch.pos.x, q.y - ch.pos.z).length()
 			if d < best_d:
 				best_d = d
+				best_s = s
 				pull = Vector3(q.x - ch.pos.x, 0.0, q.y - ch.pos.z)
-		if best_d < 6.0 and best_d > 0.3:
-			out = (out + pull.normalized() * clampf(best_d / 1.6, 0.0, 1.2)).normalized()
+		if best_d < 6.0:
+			var axis := Vector3(float(best_s["bx"]) - float(best_s["ax"]), 0.0, float(best_s["bz"]) - float(best_s["az"])).normalized()
+			var along := dir.dot(axis)
+			if absf(along) < 0.25:
+				along = ch.vel.dot(axis)
+			out = axis * (1.0 if along >= 0.0 else -1.0)
+			if best_d > 0.25:
+				out = (out + pull.normalized() * clampf(best_d / 1.2, 0.0, 1.3)).normalized()
 	return out
 
 func _segments_for(el: String, vm: int) -> Array:
@@ -1076,11 +1121,22 @@ func update_ai(ch: GameChar, dt: float) -> void:
 	else:
 		if ch.tier == 0 and radius(ch.pos) > SkyLayout.HEART_R:
 			dir = g._avoidance_and_walls(ch, dir)
-		var target: Vector3 = dir.normalized() * (ch.speed * AI_SPEED * g.terrain_mult(ch) * g._slow_mult(ch))
+		var pace := AI_SPEED if (ch.tier > 0 or lit(ch.el)) else AI_GATHER_SPEED
+		if bool(ch.ai.get("flee", false)):
+			pace = AI_SPEED * AI_FLEE_BOOST
+		var target: Vector3 = dir.normalized() * (ch.speed * pace * g.terrain_mult(ch) * g._slow_mult(ch))
 		ch.vel = ch.vel.lerp(target, 1.0 - pow(0.0005, dt))
 	ch.vel.y = 0.0
+	var px := ch.pos.x
+	var pz := ch.pos.z
 	ch.pos.x += ch.vel.x * dt
 	ch.pos.z += ch.vel.z * dt
+	# a rival never WALKS off an edge by itself (a shove or a withered vine still drops it)
+	if ch.tier == 0 and not SkyLayout.on_ground(ch.pos.x, ch.pos.z, ch.el, vines_mask(), 0.2) \
+			and SkyLayout.on_ground(px, pz, ch.el, vines_mask(), 0.2):
+		ch.pos.x = px
+		ch.pos.z = pz
+		ch.vel = Vector3.ZERO
 	g.resolve_collisions(ch)
 
 # Debug autopilot: the same brain steers the local human through the normal input
@@ -1108,6 +1164,18 @@ func frame(dt: float) -> void:
 			if float(ping["t"]) > 4.0:
 				ping = {}
 		_announce()
+	if g.mode == g.Mode.CLIENT and g.net_log and g.running and g.player != null:
+		_dbg_t -= dt
+		if _dbg_t <= 0.0:
+			_dbg_t = 15.0
+			var me: GameChar = g.player
+			var seen := 0
+			for mo in motes:
+				if not mo["taken"]:
+					seen += 1
+			print("[ascent-guest %s] me=%s hp%d T%d busy%d (%.0f,%.0f,y%.1f)  motes=%s rings=%s tiers=%s  motes-left=%d bell=%.1f ecl=%s smog=%.0f ghosts=%d" % [
+				g._fmt_time(elapsed), me.el, me.hp, me.tier, me.busy, me.pos.x, me.pos.z, me.pos.y, str(motes_el), str(rings_el), str(tier_el),
+				seen, bell_settle, str(eclipse_active()), smog_r(), g.ghosts.size()])
 	var lp: GameChar = g.player
 	_fall_view = (_fall_view + dt) if (lp != null and lp.busy == BUSY_FALL) else 0.0
 	if view:

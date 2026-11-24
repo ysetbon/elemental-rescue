@@ -1200,7 +1200,7 @@ func _update_camera(dt: float) -> void:
 				var full := d
 				d = _sky_cam_dist(cp, d)
 				if d < full:
-					cam_h = lerpf(8.6, cam_h, clampf(d / CAM_DIST, 0.0, 1.0))
+					cam_h = lerpf(6.8, cam_h, clampf(d / CAM_DIST, 0.0, 1.0))
 				if not sky.fall_frozen():
 					_sky_cam_y = cp.y        # a fall: follow for a second, then let them drop away
 				base_y = _sky_cam_y
@@ -2465,9 +2465,10 @@ func _check_catches() -> void:
 				continue
 			if n.pos.distance_to(v.pos) < _catch_dist(n, v):
 				var hit_player: bool = v.is_player or v.is_human   # any human hit → CO₂ spends its oxygen, drops to CO
+				var landed: bool = v.invuln_timer <= 0.0
 				_take_hit(v, n)
-				if hit_player:
-					_co2_to_co(n)
+				if hit_player or (sky != null and landed):
+					_co2_to_co(n)          # sky: every tag spends the cloud's oxygen (rivals included)
 				break
 	# while you're disguised, O₂ (whites) hunt the black figure and bite a heart off
 	if _is_disguised() and player and player.alive and player.invuln_timer <= 0.0 and not inside_own_room(player):
@@ -3414,6 +3415,9 @@ func _spawn_match(humans: Array, local_el: String = "") -> void:
 	# (single-player keeps the full set.)
 	var n_o2 := N_O2 if mode == Mode.SINGLE else (0 if mode == Mode.SERVER else N_O2_ONLINE)
 	var n_co2 := N_CO2 if mode == Mode.SINGLE else (0 if mode == Mode.SERVER else N_CO2_ONLINE)
+	if sky != null and mode == Mode.SINGLE:
+		n_o2 = ModeAscent.N_BUBBLES    # the isles are small and the bridges narrow: fewer gases
+		n_co2 = ModeAscent.N_SMOG
 	for i in n_o2:
 		var o := make_character("o2")
 		o.pos = random_spot()
@@ -4062,6 +4066,8 @@ func _host_process(delta: float) -> void:
 	if sky != null:
 		sky.frame(dt)
 	_update_camera(dt)
+	if sky != null:
+		_sky_debug_tick(delta)
 	if net_log:
 		_nl_host_tick(dt)
 
@@ -4452,6 +4458,8 @@ func _client_process(delta: float) -> void:
 	if sky != null:
 		sky.frame(dt)                    # mirrored Ascent state → visuals + HUD
 	_update_camera(dt)
+	if sky != null:
+		_sky_debug_tick(delta)
 	_client_update_hud()
 	_client_clan_nudge()
 	if net_log:
@@ -5318,8 +5326,10 @@ func _sky_end(reason: String, winner_el: String, standings: Array) -> void:
 #   skymotes=<n>     give every team n Sun Motes
 #   skytp=<x>,<z>[,<tier>]  place the player
 #   skyyaw=<deg>     camera yaw      skyrings=<n>  give the player's team n rings
+#   skycam=<x>,<y>,<z>,<lx>,<ly>,<lz>  park the camera   skyhud=0  hide the HUD   skyfog=<mult>
 #   skyshot=<path>   save a PNG of the viewport after skywait=<secs> (default 3) and quit
 var _sky_dbg := {}
+var _sky_dbg_parsed := false
 var _sky_dbg_t := 0.0
 
 func _sky_debug_setup() -> void:
@@ -5345,8 +5355,28 @@ func _sky_debug_setup() -> void:
 		cam_yaw = atan2(player.pos.x, player.pos.z)
 	if _sky_dbg.has("skyyaw"):
 		cam_yaw = deg_to_rad(float(_sky_dbg["skyyaw"]))
+	if _sky_dbg.has("skyhud"):
+		ui.visible = int(_sky_dbg["skyhud"]) != 0
+	if _sky_dbg.has("skyfog") and world_env != null:
+		world_env.environment.fog_density = FOG_DENSITY * float(_sky_dbg["skyfog"])
 
 func _sky_debug_tick(delta: float) -> void:
+	if not _sky_dbg_parsed:
+		_sky_dbg_parsed = true
+		if _sky_dbg.is_empty():
+			for a in OS.get_cmdline_user_args():    # online QA (nettest): only the capture keys apply
+				var kv := String(a).split("=", true, 1)
+				if kv.size() == 2 and kv[0] in ["skyshot", "skywait", "skyhud", "skycam"]:
+					_sky_dbg[kv[0]] = kv[1]
+	if not running:
+		return
+	if _sky_dbg.has("skycam"):
+		# skycam=<x>,<y>,<z>,<lookx>,<looky>,<lookz> — a parked vista camera
+		var c := String(_sky_dbg["skycam"]).split(",")
+		if c.size() >= 6:
+			_cam_freeze = true
+			camera.position = Vector3(float(c[0]), float(c[1]), float(c[2]))
+			camera.look_at(Vector3(float(c[3]), float(c[4]), float(c[5])), Vector3.UP)
 	if not _sky_dbg.has("skyshot"):
 		return
 	_sky_dbg_t += delta
