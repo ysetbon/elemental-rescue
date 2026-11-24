@@ -630,7 +630,8 @@ func _context_hint(p: GameChar) -> Array:
 				return ["", "That is %s's %s — only %s can ride it. Yours is the %s (your glowing pad on this tier)" % [
 					g.ELEMENTS[near_el]["label"], PAD_NAME[near_el], g.ELEMENTS[near_el]["label"], PAD_NAME[el]]]
 			if k == 0 and not lit(el):
-				return ["", "Your %s — it wakes up once your Spark is lit (3 Sun Motes)" % PAD_NAME[el]]
+				return ["", "Your %s is asleep. First collect your %d Sun Motes (you have %d) — they are the stars in your colour on the radar. Then come back and it will carry you up." % [
+					PAD_NAME[el], ASCENT_MOTES_NEEDED, int(motes_el[el])]]
 			if p.pad_cd > 0.0:
 				return ["", "Your %s is recharging… %ds" % [PAD_NAME[el], int(ceil(p.pad_cd))]]
 			var up := ("the bell platform" if k + 1 >= SPIRE_TIERS else "tier %d" % (k + 1))
@@ -643,7 +644,7 @@ func _context_hint(p: GameChar) -> Array:
 		var arc := absf(SkyLayout.ang_diff(SkyLayout.ang_of(me.x, me.y), SkyLayout.ramp_ang(k))) * deg_to_rad(1.0) * r
 		if arc < R * deg_to_rad(SPIRE_RAMP_ARC * 0.5) + 3.0 and r < R + run + 3.5 and r >= R - 0.2:
 			if k == 0 and not lit(el):
-				return ["", "The spire door — it opens once your Spark is lit (3 Sun Motes)"]
+				return ["", "The spire door is shut. First collect your %d Sun Motes (you have %d) — the stars in your colour on the radar." % [ASCENT_MOTES_NEEDED, int(motes_el[el])]]
 			var up2 := ("the bell platform" if k + 1 >= SPIRE_TIERS else "tier %d" % (k + 1))
 			return ["W" if keys else "", "Walk up the stairs to %s" % up2]
 	if k == 0:
