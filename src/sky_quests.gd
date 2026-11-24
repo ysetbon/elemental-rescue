@@ -24,6 +24,11 @@ extends RefCounted
 #     area, circling it and darting in to slow it every few seconds;
 #   - otherwise it keeps a loose distance. It does not shadow its leader: it waits
 #     where it is and only trots closer once they are well away.
+# CAGE LOCKS. Not every cage opens from the start. The three on the wild isles are a
+# side quest: anyone may open them at any time, even before the Spark is lit. The
+# three on Heart Isle open once your Spark is lit, and Roost Rock's two once you have
+# finished the tier 1 / tier 2 task — those hold a sturdier friend (it soaks one
+# more cloud and stays longer).
 # Like the smog, helpers do not climb above tier 2. A helper lasts until it has
 # soaked two smog clouds, a rival that eats its element touches it, or it tires.
 #
@@ -39,6 +44,14 @@ const USE_DWELL := 0.7           # stand this long beside a stone / cage to use 
 const CAGE_REACH := 2.9
 const CAGE_REFILL := 30.0        # an emptied cage holds a new captive after this long
 const CAGE_R := 1.15
+# What a team must have done before each cage opens for it, in CAGE_SPOTS order
+# (Roost Rock x2, the wild isles x3, Heart Isle x3). 0 = a side quest, always open;
+# 1 = Spark lit; 2 = tier 1 task done; 3 = tier 2 task done. See rank().
+const CAGE_NEED := [2, 3, 0, 0, 0, 1, 1, 1]
+const CAGE_HEART_FROM := 5       # cages from this index on stand on Heart Isle
+const CAGE_NEED_TEXT := ["", "your Spark is lit", "the tier 1 task is done", "the tier 2 task is done"]
+const CAGE_NEED_SIGN := ["", "Opens when\nyour Spark is lit", "Opens after\nthe tier 1 task", "Opens after\nthe tier 2 task"]
+const STURDY_NEED := 2           # cages locked this deep hold a sturdier helper
 const BEACON_OFF := 4.4          # the lighting ring: this far from Beacon Isle's centre, toward Heart Isle
 const BEACON_R := 2.6
 const BEACON_TIME := 3.0
@@ -114,7 +127,7 @@ static func shrine_pos() -> Vector3:
 	var c := isle_pos("shrine")
 	return Vector3(c.x, 0.0, c.y)
 
-# Seven cages: two on Roost Rock, one on each wild isle, two against the spire wall
+# Eight cages: two on Roost Rock, one on each wild isle, three against the spire wall
 # on Heart Isle (which the smog sea never reaches). Called once per world build,
 # BEFORE the cages' own colliders are registered, so every cage stands clear of
 # the Blender props; the result is the same on the host and on every guest.
@@ -138,7 +151,7 @@ static func place(obstacles: Array) -> void:
 					pick = q
 					found = true
 		CAGE_SPOTS.append(Vector3(pick.x, 0.0, pick.y))
-	for base in [60.0, 172.0]:
+	for base in [60.0, 172.0, 232.0]:
 		var pick2 := SkyLayout.pol(base, 21.4)
 		for off in [0.0, -7.0, 7.0, -14.0, 14.0]:
 			var q2 := SkyLayout.pol(base + off, 21.4)
@@ -172,9 +185,14 @@ func reset() -> void:
 	if CAGE_SPOTS.is_empty():
 		place([])
 	cages.clear()
-	var first := ["water", "fire", "grass", "fire", "water", "grass", "fire"]
+	# Fair to all three teams (nobody can free the element that eats them): each wild
+	# isle and each Heart Isle cage holds one fixed element, one of each, so every team
+	# can open two of the three in either place. Roost Rock's two start as a random pair.
+	var pair: Array = ELS.duplicate()
+	pair.shuffle()
+	var first := [pair[0], pair[1], "grass", "fire", "water", "grass", "fire", "water"]
 	for i in CAGE_SPOTS.size():
-		cages.append({ "pos": CAGE_SPOTS[i], "el": first[i % first.size()], "refill": 0.0 })
+		cages.append({ "pos": CAGE_SPOTS[i], "el": first[i % first.size()], "home": first[i % first.size()], "refill": 0.0 })
 
 # May this team go up from tier k?  (tier 0: a lit Spark; tiers 1..4: that tier's task)
 func can_go_up(el: String, k: int) -> bool:
@@ -193,6 +211,17 @@ func lost(id: String) -> bool:
 	var is_: Dictionary = SkyLayout.NODES[id]
 	return float(is_["d"]) + float(is_["r"]) * 0.3 > m.smog_goal()
 
+# How far a team has got: 0 = still gathering motes, 1 = Spark lit, then +1 per tier task done.
+func rank(el: String) -> int:
+	return (1 + int(done.get(el, 0))) if m.lit(el) else 0
+
+func cage_need(i: int) -> int:
+	return int(CAGE_NEED[i]) if i < CAGE_NEED.size() else 0
+
+# Has this team got far enough for cage i to open? (the wild-isle cages always are)
+func cage_unlocked(i: int, team: String) -> bool:
+	return rank(team) >= cage_need(i)
+
 # You cannot free the element that eats you — it would never take your side.
 # (The everyday chain, not the eclipse's: a cage does not change its mind for 15 s.)
 func can_free(captive_el: String, team: String) -> bool:
@@ -202,23 +231,18 @@ func can_free(captive_el: String, team: String) -> bool:
 func helper_job(captive_el: String, _team: String) -> String:
 	return "slow %s near you and soak up smog clouds" % g.ELEMENTS[String(g.ELEMENTS[captive_el]["prey"])]["label"]
 
-# A refilled cage takes the element the cages are shortest of, and the two cages on
-# Heart Isle never hold the same one — so every team always has a cage it can open
-# on ground the smog sea never reaches.
+# A Heart Isle cage always refills with its own element (so the three there stay one
+# of each); any other cage takes whichever element the outer cages are shortest of.
 func _refill_el(i: int) -> String:
+	if i >= CAGE_HEART_FROM:
+		return String(cages[i]["home"])
 	var count := { "fire": 0, "water": 0, "grass": 0 }
-	for c in cages:
-		if String(c["el"]) != "":
-			count[c["el"]] = int(count[c["el"]]) + 1
-	var banned := ""
-	var n := cages.size()
-	if i >= n - 2:
-		banned = String(cages[(n - 2) if i == n - 1 else (n - 1)]["el"])
+	for k in mini(CAGE_HEART_FROM, cages.size()):
+		if String(cages[k]["el"]) != "":
+			count[cages[k]["el"]] = int(count[cages[k]["el"]]) + 1
 	var opts: Array = []
 	var best := 999
 	for el in ELS:
-		if el == banned:
-			continue
 		if int(count[el]) < best:
 			best = int(count[el])
 			opts = [el]
@@ -275,7 +299,7 @@ func _tick_actor(ch: GameChar, dt: float) -> void:
 	if ch.tier == 0 and chan == 0:
 		for i in cages.size():
 			var c: Dictionary = cages[i]
-			if String(c["el"]) != "" and can_free(c["el"], t) and m.flat_dist(ch.pos, c["pos"]) < CAGE_REACH:
+			if String(c["el"]) != "" and can_free(c["el"], t) and cage_unlocked(i, t) and m.flat_dist(ch.pos, c["pos"]) < CAGE_REACH:
 				chan = CH_CAGE
 				ch.ai["use_t"] = float(ch.ai.get("use_t", 0.0)) + dt
 				frac = float(ch.ai["use_t"]) / USE_DWELL
@@ -396,7 +420,8 @@ func _free_cage(i: int, by: GameChar) -> void:
 	h.hp = 999
 	h.tier = 0
 	h.pos = c["pos"]
-	h.ai = { "team": team, "hp": HELPER_HP, "tag_cd": 2.0, "life": HELPER_LIFE, "leap_cd": 0.0, "phase": randf() * TAU, "stuck": 0.0, "come": false }
+	var sturdy: bool = cage_need(i) >= STURDY_NEED
+	h.ai = { "team": team, "hp": HELPER_HP + (1 if sturdy else 0), "tag_cd": 2.0, "life": HELPER_LIFE * (1.35 if sturdy else 1.0), "leap_cd": 0.0, "phase": randf() * TAU, "stuck": 0.0, "come": false }
 	if h.group:
 		h.group.position = h.pos
 		h.group.scale = Vector3.ONE * HELPER_SCALE
@@ -406,7 +431,7 @@ func _free_cage(i: int, by: GameChar) -> void:
 	helpers.append(h)
 	helper_team[h.net_id] = team
 	if _mine(team):
-		g.ui.toast("You freed a little %s — it will %s!" % [g.ELEMENTS[el]["label"], helper_job(el, team)])
+		g.ui.toast("You freed a %s little %s — it will %s!" % ["sturdy" if sturdy else "brave", g.ELEMENTS[el]["label"], helper_job(el, team)])
 	if int(active[team]) == 1:
 		_complete(team, 1, "A friend is free — tier 1's stairs and your %s are open!" % m.PAD_NAME[team])
 
@@ -649,7 +674,7 @@ func ground_errand(ch: GameChar) -> Dictionary:
 			var bd := 1.0e20
 			for i in cages.size():
 				var c: Dictionary = cages[i]
-				if String(c["el"]) == "" or not can_free(c["el"], t):
+				if String(c["el"]) == "" or not can_free(c["el"], t) or not cage_unlocked(i, t):
 					continue
 				var cp: Vector3 = c["pos"]
 				if m.radius(cp) > m.smog_goal() - 3.0:
@@ -785,14 +810,17 @@ func hint(p: GameChar) -> Array:
 			return ["", "Touch the task stone with the Sun Key"]
 		return ["", task_text(el)]
 	if p.tier == 0:
-		for c in cages:
+		for ci in cages.size():
+			var c: Dictionary = cages[ci]
 			if m.flat_dist(p.pos, c["pos"]) < m.HINT_REACH:
 				if String(c["el"]) == "":
 					return ["", "This cage is empty — a new friend arrives in %ds" % int(ceil(float(c["refill"])))]
 				if not can_free(c["el"], el):
 					return ["", "A little %s. %s eats %s, so it will not come with you — look for another cage" % [
 						g.ELEMENTS[c["el"]]["label"], g.ELEMENTS[c["el"]]["label"], g.ELEMENTS[el]["label"]]]
-				return ["E" if keys else "", "Free the little %s — it will %s%s" % [g.ELEMENTS[c["el"]]["label"], helper_job(c["el"], el), "" if keys else " (stand beside the cage)"]]
+				if not cage_unlocked(ci, el):
+					return ["", "Locked. This cage opens once %s — the cages on the wild isles are open from the start" % CAGE_NEED_TEXT[cage_need(ci)]]
+				return ["E" if keys else "", "Free the %slittle %s — it will %s%s" % ["sturdy " if cage_need(ci) >= STURDY_NEED else "", g.ELEMENTS[c["el"]]["label"], helper_job(c["el"], el), "" if keys else " (stand beside the cage)"]]
 		if int(key_state[el]) == 1 and m.flat_dist(p.pos, key_pos[el]) < m.HINT_REACH + 2.0:
 			return ["", "The Sun Key — touch it, then carry it back up to the tier 3 task stone"]
 		if me.distance_to(beacon_pos()) < m.HINT_REACH + 1.0:
@@ -815,11 +843,12 @@ func locked_text(el: String, k: int) -> String:
 	return "Locked. Tier %d has a task first — read the task stone on this terrace" % k
 
 func radar_blips(blips: Array, el: String, tier: int) -> void:
-	for c in cages:
+	for i in cages.size():
+		var c: Dictionary = cages[i]
 		if String(c["el"]) != "":
 			var cp: Vector3 = c["pos"]
 			blips.append({ "pos": Vector2(cp.x, cp.z), "color": MeshLib.rgb(g.ELEMENTS[c["el"]]["color"]), "o2": false,
-				"shape": "cage" if can_free(c["el"], el) else "cage_shut" })
+				"shape": "cage" if (can_free(c["el"], el) and cage_unlocked(i, el)) else "cage_shut" })
 	var gold := Color(0.98, 0.76, 0.18)
 	if int(key_state[el]) == 1:
 		var kp: Vector3 = key_pos[el]

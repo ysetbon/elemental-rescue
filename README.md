@@ -161,12 +161,19 @@ is served next to the web build (a Godot re-export leaves those files alone).
   open after you are knocked down. Rivals do the same tasks. If the smog sea has
   already swallowed a task's isle, the Sun Key drifts to safe ground and the beacon
   task is waived. A wind chime on each terrace mends one heart for a hurt climber.
-- **Caged friends.** Seven cages (two on Roost Rock, one on each wild isle, two
+- **Caged friends.** Eight cages (two on Roost Rock, one on each wild isle, three
   against the spire wall on Heart Isle) each hold a small elemental; an opened cage
-  refills after 30 s. Open one (**E**, or stand beside it) and the little one works
+  refills after 30 s. They do not all open at once:
+  - the three on the **wild isles** are a side quest — open from the start, even
+    before your Spark is lit;
+  - the three on **Heart Isle** (one of each element) open once your Spark is lit;
+  - **Roost Rock**'s two open after the tier 1 and the tier 2 task, and hold a
+    sturdier friend (it soaks one more cloud and stays longer).
+
+  A sign floats over a cage that is still locked for you. Open one (**E**, or stand beside it) and the little one works
   for you. It can be your own element or the one you catch — but **not the element
   that eats you**: a little Fire will not come with a Leaf (those cages show as a
-  thin outline on the radar instead of a filled square). A helper:
+  thin outline on the radar instead of a filled square, as do locked ones). A helper:
   - **protects you** — a smog cloud that comes near you is intercepted and its
     oxygen spent;
   - **harasses the rival it can eat** whenever that rival is in your area: it

@@ -78,7 +78,7 @@ func _draw() -> void:
 		var p := Vector2(to_x.call(bp.x), to_z.call(bp.y))
 		if b.has("shape"):
 			if String(b["shape"]) == "cage_shut":
-				# a cage whose captive eats you (you cannot open it): just a thin outline
+				# a cage you cannot open (yet): its captive eats you, or it is still locked — a thin outline
 				draw_rect(Rect2(p - Vector2(3.6, 3.6), Vector2(7.2, 7.2)), Color(b["color"].r, b["color"].g, b["color"].b, 0.75), false, 1.4)
 			elif String(b["shape"]) == "cage":
 				# a cage with a friend inside: a barred square in the captive's colour

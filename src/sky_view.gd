@@ -200,7 +200,21 @@ func _build_quest_props() -> void:
 			var is_: Dictionary = SkyLayout.NODES[node]
 			face = SkyLayout.ang_of(float(is_["x"]) - p.x, float(is_["z"]) - p.z)
 		cage.rotation.y = PI / 2.0 - deg_to_rad(face)
-		_cages.append({ "root": cage, "bars": cage.find_child("bars", true, false), "captive": null, "el": "" })
+		# a sign over a cage that is still locked for you (hidden once it opens)
+		var sign: Label3D = null
+		if i < SkyQuests.CAGE_NEED.size() and int(SkyQuests.CAGE_NEED[i]) > 0:
+			sign = Label3D.new()
+			sign.text = SkyQuests.CAGE_NEED_SIGN[int(SkyQuests.CAGE_NEED[i])]
+			sign.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			sign.font_size = 56
+			sign.pixel_size = 0.009
+			sign.outline_size = 14
+			sign.modulate = Color(1.0, 0.86, 0.45)
+			sign.outline_modulate = Color(0.2, 0.14, 0.1, 0.95)
+			sign.position = p + Vector3(0, 4.3, 0)
+			sign.visible = false
+			add_child(sign)
+		_cages.append({ "root": cage, "bars": cage.find_child("bars", true, false), "captive": null, "el": "", "sign": sign })
 	_key_node = _prop("sun_key", func(): return MeshLib.box(0.3, 1.0, 0.1, MeshLib.unlit_mat(gold)))
 	SkyBuilder.set_override(_key_node, SkyBuilder.tinted_glow(gold * 1.15))
 	_key_node.visible = false
@@ -277,6 +291,8 @@ func _update_quests(m, dt: float) -> void:
 		var bars = cg["bars"]
 		if bars != null and is_instance_valid(bars):
 			(bars as Node3D).visible = el != "" or croot.scale.y > 0.6
+		if cg["sign"] != null:
+			(cg["sign"] as Label3D).visible = el != "" and my_el != "" and not q.cage_unlocked(i, my_el)
 		var cv = cg["captive"]
 		if cv != null and is_instance_valid(cv):
 			(cv as Node3D).position.y = 0.16 + absf(sin(_t * 3.0 + float(i))) * 0.12     # hopping to be let out
