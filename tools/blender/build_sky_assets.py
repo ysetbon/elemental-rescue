@@ -222,7 +222,7 @@ def isle_heart():
     body = L.island_body(R, 45.0, seg, seed=1.3, lip=1.5, lip_col=mul(L.STONE_B, 0.85), levels=9)
     deco = Part()
     # lamp obelisks just outside the walkable rim, between the landings
-    for a in (0, 60, 120, 180, 240):
+    for a in (20, 60, 140, 180, 260):      # 20/140/260 (not 0/120/240): clear of the task-isle bridge rails at 5/125/245
         ob = join(prism(4, 0.42, 0.3, -0.3, 2.3, tip=0.5, phase=0.78).paint(L.STONE_B, z0=0, z1=2.5, lo=0.75),
                   icosphere(0.24, 0).move(0, 0, 3.05).paint(0x8FE9EC, glow=True))
         deco.add(ob.move(P(a, 26.9, 0)))
@@ -1375,6 +1375,525 @@ def sky_spire():
     y, b, c, piv, hinge = bell_parts(12)
     p.add(y.move(0, 0, 30.0)).add(b.move(piv + Vector((0, 0, 30.0)))).add(c.move(piv + hinge + Vector((0, 0, 30.0))))
     make_object("sky_spire", p)
+
+
+# =====================================================================================
+#  quest props
+# =====================================================================================
+GOLD = 0xD9A441
+
+
+@asset(el_deg=14, az_deg=60)
+def helper_cage():
+    """Round rescue cage: base disc r 1.3 (top h 0.15), domed top ring at h 2.4 with a finial.
+    `bars` (vertical bars + hoop + padlock) is a separate object so the game can open the cage."""
+    p = Part()
+    p.add(lathe([(1.36, 0.0), (1.3, 0.1), (1.22, 0.15)], 16, False, False).paint(L.STONE_B, top=L.STONE_A, jit=0.06))
+    d, info = top_disc([0, 0.65, 1.22], 16, z=0.15)
+    paint_faces(d, info, lambda rm, a: (mix(L.WOOD_A, 0xC9A774, 0.35) if int(a / 22.5) % 2 else L.WOOD_A) if rm > 0.65 else mix(L.WOOD_A, L.WOOD_B, 0.5), jit=0.06)
+    p.add(d)
+    ringp = lathe([(1.04, 2.32), (1.22, 2.32), (1.22, 2.47), (1.04, 2.47), (1.04, 2.32)], 16, False, False)
+    p.add(ringp.paint(L.WOOD_B, top=L.WOOD_A, jit=0.05))
+    for k in range(6):                    # dome ribs up to the finial
+        a = math.tau * k / 6 + 0.26
+        pts = []
+        for t in (0.0, 0.4, 0.75, 1.0):
+            th = t * math.pi * 0.5
+            r = 1.13 * math.cos(th)
+            pts.append((math.cos(a) * r, math.sin(a) * r, 2.45 + 0.62 * math.sin(th)))
+        p.add(tube(pts, [0.05, 0.045, 0.04, 0.035], 3, False).paint(GOLD, jit=0.06, sun=0.1))
+    p.add(lathe([(0.0, 2.98), (0.24, 3.02), (0.2, 3.1), (0.0, 3.14)], 8, False, False).paint(L.WOOD_B, top=L.WOOD_A))
+    p.add(prism(4, 0.06, 0.04, 3.12, 3.3, tip=0.16, phase=0.78).paint(GOLD, jit=0.04))
+    p.add(icosphere(0.09, 0).move(0, 0, 3.28).paint(0xFFE9A8, glow=True))
+    make_object("helper_cage", p)
+    b = Part()
+    n = 12
+    for k in range(n):
+        a = math.tau * (k + 0.5) / n
+        x, y = math.cos(a) * 1.13, math.sin(a) * 1.13
+        b.add(tube([(x, y, 0.15), (x, y, 2.33)], 0.04, 4, False).paint(GOLD, z0=0.15, z1=2.33, lo=0.8, jit=0.06, sun=0.1))
+    hoop = lathe([(1.1, 1.2), (1.17, 1.2), (1.17, 1.3), (1.1, 1.3), (1.1, 1.2)], n, False, False, phase=math.pi / n)
+    b.add(hoop.paint(mul(GOLD, 0.9), jit=0.05, sun=0.1))
+    # padlock on the Godot +Z (Blender -Y) side
+    b.add(box(0.26, 0.12, 0.22, (0, -1.24, 1.12)).paint(mul(GOLD, 1.08), top=0xF2CF72, jit=0.03))
+    b.add(tube([(-0.08, -1.24, 1.22), (-0.08, -1.24, 1.36), (0.08, -1.24, 1.36), (0.08, -1.24, 1.22)], 0.028, 4, False).paint(0x8A6A2E))
+    b.add(box(0.05, 0.02, 0.08, (0, -1.305, 1.11)).paint(0x3A3238, jit=0.0))
+    make_object("bars", b)
+
+
+@asset(el_deg=16, az_deg=65)
+def task_stone():
+    """Waist-high carved pedestal with a slanted tablet facing Godot +Z. `rune` (glyph + floating
+    diamond, sky_glow, near white - tinted at runtime) is a separate object."""
+    p = Part()
+    p.add(box_z0(0.96, 0.96, 0.18).paint(L.STONE_B, top=L.STONE_A, jit=0.05))
+    p.add(box_z0(0.72, 0.72, 0.36, 0, 0, 0.18).paint(L.STONE_A, z0=0, z1=1.2, lo=0.82, jit=0.05))
+    p.add(box_z0(0.77, 0.77, 0.1, 0, 0, 0.54).paint(L.TEAL, top=0x58BFC6, jit=0.03))
+    p.add(box_z0(0.72, 0.72, 0.3, 0, 0, 0.64).paint(mix(L.STONE_A, L.STONE_B, 0.5), z0=0, z1=1.2, lo=0.82, jit=0.05))
+    p.add(box_z0(0.9, 0.9, 0.13, 0, 0, 0.94).paint(L.STONE_A, top=mul(L.STONE_A, 1.05), jit=0.04))
+    # lectern tablet: low edge toward -Y (Godot +Z), high edge at the back
+    w = 0.42
+    lo_p, hi_p = (-0.42, 1.12), (0.3, 1.4)              # (y, z) of the tablet face edge
+    prof = [(-0.42, 1.07), (0.4, 1.07), (0.4, 1.36), hi_p, lo_p]
+    t = Part()
+    t.poly([(-w, y, z) for (y, z) in prof], toward=(-1, 0, 0))
+    t.poly([(w, y, z) for (y, z) in prof], toward=(1, 0, 0))
+    for i in range(len(prof)):
+        (y0, z0), (y1, z1) = prof[i], prof[(i + 1) % len(prof)]
+        nrm = Vector((0, z1 - z0, -(y1 - y0)))
+        t.poly([(-w, y0, z0), (w, y0, z0), (w, y1, z1), (-w, y1, z1)], toward=nrm if nrm.length > 0 else (0, 0, 1))
+    t.orient_outward(Vector((0, 0, 1.2)))
+    t.paint(lambda c, n: mul(L.STONE_A, 1.06) if (n.z > 0.5 and n.y < -0.1) else L.STONE_B, jit=0.04)
+    p.add(t)
+    for (x, y, s) in ((0.52, -0.38, 0.16), (-0.5, 0.42, 0.2), (-0.56, -0.3, 0.12)):
+        p.add(rock(s, 0, 0.3, 0.7).move(x, y, 0.06).paint(L.STONE_B, jit=0.08))
+    make_object("task_stone", p)
+    # glyph laid on the tablet face (u = x, v = up the slope, n = face normal)
+    v = Vector((0, hi_p[0] - lo_p[0], hi_p[1] - lo_p[1])).normalized()
+    u = Vector((1, 0, 0))
+    nrm = u.cross(v)
+    if nrm.z < 0:
+        nrm = -nrm
+    cen = Vector((0, (lo_p[0] + hi_p[0]) * 0.5, (lo_p[1] + hi_p[1]) * 0.5)) + nrm * 0.012
+    r = Part()
+
+    def gp(a, b_):
+        return cen + u * a + v * b_
+    for k in range(6):                    # hexagon outline
+        a0, a1 = math.tau * k / 6, math.tau * (k + 1) / 6
+        r.poly([gp(math.cos(a0) * 0.2, math.sin(a0) * 0.2), gp(math.cos(a1) * 0.2, math.sin(a1) * 0.2),
+                gp(math.cos(a1) * 0.26, math.sin(a1) * 0.26), gp(math.cos(a0) * 0.26, math.sin(a0) * 0.26)], toward=nrm)
+    r.poly([gp(0, 0.13), gp(0.08, 0), gp(0, -0.13), gp(-0.08, 0)], toward=nrm)
+    for s in (-1, 1):
+        r.poly([gp(0.32 * s, 0.03), gp(0.38 * s, 0.03), gp(0.38 * s, -0.03), gp(0.32 * s, -0.03)], toward=nrm)
+        r.poly([gp(-0.03, 0.3 * s), gp(0.03, 0.3 * s), gp(0.03, 0.345 * s), gp(-0.03, 0.345 * s)], toward=nrm)
+    r.add(lathe([(0.0, 1.73), (0.12, 1.9), (0.0, 2.07)], 4, False, False))
+    r.paint(lambda c, n: mix(0xFFFFFF, 0xFFF6DC, rnd(0, 1)), glow=True, jit=0.02)
+    make_object("rune", r)
+
+
+@asset(el_deg=12, az_deg=40)
+def wind_chime():
+    """Floating wind-chime pickup centred at h 1.3. All sky_glow, near white (tinted at runtime)."""
+    p = Part()
+    p.add(lathe([(0.0, 1.6), (0.07, 1.67), (0.0, 1.74)], 4, False, False))                  # tiny star
+    for a in (0, 90):
+        st = Part()
+        st.poly([(-0.13, 0, 1.67), (0, 0, 1.69), (0.13, 0, 1.67), (0, 0, 1.65)])
+        p.add(st.rotz(a))
+    p.add(tube([(0, 0, 1.6), (0, 0, 1.5)], 0.012, 3, False))
+    p.add(lathe([(0.2, 1.48), (0.28, 1.48), (0.28, 1.53), (0.2, 1.53), (0.2, 1.48)], 8, False, False))
+    for a in (0, 90):
+        p.add(box(0.44, 0.035, 0.035, (0, 0, 1.505)).rotz(a))
+    for k, ln in enumerate((0.52, 0.36, 0.44, 0.28)):
+        a = math.tau * k / 4 + math.pi / 4
+        x, y = math.cos(a) * 0.24, math.sin(a) * 0.24
+        p.add(prism(5, 0.04, 0.04, 1.44 - ln, 1.44).move(x, y, 0))
+        p.add(tube([(x, y, 1.44), (x, y, 1.49)], 0.01, 3, False))
+    p.add(tube([(0, 0, 1.5), (0, 0, 1.08)], 0.01, 3, False))
+    p.add(cyl(0.07, 0.07, 1.14, 1.17, 6))                                                   # striker
+    sail = Part()
+    sail.poly([(0, 0, 1.08), (0.09, 0, 0.98), (0, 0, 0.88), (-0.09, 0, 0.98)])
+    p.add(sail)
+    p.paint(lambda c, n: mix(0xFFFFFF, 0xFFF6DC, rnd(0, 1)), glow=True, jit=0.03)
+    make_object("wind_chime", p)
+
+
+@asset(el_deg=10, az_deg=75)
+def sun_key():
+    """Chunky upright key (~1 m): sun-ray disc bow on top, teeth at the bottom, centred at h 1.3.
+    All sky_glow, near white (tinted at runtime)."""
+    p = Part()
+    bz = 1.56
+    bow = lathe([(0.1, -0.04), (0.21, -0.04), (0.21, 0.04), (0.1, 0.04), (0.1, -0.04)], 10, False, False).rotx(90).move(0, 0, bz)
+    p.add(bow)
+    for k in range(8):                    # sun rays around the bow
+        a = math.tau * k / 8
+        if abs(math.sin(a) + 1.0) < 0.01:
+            continue                       # the shaft takes the place of the bottom ray
+        ray = cone(0.055, 0.0, 0.14 if k % 2 == 0 else 0.1, 4).roty(90)      # points along +X
+        ray.roty(-math.degrees(a))
+        p.add(ray.move(math.cos(a) * 0.215, 0, bz + math.sin(a) * 0.215))
+    p.add(box(0.16, 0.11, 0.06, (0, 0, 1.32)))
+    p.add(box(0.09, 0.09, 0.56, (0, 0, 1.06)))
+    p.add(box(0.2, 0.08, 0.08, (0.12, 0, 0.84)))
+    p.add(box(0.13, 0.08, 0.07, (0.09, 0, 0.97)))
+    p.add(box(0.06, 0.08, 0.06, (0.2, 0, 0.9)))
+    p.paint(lambda c, n: mix(0xFFFFFF, 0xFFF3CF, rnd(0, 1)), glow=True, jit=0.03)
+    make_object("sun_key", p)
+
+
+@asset(el_deg=40, az_deg=30)
+def sun_seal():
+    """Flat floor seal, r 2.2, top at h 0.06: carved rings + 8 sun rays. `seal_glow` (ring r 1.7..2.0
+    + centre sun, sky_glow near white) is a separate object."""
+    seg = 16
+    d, info = top_disc([0, 0.5, 0.56, 1.1, 1.16, 1.7, 2.0, 2.06, 2.2], seg, z=0.06, phase_deg=-11.25)
+
+    def fn(rm, a):
+        i = int(((a + 11.25) % 360.0) / 22.5)
+        if rm < 0.5:
+            return mul(L.STONE_B, 0.82)
+        if rm in (0.53, 1.13, 2.03) or abs(rm - 0.53) < 0.01 or abs(rm - 1.13) < 0.01 or abs(rm - 2.03) < 0.01:
+            return mul(L.STONE_B, 0.62)                         # carved grooves
+        if rm < 1.7:
+            return mix(L.STONE_A, L.STONE_B, 0.75 if (i + (0 if rm < 1.1 else 1)) % 2 else 0.95)
+        if rm < 2.0:
+            return mul(L.STONE_B, 0.7)                          # bed of the glow ring
+        return L.STONE_A if i % 2 else mix(L.STONE_A, L.STONE_B, 0.6)
+    paint_faces(d, info, fn, jit=0.035)
+    p = Part()
+    p.add(d)
+    p.add(lathe([(2.24, 0.0), (2.2, 0.06)], seg, False, False, phase=math.radians(11.25)).paint(L.STONE_B, jit=0.05))
+    for k in range(8):                    # eight carved sun rays (long / short alternating)
+        a = 45.0 * k
+        tip = 1.66 if k % 2 == 0 else 1.4
+        ray = Part()
+        ray.poly([P(a - 11, 0.6, 0.072), P(a + 11, 0.6, 0.072), P(a, tip, 0.072)], toward=(0, 0, 1))
+        ray.paint(0xF2DDA4 if k % 2 == 0 else 0xE6CC92, jit=0.03, sun=0.0, shade=0.0)
+        p.add(ray)
+    make_object("sun_seal", p)
+    g = Part()
+    rg, info = top_disc([1.7, 2.0], seg, z=0.08, phase_deg=-11.25)
+    g.add(rg)
+    sun, info2 = top_disc([0, 0.3], 8, z=0.08)
+    g.add(sun)
+    for k in range(8):
+        a = 45.0 * k + 22.5
+        g.poly([P(a - 9, 0.34, 0.08), P(a + 9, 0.34, 0.08), P(a, 0.5, 0.08)], toward=(0, 0, 1))
+    g.paint(lambda c, n: mix(0xFFFFFF, 0xFFF6DC, rnd(0, 1)), glow=True, jit=0.02)
+    make_object("seal_glow", g)
+
+
+# =====================================================================================
+#  task isles (r 9.5, 49 m from the spire axis) with their sub-towers
+#  Authored in world orientation like every isle: "front" faces Heart Isle.
+# =====================================================================================
+TASK_R = 9.5
+TASK_ANG = {"isle_roost": 5.0, "isle_beacon": 125.0, "isle_shrine": 245.0}
+
+
+def _dirv(a_deg):
+    a = math.radians(a_deg)
+    return Vector((math.cos(a), -math.sin(a), 0.0))
+
+
+def _task_isle(name, seed, top_fn, lip_col, rock_cols):
+    top, info = top_disc([0, 3.0, 6.0, 8.2, TASK_R], 28, jitter=0.2)
+    paint_faces(top, info, top_fn, jit=0.05)
+    body = L.island_body(TASK_R, 16.0, 28, seed=seed, lip=0.8, lip_col=lip_col, rock_cols=rock_cols, levels=5)
+    return join(top, body)
+
+
+def _scatter(n, r0, r1, make, keep):
+    """Scatter small no-collision dressing where keep(a_sim, d) allows it."""
+    out = Part()
+    for _ in range(n):
+        a, d = rnd(0, 360), rnd(r0, r1)
+        if keep(a, d):
+            out.add(make().move(P(a, d, 0)))
+    return out
+
+
+def bird(col=0xF4F1E8, wing=0x9FB7D9):
+    b = icosphere(0.15, 0).scale(1.35, 0.9, 0.95).move(0, 0, 0.16).paint(col, top=wing, jit=0.05)
+    h = icosphere(0.09, 0).move(0.17, 0, 0.3).paint(col, jit=0.04)
+    bk = cone(0.035, 0.0, 0.1, 4).roty(90).move(0.24, 0, 0.3).paint(0xF2A23C, jit=0.0)
+    tl = Part()
+    tl.poly([(-0.16, -0.07, 0.2), (-0.16, 0.07, 0.2), (-0.36, 0, 0.27)])
+    tl.paint(wing, jit=0.04)
+    return join(b, h, bk, tl)
+
+
+def mini_cage():
+    """Small hanging cage, hook at the origin, ~0.85 m tall."""
+    p = Part()
+    p.add(cone(0.3, -0.28, -0.05, 6))
+    p.add(cyl(0.29, 0.29, -0.85, -0.8, 6))
+    for k in range(6):
+        a = math.tau * k / 6
+        p.add(tube([(math.cos(a) * 0.27, math.sin(a) * 0.27, -0.8), (math.cos(a) * 0.27, math.sin(a) * 0.27, -0.28)], 0.02, 3, False))
+    p.add(tube([(0, 0, -0.05), (0, 0, 0.0)], 0.02, 3, False))
+    return p.paint(GOLD, jit=0.06, sun=0.1)
+
+
+@asset(el_deg=16, az_deg=140)
+def isle_roost():
+    """Roost Rock (5 deg): a watchtower / aviary 3.5 m behind the isle centre."""
+    ang = TASK_ANG["isle_roost"]
+    front, back = ang + 180.0, ang
+    cage_spots = [P(ang + 90.0, 4.6), P(ang - 90.0, 4.6)]      # Godot stands two real cages here
+    T = P(back, 3.5)
+
+    def top_fn(rm, a):
+        x, y = math.cos(math.radians(a)) * rm, math.sin(math.radians(a)) * rm
+        c = mix(L.GRASS_A, L.GRASS_B, 0.5 + 0.5 * nz2(x, y, 0.25, 12.0))
+        if nz2(x, y, 0.4, 3.0) > 0.3:
+            c = mix(c, L.ROCK_C, 0.6)
+        ld = lane_dirt(a, rm, [front], TASK_R, 2.0)
+        return mix(c, 0xB59A6A, 0.6 * ld)
+    isle = _task_isle("isle_roost", 51.0, top_fn, mul(L.GRASS_A, 0.9), (L.ROCK_A, L.ROCK_B, L.ROCK_C))
+    t = Part()
+    base = lathe([(1.9, 0.0), (1.78, 0.5), (1.5, 4.6), (1.58, 5.0)], 10, False, False)
+    base.paint(lambda c, n: L.STONE_A if int(c.z / 0.85) % 2 == 0 else mix(L.STONE_A, L.STONE_B, 0.8), z0=0, z1=5, lo=0.78, jit=0.06)
+    t.add(base)
+    t.add(lathe([(1.5, 4.95), (2.3, 5.2), (2.3, 5.38), (0.0, 5.38)], 10, True, False).paint(L.WOOD_B, top=L.WOOD_A, jit=0.05))
+    for k in range(0, 10, 2):             # gallery rail
+        a = math.tau * k / 10
+        t.add(box_z0(0.1, 0.1, 0.75, math.cos(a) * 2.2, math.sin(a) * 2.2, 5.38).paint(L.WOOD_A))
+    t.add(tube([(math.cos(math.tau * k / 10) * 2.2, math.sin(math.tau * k / 10) * 2.2, 6.13) for k in range(11)], 0.05, 4, False).paint(L.WOOD_A))
+    for k in range(6):                    # open aviary frame
+        a = math.tau * k / 6 + 0.3
+        t.add(box_z0(0.16, 0.16, 2.3, math.cos(a) * 1.3, math.sin(a) * 1.3, 5.38).paint(L.WOOD_B, z0=5.3, z1=7.7, lo=0.8))
+    t.add(lathe([(1.45, 7.55), (1.45, 7.75)], 6, True, False, phase=0.3).paint(L.WOOD_B))
+    roof = lathe([(2.15, 7.6), (1.2, 8.7), (0.0, 9.6)], 10, True, False)
+    t.add(roof.paint(0xB5533C, z0=7.6, z1=9.6, lo=0.75, hi=0xE08A5A, jit=0.07))
+    t.add(prism(4, 0.07, 0.05, 9.5, 9.72, phase=0.78).paint(L.WOOD_B))
+    t.add(icosphere(0.13, 0).move(0, 0, 9.82).paint(0xFFE9A8, glow=True))
+    # door + window facing the isle centre (front)
+    fd = _dirv(front)
+    sd_deg = math.degrees(math.atan2(-fd.x, fd.y)) + 90.0
+    t.add(box(1.0, 0.3, 1.8, (0, 0, 0.9)).rotz(math.degrees(math.atan2(fd.y, fd.x)) + 90.0).move(fd * 1.72).paint(L.WOOD_B, jit=0.04))
+    t.add(box(0.5, 0.3, 0.7, (0, 0, 3.4)).rotz(math.degrees(math.atan2(fd.y, fd.x)) + 90.0).move(fd * 1.5).paint(0x3A3340, jit=0.02))
+    # perch bar across the aviary with birds
+    t.add(tube([(-1.2, 0, 6.5), (1.2, 0, 6.5)], 0.05, 4, False).rotz(40).paint(L.WOOD_A))
+    t.add(bird().rotz(120).move(0.45, 0.38, 6.5))
+    t.add(bird(0xF7D36A, 0xE9A24A).rotz(250).move(-0.5, -0.42, 6.5))
+    t.add(bird(0xB6D2F8, 0x6D9CE9).rotz(200).move(math.cos(math.tau * 0.3) * 2.2, math.sin(math.tau * 0.3) * 2.2, 6.18))
+    # arms with hanging cages / lanterns (all well above head height)
+    hang = [("cage", 50.0), ("lantern", 140.0), ("cage", 230.0), ("lantern", 320.0)]
+    for kind, a_deg in hang:
+        a = math.radians(a_deg)
+        d = Vector((math.cos(a), math.sin(a), 0))
+        t.add(tube([d * 1.3 + Vector((0, 0, 7.45)), d * 3.3 + Vector((0, 0, 7.3))], 0.08, 4, True).paint(L.WOOD_B, jit=0.05))
+        t.add(tube([d * 1.35 + Vector((0, 0, 6.6)), d * 2.4 + Vector((0, 0, 7.36))], 0.05, 4, False).paint(L.WOOD_A))
+        tip = d * 3.2 + Vector((0, 0, 7.3))
+        hook = tip - Vector((0, 0, 0.9))
+        t.add(tube([tip, hook], 0.02, 3, False).paint(0x3A3238))
+        t.add((mini_cage() if kind == "cage" else lantern(1.6, 0xFFE9A8)).move(hook))
+        if kind == "cage":
+            t.add(bird(0xF4F1E8, 0xF2A23C).scale(0.8).rotz(a_deg).move(d * 2.2 + Vector((0, 0, 7.42))))
+    # sacks + a perch stump hugging the tower (inside the collision circle)
+    for a_deg, s in ((95.0, 0.36), (265.0, 0.3)):
+        a = math.radians(a_deg)
+        t.add(rock(s, 0, 0.2, 1.0).move(math.cos(a) * 1.95, math.sin(a) * 1.95, s * 0.8).paint(0xD9C7A0, jit=0.05))
+    deco = Part()
+    deco.add(t.move(T))
+
+    def keep(a, d):
+        q = P(a, d)
+        if L.near_lane(a, [front], 16) and d > 1.0:
+            return False
+        if (q - T).length < 2.6:
+            return False
+        return all((q - c).length > 2.5 for c in cage_spots)
+    deco.add(_scatter(34, 1.0, 9.2, lambda: tuft(3, 0.45, L.GRASS_B), keep))
+    deco.add(_scatter(11, 1.0, 9.3, lambda: rock(rnd(0.12, 0.3), 0, 0.3, 0.6).move(0, 0, 0.05).paint(L.ROCK_B, jit=0.1), keep))
+    for _ in range(12):                   # a few feathers / seeds near the tower
+        a, d = rnd(0, 360), rnd(2.2, 3.6)
+        q = T + Vector((math.cos(math.radians(a)) * d, math.sin(math.radians(a)) * d, 0.03))
+        if all((q - c).length > 2.5 for c in cage_spots) and q.length < 9.0:
+            deco.add(leaf(0.3, 0.1, 0.0).rotz(rnd(0, 360)).move(q).paint(0xF4F1E8, jit=0.03))
+    for i in range(6):                    # rim rocks outside the walkable disc
+        a = 60.0 * i + rnd(-15, 15)
+        if L.near_lane(a, [front], 22):
+            continue
+        deco.add(rock(rnd(0.4, 0.8), 0, 0.3, 0.7).move(P(a, TASK_R + rnd(0.5, 0.8), -0.15)).paint(L.ROCK_B, top=L.GRASS_A, jit=0.08))
+    make_object("isle_roost", join(isle, deco))
+    col_cylinder("col_roost", 0, 0, 2.0, 6.0, center=T)
+
+
+@asset(el_deg=14, az_deg=260)
+def isle_beacon():
+    """Beacon Isle (125 deg): a lighthouse on the isle centre. `beacon_lamp` (lantern-room light)
+    and `beacon_ring` (stand here, 4.4 m in front) are separate near-white sky_glow nodes."""
+    ang = TASK_ANG["isle_beacon"]
+    front = ang + 180.0
+
+    def top_fn(rm, a):
+        x, y = math.cos(math.radians(a)) * rm, math.sin(math.radians(a)) * rm
+        c = mix(L.ROCK_B, L.ROCK_C, 0.5 + 0.5 * nz2(x, y, 0.25, 31.0))
+        if nz2(x, y, 0.35, 7.0) > 0.15 and rm > 3.0:
+            c = mix(c, L.GRASS_A, 0.75)
+        if rm < 3.0:
+            return L.STONE_A if int(a / 25.7) % 2 else mix(L.STONE_A, L.STONE_B, 0.7)       # paved apron
+        ld = lane_dirt(a, rm, [front], TASK_R, 2.2)
+        return mix(c, mix(L.STONE_A, L.STONE_B, 0.5), 0.75 * ld)
+    isle = _task_isle("isle_beacon", 57.0, top_fn, mul(L.ROCK_B, 0.92), (L.ROCK_A, L.ROCK_B, L.ROCK_C))
+    t = Part()
+    t.add(lathe([(2.2, 0.0), (2.2, 0.4), (2.0, 0.6)], 12, False, False).paint(L.STONE_B, top=L.STONE_A, jit=0.05))
+    shaft = lathe([(2.0, 0.6), (1.86, 3.1), (1.7, 5.6), (1.55, 8.1), (1.4, 10.6)], 12, False, False)
+    shaft.paint(lambda c, n: 0xF2EBDD if int((c.z - 0.6) / 2.5) % 2 == 0 else 0xC8553D, z0=0, z1=11, lo=0.8, jit=0.05)
+    t.add(shaft)
+    t.add(lathe([(1.4, 10.55), (2.05, 10.85), (2.05, 11.05), (0.0, 11.05)], 12, True, False).paint(0x4A4048, top=0x6A5F68, jit=0.05))
+    for k in range(0, 12, 2):
+        a = math.tau * k / 12
+        t.add(box_z0(0.07, 0.07, 0.7, math.cos(a) * 1.95, math.sin(a) * 1.95, 11.05).paint(0x3A3238))
+    t.add(tube([(math.cos(math.tau * k / 12) * 1.95, math.sin(math.tau * k / 12) * 1.95, 11.75) for k in range(13)], 0.04, 4, False).paint(0x3A3238))
+    t.add(lathe([(1.2, 11.05), (1.2, 11.35)], 8, False, True).paint(L.STONE_B, top=L.STONE_A))
+    for k in range(8):                    # lantern-room mullions
+        a = math.tau * k / 8
+        t.add(box_z0(0.09, 0.09, 2.0, math.cos(a) * 1.15, math.sin(a) * 1.15, 11.35).paint(0x3A3238))
+    roof = lathe([(1.55, 13.3), (1.5, 13.45), (0.9, 14.3), (0.0, 15.0)], 8, True, False)
+    t.add(roof.paint(0xC8553D, z0=13.3, z1=15.0, lo=0.75, hi=0xE9967A, jit=0.06))
+    t.add(prism(4, 0.06, 0.04, 14.9, 15.5, tip=0.2, phase=0.78).paint(0x3A3238))
+    t.add(icosphere(0.14, 0).move(0, 0, 15.45).paint(0xFFE9A8, glow=True))
+    fd = _dirv(front)
+    rz = math.degrees(math.atan2(fd.y, fd.x)) + 90.0
+    t.add(box(1.25, 0.4, 2.15, (0, 0, 1.07)).rotz(rz).move(fd * 1.95).paint(L.STONE_B, jit=0.04))       # door frame
+    t.add(box(0.9, 0.42, 1.8, (0, 0, 0.9)).rotz(rz).move(fd * 1.99).paint(L.WOOD_B, jit=0.04))
+    t.add(box(0.12, 0.44, 0.12, (0.28, 0, 0.95)).rotz(rz).move(fd * 2.0).paint(GOLD, jit=0.0))
+    t.add(box(1.5, 0.7, 0.12, (0, 0, 0.06)).rotz(rz).move(fd * 2.45).paint(L.STONE_A, jit=0.04))          # door step
+    for (h, off) in ((4.3, 0.0), (7.6, 0.0)):
+        r_at = 1.86 - (h - 3.1) * 0.064
+        t.add(box(0.5, 0.3, 0.8, (0, 0, h)).rotz(rz).move(fd * (r_at - 0.02)).paint(0x3A3340, jit=0.02))
+    bd = _dirv(ang + 70.0)
+    t.add(box(0.5, 0.3, 0.8, (0, 0, 5.9)).rotz(math.degrees(math.atan2(bd.y, bd.x)) + 90.0).move(bd * 1.66).paint(0x3A3340, jit=0.02))
+    deco = Part()
+    deco.add(t)
+    ring_c = P(front, 4.4)
+
+    def keep(a, d):
+        q = P(a, d)
+        if L.near_lane(a, [front], 18):
+            return False
+        return d > 2.9 and (q - ring_c).length > 2.7
+    deco.add(_scatter(40, 3.0, 9.2, lambda: tuft(3, 0.4, 0x9DB070), keep))
+    deco.add(_scatter(12, 3.0, 9.3, lambda: rock(rnd(0.14, 0.34), 0, 0.3, 0.6).move(0, 0, 0.05).paint(L.ROCK_B, jit=0.1), keep))
+    for i in range(7):
+        a = 51.4 * i + rnd(-12, 12)
+        if L.near_lane(a, [front], 22):
+            continue
+        deco.add(rock(rnd(0.5, 0.95), 0, 0.3, 0.75).move(P(a, TASK_R + rnd(0.5, 0.9), -0.15)).paint(L.ROCK_A, top=L.ROCK_C, jit=0.08))
+    make_object("isle_beacon", join(isle, deco))
+    lamp = Part()
+    lamp.add(lathe([(0.0, -0.95), (0.85, -0.5), (1.0, 0.0), (0.85, 0.5), (0.0, 0.95)], 8, False, False))
+    for k in range(4):                    # flat flare fins so the lamp reads from far away
+        a = math.tau * k / 4 + math.pi / 4
+        d = Vector((math.cos(a), math.sin(a), 0))
+        lamp.poly([d * 1.0 + Vector((0, 0, 0.22)), d * 2.7, d * 1.0 - Vector((0, 0, 0.22))])
+        s = Vector((-d.y, d.x, 0)) * 0.22
+        lamp.poly([d * 1.0 + s, d * 2.7, d * 1.0 - s])
+    lamp.paint(lambda c, n: mix(0xFFFFFF, 0xFFF6DC, rnd(0, 1)), glow=True, jit=0.02)
+    make_object("beacon_lamp", lamp, location=Vector((0, 0, 12.35)))
+    rg, info = top_disc([1.9, 2.2], 20, z=0.0)
+    paint_faces(rg, info, lambda rm, a: (0xFFFFFF if int(a / 18) % 2 else 0xFFF6DC, "glow"), jit=0.0)
+    make_object("beacon_ring", rg, location=Vector((ring_c.x, ring_c.y, 0.05)))
+    col_cylinder("col_beacon", 0, 0, 2.2, 6.0, center=Vector((0, 0, 0)))
+
+
+@asset(el_deg=18, az_deg=20)
+def isle_shrine():
+    """Sun Shrine (245 deg): altar on the centre, sun-disc arch behind it, five pillars around
+    r 6.5 (front approach open). `altar_glow` = the sun disc + altar glyph (sky_glow, near white)."""
+    ang = TASK_ANG["isle_shrine"]
+    front, back = ang + 180.0, ang
+    pillar_angs = [back, back - 55.0, back + 55.0, back - 110.0, back + 110.0]
+
+    def top_fn(rm, a):
+        x, y = math.cos(math.radians(a)) * rm, math.sin(math.radians(a)) * rm
+        i = int(a / (360.0 / 28))
+        if rm < 3.0:
+            return 0xEAD9AE if i % 2 == 0 else 0xDCC79A                                      # sun-court paving
+        if rm < 6.0:
+            c = 0xE2D2A8 if i % 2 else 0xD3C096
+            return mix(c, L.GRASS_A, 0.55 if nz2(x, y, 0.4, 14.0) > 0.25 else 0.0)
+        c = mix(L.GRASS_A, 0xB9BC7A, 0.5 + 0.5 * nz2(x, y, 0.25, 9.0))
+        ld = lane_dirt(a, rm, [front], TASK_R, 2.2)
+        return mix(c, 0xDCC79A, 0.8 * ld)
+    isle = _task_isle("isle_shrine", 63.0, top_fn, mul(L.GRASS_A, 0.9), (0x9A8A72, 0xB9A98A, 0xD6C6A0))
+    deco = Part()
+    # altar
+    al = Part()
+    al.add(lathe([(1.18, 0.0), (1.18, 0.2), (0.98, 0.3)], 8, False, False, phase=math.pi / 8).paint(L.STONE_B, top=L.STONE_A, jit=0.05))
+    al.add(lathe([(0.82, 0.3), (0.76, 0.5)], 8, False, False, phase=math.pi / 8).paint(L.STONE_A, jit=0.05))
+    al.add(lathe([(0.78, 0.5), (0.78, 0.62)], 8, False, False, phase=math.pi / 8).paint(L.TEAL, jit=0.03))
+    al.add(lathe([(0.76, 0.62), (0.8, 0.84)], 8, False, False, phase=math.pi / 8).paint(L.STONE_A, jit=0.05))
+    al.add(lathe([(0.8, 0.84), (1.02, 0.88), (1.02, 1.0)], 8, True, True, phase=math.pi / 8).paint(L.STONE_B, top=mul(L.STONE_A, 1.05), jit=0.04))
+    deco.add(al)
+    # sun-disc arch behind the altar (local frame: x = lateral, legs at x = +-1.9)
+    arch = Part()
+    for s in (-1, 1):
+        arch.add(box_z0(0.82, 0.82, 0.3, 1.9 * s, 0, 0).paint(L.STONE_B))
+        arch.add(box_z0(0.6, 0.6, 3.75, 1.9 * s, 0, 0.3, taper=0.88).paint(L.STONE_A, z0=0, z1=4.2, lo=0.8, jit=0.05))
+        arch.add(box_z0(0.72, 0.72, 0.2, 1.9 * s, 0, 4.05).paint(mul(L.STONE_A, 1.05)))
+    nv = 7
+    for i in range(nv):
+        t0, t1 = math.pi * i / nv, math.pi * (i + 1) / nv
+        key = i == nv // 2
+        ro = 2.5 if key else 2.25
+
+        def pt(r, th, y):
+            return (math.cos(th) * r, y, 4.25 + math.sin(th) * r)
+        tm = (t0 + t1) * 0.5
+        od = (math.cos(tm), 0, math.sin(tm))
+        blk = Part()
+        blk.poly([pt(1.6, t0, -0.3), pt(ro, t0, -0.3), pt(ro, t1, -0.3), pt(1.6, t1, -0.3)], toward=(0, -1, 0))
+        blk.poly([pt(1.6, t0, 0.3), pt(ro, t0, 0.3), pt(ro, t1, 0.3), pt(1.6, t1, 0.3)], toward=(0, 1, 0))
+        blk.poly([pt(ro, t0, -0.3), pt(ro, t0, 0.3), pt(ro, t1, 0.3), pt(ro, t1, -0.3)], toward=od)
+        blk.poly([pt(1.6, t0, -0.3), pt(1.6, t0, 0.3), pt(1.6, t1, 0.3), pt(1.6, t1, -0.3)], toward=(-od[0], 0, -od[2]))
+        blk.paint(mix(L.TEAL, 0x58BFC6, 0.3) if key else (L.STONE_A if i % 2 else mix(L.STONE_A, L.STONE_B, 0.7)), jit=0.04)
+        arch.add(blk)
+    arch.add(prism(4, 0.14, 0.1, 6.72, 6.84, tip=0.14, phase=0.78).paint(GOLD))
+    arch_c = P(back, 3.0)
+    deco.add(arch.copy().at_sim(back, 3.0, face=back + 90.0))
+    # pillars around r 6.5, front approach left open
+    for pa in pillar_angs:
+        col_p = column(3.2, 0.36)
+        col_p.add(lathe([(0.2, 3.48), (0.42, 3.62), (0.36, 3.7)], 6, True, True).paint(GOLD, top=0x6A4F22))
+        col_p.add(cone(0.24, 3.7, 4.15, 5).paint(lambda c, n: mix(0xFFC24A, 0xFFF0B8, min(1.0, max(0.0, (c.z - 3.7) / 0.4))), glow=True))
+        deco.add(col_p.move(P(pa, 6.5)))
+
+    def keep(a, d):
+        q = P(a, d)
+        if L.near_lane(a, [front], 18) or d < 3.2:
+            return False
+        if (q - arch_c).length < 2.9:
+            return False
+        return all((q - P(pa, 6.5)).length > 0.9 for pa in pillar_angs)
+    deco.add(_scatter(44, 3.2, 9.2, lambda: tuft(3, 0.42, L.GRASS_B), keep))
+    deco.add(_scatter(10, 3.2, 9.3, lambda: rock(rnd(0.12, 0.28), 0, 0.3, 0.6).move(0, 0, 0.05).paint(0xD6C6A0, jit=0.1), keep))
+    for _ in range(16):
+        a, d = rnd(0, 360), rnd(6.2, 9.2)
+        if keep(a, d):
+            fl = cone(0.11, 0.2, 0.33, 5).rotx(180).move(0, 0, 0.53).paint([0xFFF2B0, 0xFFD27A, 0xFFFFFF][int(rnd(0, 3))])
+            deco.add(fl.move(P(a, d)))
+    for i in range(6):
+        a = 60.0 * i + rnd(-15, 15)
+        if L.near_lane(a, [front], 22):
+            continue
+        deco.add(rock(rnd(0.4, 0.8), 0, 0.3, 0.7).move(P(a, TASK_R + rnd(0.5, 0.8), -0.15)).paint(0xB9A98A, top=L.GRASS_A, jit=0.08))
+    make_object("isle_shrine", join(isle, deco))
+    # altar_glow: the sun disc hanging in the arch + a glyph on the altar top
+    g = Part()
+    sun = Part()
+    c_i = sun.vert((0, 0, 4.55))
+    rim = [sun.vert((math.cos(math.tau * k / 12) * 1.05, 0, 4.55 + math.sin(math.tau * k / 12) * 1.05)) for k in range(12)]
+    for k in range(12):
+        sun.face((c_i, rim[k], rim[(k + 1) % 12]))
+    for k in range(8):
+        a = math.tau * k / 8
+        ln = 1.52 if k % 2 == 0 else 1.36
+        d = Vector((math.cos(a), 0, math.sin(a)))
+        s = Vector((-d.z, 0, d.x)) * 0.13
+        c0 = Vector((0, 0, 4.55))
+        sun.poly([c0 + d * 1.12 + s, c0 + d * ln, c0 + d * 1.12 - s])
+    g.add(sun.at_sim(back, 3.0, face=back + 90.0))
+    gl, info = top_disc([0.42, 0.52], 10, z=1.02)
+    g.add(gl)
+    gc, info2 = top_disc([0, 0.2], 6, z=1.02)
+    g.add(gc)
+    for k in range(6):
+        a = 60.0 * k + 30.0
+        g.poly([P(a - 12, 0.26, 1.02), P(a + 12, 0.26, 1.02), P(a, 0.38, 1.02)], toward=(0, 0, 1))
+    g.paint(lambda c, n: mix(0xFFFFFF, 0xFFF6DC, rnd(0, 1)), glow=True, jit=0.02)
+    make_object("altar_glow", g)
+    col_cylinder("col_altar", 0, 0, 1.2, 1.0, center=Vector((0, 0, 0)))
+    lat = _dirv(back + 90.0)
+    col_cylinder("col_arch_l", 0, 0, 0.45, 4.0, center=arch_c + lat * 1.9)
+    col_cylinder("col_arch_r", 0, 0, 0.45, 4.0, center=arch_c - lat * 1.9)
+    for i, pa in enumerate(pillar_angs):
+        col_cylinder("col_pillar_%d" % i, pa, 6.5, 0.5, 3.5)
 
 
 # =====================================================================================
