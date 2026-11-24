@@ -5365,17 +5365,6 @@ func _sky_debug_setup() -> void:
 			sky.quests.done[el] = int(_sky_dbg["skytasks"])
 	if _sky_dbg.has("skytask"):
 		sky.quests._accept(player.el, int(_sky_dbg["skytask"]))
-	if _sky_dbg.has("skyhelp"):
-		# skyhelp=N: open the N nearest full cages for my team
-		for _i in int(_sky_dbg["skyhelp"]):
-			var bi := -1
-			var bd := 1.0e20
-			for i in sky.quests.cages.size():
-				var cg: Dictionary = sky.quests.cages[i]
-				if String(cg["el"]) != "" and player.pos.distance_to(cg["pos"]) < bd:
-					bd = player.pos.distance_to(cg["pos"]); bi = i
-			if bi >= 0:
-				sky.quests._free_cage(bi, player)
 	if _sky_dbg.has("skytp") and not String(_sky_dbg["skytp"]).contains(","):
 		# skytp=mote|smog|bubble|predator — stand a few metres from the nearest one
 		var what := String(_sky_dbg["skytp"])
@@ -5420,6 +5409,17 @@ func _sky_debug_setup() -> void:
 		player.pos = Vector3(float(v[0]), float(k) * SkyLayout.SPIRE_TIER_H, float(v[1]))
 		player.in_ramp = SkyLayout.in_wedge(k, player.pos.x, player.pos.z)
 		cam_yaw = atan2(player.pos.x, player.pos.z)
+	if _sky_dbg.has("skyhelp"):
+		# skyhelp=N: open the N nearest full cages for my team
+		for _i in int(_sky_dbg["skyhelp"]):
+			var bi := -1
+			var bd := 1.0e20
+			for i in sky.quests.cages.size():
+				var cg: Dictionary = sky.quests.cages[i]
+				if String(cg["el"]) != "" and player.pos.distance_to(cg["pos"]) < bd:
+					bd = player.pos.distance_to(cg["pos"]); bi = i
+			if bi >= 0:
+				sky.quests._free_cage(bi, player)
 	if _sky_dbg.has("skyyaw"):
 		cam_yaw = deg_to_rad(float(_sky_dbg["skyyaw"]))
 	if _sky_dbg.has("skyhud"):
