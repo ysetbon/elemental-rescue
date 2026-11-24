@@ -16,12 +16,20 @@ extends RefCounted
 # ground like the motes do, and the beacon task is waived.
 #
 # CAGED HELPERS. Each cage holds a small elemental. Anyone can free it (press E /
-# stand beside the cage) and it then works for the team that freed it:
-#   - if it can eat one of your rivals it CHASES that rival, circling it and
-#     darting in to slow it (plus a small shove on open ground) every few seconds;
-#   - otherwise (it would only eat your own element) it GUARDS you: it stays at
-#     your side and throws itself at smog clouds, spending their oxygen.
-# Like the smog, hunters do not climb above tier 2. A helper lasts until it has
+# stand beside the cage) EXCEPT the element it eats: a little Fire will not take a
+# Leaf's side. A freed helper works for the team that freed it:
+#   - it PROTECTS its leader: a smog cloud that comes near them is intercepted and
+#     its oxygen spent;
+#   - it HARASSES the rival it can eat whenever that rival is in its leader's
+#     area, circling it and darting in to slow it every few seconds;
+#   - otherwise it keeps a loose distance. It does not shadow its leader: it waits
+#     where it is and only trots closer once they are well away.
+# CAGE LOCKS. Not every cage opens from the start. The three on the wild isles are a
+# side quest: anyone may open them at any time, even before the Spark is lit. The
+# three on Heart Isle open once your Spark is lit, and Roost Rock's two once you have
+# finished the tier 1 / tier 2 task — those hold a sturdier friend (it soaks one
+# more cloud and stays longer).
+# Like the smog, helpers do not climb above tier 2. A helper lasts until it has
 # soaked two smog clouds, a rival that eats its element touches it, or it tires.
 #
 # WIND CHIMES (a bonus, not a task): one hangs on each terrace 1..4 and mends a
@@ -36,6 +44,14 @@ const USE_DWELL := 0.7           # stand this long beside a stone / cage to use 
 const CAGE_REACH := 2.9
 const CAGE_REFILL := 30.0        # an emptied cage holds a new captive after this long
 const CAGE_R := 1.15
+# What a team must have done before each cage opens for it, in CAGE_SPOTS order
+# (Roost Rock x2, the wild isles x3, Heart Isle x3). 0 = a side quest, always open;
+# 1 = Spark lit; 2 = tier 1 task done; 3 = tier 2 task done. See rank().
+const CAGE_NEED := [2, 3, 0, 0, 0, 1, 1, 1]
+const CAGE_HEART_FROM := 5       # cages from this index on stand on Heart Isle
+const CAGE_NEED_TEXT := ["", "your Spark is lit", "the tier 1 task is done", "the tier 2 task is done"]
+const CAGE_NEED_SIGN := ["", "Opens when\nyour Spark is lit", "Opens after\nthe tier 1 task", "Opens after\nthe tier 2 task"]
+const STURDY_NEED := 2           # cages locked this deep hold a sturdier helper
 const BEACON_OFF := 4.4          # the lighting ring: this far from Beacon Isle's centre, toward Heart Isle
 const BEACON_R := 2.6
 const BEACON_TIME := 3.0
@@ -54,6 +70,10 @@ const HELPER_TAG_CD := 9.0
 const HELPER_SLOW := 3.5
 const HELPER_SHOVE := 3.0
 const HELPER_MAX_TIER := 2
+const HELPER_LEASH := 16.0       # an idle helper only moves once its leader is this far away...
+const HELPER_REST := 8.0         # ...and then stops about this far from them
+const HELPER_GUARD_R := 12.0     # a smog cloud this close to the leader gets intercepted
+const HELPER_HUNT_R := 45.0      # it harasses its prey only inside this radius of the leader
 const ELS := ["fire", "water", "grass"]
 const CH_STONE := 1
 const CH_CAGE := 2
@@ -107,7 +127,7 @@ static func shrine_pos() -> Vector3:
 	var c := isle_pos("shrine")
 	return Vector3(c.x, 0.0, c.y)
 
-# Seven cages: two on Roost Rock, one on each wild isle, two against the spire wall
+# Eight cages: two on Roost Rock, one on each wild isle, three against the spire wall
 # on Heart Isle (which the smog sea never reaches). Called once per world build,
 # BEFORE the cages' own colliders are registered, so every cage stands clear of
 # the Blender props; the result is the same on the host and on every guest.
@@ -131,7 +151,7 @@ static func place(obstacles: Array) -> void:
 					pick = q
 					found = true
 		CAGE_SPOTS.append(Vector3(pick.x, 0.0, pick.y))
-	for base in [60.0, 172.0]:
+	for base in [60.0, 172.0, 232.0]:
 		var pick2 := SkyLayout.pol(base, 21.4)
 		for off in [0.0, -7.0, 7.0, -14.0, 14.0]:
 			var q2 := SkyLayout.pol(base + off, 21.4)
@@ -165,9 +185,14 @@ func reset() -> void:
 	if CAGE_SPOTS.is_empty():
 		place([])
 	cages.clear()
-	var first := ["water", "fire", "grass", "fire", "water", "grass", "fire"]
+	# Fair to all three teams (nobody can free the element that eats them): each wild
+	# isle and each Heart Isle cage holds one fixed element, one of each, so every team
+	# can open two of the three in either place. Roost Rock's two start as a random pair.
+	var pair: Array = ELS.duplicate()
+	pair.shuffle()
+	var first := [pair[0], pair[1], "grass", "fire", "water", "grass", "fire", "water"]
 	for i in CAGE_SPOTS.size():
-		cages.append({ "pos": CAGE_SPOTS[i], "el": first[i % first.size()], "refill": 0.0 })
+		cages.append({ "pos": CAGE_SPOTS[i], "el": first[i % first.size()], "home": first[i % first.size()], "refill": 0.0 })
 
 # May this team go up from tier k?  (tier 0: a lit Spark; tiers 1..4: that tier's task)
 func can_go_up(el: String, k: int) -> bool:
@@ -186,12 +211,44 @@ func lost(id: String) -> bool:
 	var is_: Dictionary = SkyLayout.NODES[id]
 	return float(is_["d"]) + float(is_["r"]) * 0.3 > m.smog_goal()
 
-# What the freed captive will do for `team`.
-func helper_job(captive_el: String, team: String) -> String:
-	var tel: String = g._prey_of(captive_el)
-	if tel != team:
-		return "chase and slow %s for you" % g.ELEMENTS[tel]["label"]
-	return "guard you against the smog clouds"
+# How far a team has got: 0 = still gathering motes, 1 = Spark lit, then +1 per tier task done.
+func rank(el: String) -> int:
+	return (1 + int(done.get(el, 0))) if m.lit(el) else 0
+
+func cage_need(i: int) -> int:
+	return int(CAGE_NEED[i]) if i < CAGE_NEED.size() else 0
+
+# Has this team got far enough for cage i to open? (the wild-isle cages always are)
+func cage_unlocked(i: int, team: String) -> bool:
+	return rank(team) >= cage_need(i)
+
+# You cannot free the element that eats you — it would never take your side.
+# (The everyday chain, not the eclipse's: a cage does not change its mind for 15 s.)
+func can_free(captive_el: String, team: String) -> bool:
+	return String(g.ELEMENTS[captive_el]["prey"]) != team
+
+# What the freed captive will do for the team that frees it.
+func helper_job(captive_el: String, _team: String) -> String:
+	return "slow %s near you and soak up smog clouds" % g.ELEMENTS[String(g.ELEMENTS[captive_el]["prey"])]["label"]
+
+# A Heart Isle cage always refills with its own element (so the three there stay one
+# of each); any other cage takes whichever element the outer cages are shortest of.
+func _refill_el(i: int) -> String:
+	if i >= CAGE_HEART_FROM:
+		return String(cages[i]["home"])
+	var count := { "fire": 0, "water": 0, "grass": 0 }
+	for k in mini(CAGE_HEART_FROM, cages.size()):
+		if String(cages[k]["el"]) != "":
+			count[cages[k]["el"]] = int(count[cages[k]["el"]]) + 1
+	var opts: Array = []
+	var best := 999
+	for el in ELS:
+		if int(count[el]) < best:
+			best = int(count[el])
+			opts = [el]
+		elif int(count[el]) == best:
+			opts.append(el)
+	return opts[randi() % opts.size()]
 
 func helper_count(team: String) -> int:
 	var n := 0
@@ -202,11 +259,12 @@ func helper_count(team: String) -> int:
 
 # ------------------------------------------------------------------ authority tick
 func tick(dt: float) -> void:
-	for c in cages:
+	for i in cages.size():
+		var c: Dictionary = cages[i]
 		if String(c["el"]) == "" and float(c["refill"]) > 0.0:
 			c["refill"] = float(c["refill"]) - dt
 			if float(c["refill"]) <= 0.0:
-				c["el"] = ELS[randi() % ELS.size()]
+				c["el"] = _refill_el(i)
 	for i in chime_rest.size():
 		chime_rest[i] = maxf(0.0, float(chime_rest[i]) - dt)
 	for ch in g.actors:
@@ -241,7 +299,7 @@ func _tick_actor(ch: GameChar, dt: float) -> void:
 	if ch.tier == 0 and chan == 0:
 		for i in cages.size():
 			var c: Dictionary = cages[i]
-			if String(c["el"]) != "" and m.flat_dist(ch.pos, c["pos"]) < CAGE_REACH:
+			if String(c["el"]) != "" and can_free(c["el"], t) and cage_unlocked(i, t) and m.flat_dist(ch.pos, c["pos"]) < CAGE_REACH:
 				chan = CH_CAGE
 				ch.ai["use_t"] = float(ch.ai.get("use_t", 0.0)) + dt
 				frac = float(ch.ai["use_t"]) / USE_DWELL
@@ -362,7 +420,8 @@ func _free_cage(i: int, by: GameChar) -> void:
 	h.hp = 999
 	h.tier = 0
 	h.pos = c["pos"]
-	h.ai = { "team": team, "hp": HELPER_HP, "tag_cd": 2.0, "life": HELPER_LIFE, "leap_cd": 0.0, "phase": randf() * TAU, "stuck": 0.0 }
+	var sturdy: bool = cage_need(i) >= STURDY_NEED
+	h.ai = { "team": team, "hp": HELPER_HP + (1 if sturdy else 0), "tag_cd": 2.0, "life": HELPER_LIFE * (1.35 if sturdy else 1.0), "leap_cd": 0.0, "phase": randf() * TAU, "stuck": 0.0, "come": false }
 	if h.group:
 		h.group.position = h.pos
 		h.group.scale = Vector3.ONE * HELPER_SCALE
@@ -372,7 +431,7 @@ func _free_cage(i: int, by: GameChar) -> void:
 	helpers.append(h)
 	helper_team[h.net_id] = team
 	if _mine(team):
-		g.ui.toast("You freed a little %s — it will %s!" % [g.ELEMENTS[el]["label"], helper_job(el, team)])
+		g.ui.toast("You freed a %s little %s — it will %s!" % ["sturdy" if sturdy else "brave", g.ELEMENTS[el]["label"], helper_job(el, team)])
 	if int(active[team]) == 1:
 		_complete(team, 1, "A friend is free — tier 1's stairs and your %s are open!" % m.PAD_NAME[team])
 
@@ -423,50 +482,81 @@ func _update_helper(h: GameChar, dt: float) -> void:
 	if lead == null or lead.busy != m.BUSY_NONE:
 		h.vel = Vector3.ZERO
 		return
-	# ---- job: chase the rival it can eat, else guard its leader
+	var home_tier: int = mini(lead.tier, HELPER_MAX_TIER)
+	var dl: float = m.flat_dist(h.pos, lead.pos)
+	var goal: Vector3 = h.pos
+	var moving := false
+	# ---- 1. protect: a smog cloud closing on my leader gets intercepted
+	var cloud: GameChar = null
+	if lead.tier <= HELPER_MAX_TIER:
+		var cd := HELPER_GUARD_R
+		for n in g.npcs:
+			if n.kind == "co2" and n.alive and n.co_timer <= 0.0 and n.tier == lead.tier:
+				var d2: float = m.flat_dist(lead.pos, n.pos)
+				if d2 < cd:
+					cd = d2
+					cloud = n
+	# ---- 2. harass: the rival I can eat, while it is in my leader's area
 	var target: GameChar = null
 	var tel: String = g._prey_of(h.el)
-	if tel != team:
-		var bd := 1.0e20
+	if cloud == null and tel != team:
+		var bd := HELPER_HUNT_R
 		for a in g.by_el.get(tel, []):
 			if not a.alive or a.busy != m.BUSY_NONE or a.tier > HELPER_MAX_TIER:
 				continue
 			if a.tier == 0 and g.inside_own_cave(a):
 				continue
-			var d: float = m.flat_dist(h.pos, a.pos) + (0.0 if a.tier == h.tier else 12.0)
+			var d: float = m.flat_dist(lead.pos, a.pos) + (0.0 if a.tier == lead.tier else 8.0)
 			if d < bd:
 				bd = d
 				target = a
-	var anchor: GameChar = target if target != null else lead
-	var anchor_tier: int = mini(anchor.tier, HELPER_MAX_TIER) if tel != team else anchor.tier
-	var goal: Vector3 = anchor.pos
-	if target != null:
+	var want_tier := home_tier
+	var leap_to: GameChar = lead
+	var leap_r := 4.5
+	if cloud != null:
+		goal = cloud.pos
+		moving = true
+		leap_r = 2.4
+		st["come"] = false
+	elif target != null:
+		want_tier = target.tier
+		leap_to = target
+		leap_r = 2.4
+		moving = true
+		st["come"] = false
 		if float(st["tag_cd"]) > 0.0:
 			var oa: float = m.elapsed * 2.2 + float(st["phase"])        # circle the rival between darts
 			goal = target.pos + Vector3(cos(oa), 0.0, sin(oa)) * 3.2
-		elif h.tier == target.tier and m.flat_dist(h.pos, target.pos) < 2.0:
-			_helper_tag(h, target)
-	else:
-		var cloud: GameChar = null
-		var cd := 13.0
-		for n in g.npcs:
-			if n.kind == "co2" and n.alive and n.co_timer <= 0.0 and n.tier == lead.tier and n.tier == h.tier:
-				var d2: float = m.flat_dist(lead.pos, n.pos)
-				if d2 < cd:
-					cd = d2
-					cloud = n
-		if cloud != null:
-			goal = cloud.pos                                            # throw itself at the smog
 		else:
-			var ga: float = m.elapsed * 1.4 + float(st["phase"])
-			goal = lead.pos + Vector3(cos(ga), 0.0, sin(ga)) * 2.6
-	# ---- on another tier, far away or stuck at an edge: leap to the anchor
-	if (h.tier != anchor_tier or m.flat_dist(h.pos, anchor.pos) > 28.0 or float(st["stuck"]) > 0.8) and float(st["leap_cd"]) <= 0.0:
-		if h.tier != anchor_tier or anchor_tier == anchor.tier:
-			_helper_leap(h, anchor, anchor_tier)
-			return
-	if h.tier != anchor.tier:
-		h.vel = Vector3.ZERO           # a hunter whose leader climbed past tier 2 waits below
+			goal = target.pos
+			if h.tier == target.tier and m.flat_dist(h.pos, target.pos) < 2.0:
+				_helper_tag(h, target)
+	else:
+		# ---- 3. otherwise keep a loose distance: wait here, and only trot closer once the
+		# leader is well away (then stop short of them again)
+		if dl > HELPER_LEASH:
+			st["come"] = true
+		elif dl < HELPER_REST:
+			st["come"] = false
+		if bool(st.get("come", false)) and lead.tier == h.tier:
+			goal = lead.pos
+			moving = true
+	# ---- leap: onto the right tier, to a leader who got far ahead (a vent, a fall), to a
+	# cloud it could not reach in time on foot, or out of a spot it is stuck in
+	var far: bool = m.flat_dist(h.pos, leap_to.pos) > 30.0
+	if cloud != null:
+		far = dl > 8.0 and m.flat_dist(h.pos, cloud.pos) > 12.0
+	var stuck: bool = float(st["stuck"]) > 0.8
+	if stuck and cloud == null and target == null:
+		st["come"] = false           # idle and blocked (a gap, someone's private vine): just wait here
+		st["stuck"] = 0.0
+		stuck = false
+	if (h.tier != want_tier or far or stuck) and float(st["leap_cd"]) <= 0.0:
+		_helper_leap(h, leap_to, want_tier, leap_r)
+		return
+	if h.tier != want_tier or not moving:
+		h.vel = Vector3.ZERO
+		h.pos.y = float(h.tier) * SkyLayout.SPIRE_TIER_H
 		return
 	var to := Vector3(goal.x - h.pos.x, 0.0, goal.z - h.pos.z)
 	var dist := to.length()
@@ -499,17 +589,22 @@ func _update_helper(h: GameChar, dt: float) -> void:
 			st["stuck"] = float(st["stuck"]) + dt
 	h.pos.y = float(h.tier) * SkyLayout.SPIRE_TIER_H
 
-func _helper_leap(h: GameChar, anchor: GameChar, to_tier: int) -> void:
-	var a := randf() * TAU
-	var p := Vector3(anchor.pos.x + cos(a) * 2.4, 0.0, anchor.pos.z + sin(a) * 2.4)
+func _helper_leap(h: GameChar, anchor: GameChar, to_tier: int, near: float = 2.4) -> void:
+	var p := Vector3(anchor.pos.x, 0.0, anchor.pos.z)
 	if to_tier == 0:
-		if not SkyLayout.on_ground(p.x, p.z, h.el, m.vines_mask(), 0.0) or (p.x * p.x + p.z * p.z) < 20.6 * 20.6:
-			p = Vector3(anchor.pos.x, 0.0, anchor.pos.z)
+		# a spot `near` metres from the anchor that is solid ground (else right beside it)
+		for _i in 8:
+			var a := randf() * TAU
+			var q := Vector3(anchor.pos.x + cos(a) * near, 0.0, anchor.pos.z + sin(a) * near)
+			if SkyLayout.on_ground(q.x, q.z, h.el, m.vines_mask(), -0.4) and (q.x * q.x + q.z * q.z) > 20.6 * 20.6:
+				p = q
+				break
 	else:
-		var r := maxf(0.01, sqrt(p.x * p.x + p.z * p.z))
-		var k := clampf(r, SkyLayout.tier_inner(to_tier) + 0.7, SkyLayout.tier_outer(to_tier) - 0.7) / r
-		p.x *= k
-		p.z *= k
+		# on a terrace: `near` metres round the ring from the anchor
+		var ang := SkyLayout.ang_of(anchor.pos.x, anchor.pos.z)
+		var r := clampf(maxf(0.01, m.radius(anchor.pos)), SkyLayout.tier_inner(to_tier) + 0.7, SkyLayout.tier_outer(to_tier) - 0.7)
+		var p2 := SkyLayout.pol(ang + rad_to_deg(near / r) * (1.0 if randf() < 0.5 else -1.0), r)
+		p = Vector3(p2.x, 0.0, p2.y)
 	p.y = float(to_tier) * SkyLayout.SPIRE_TIER_H
 	m._launch(h, p, to_tier, 0.55, 2.6)
 	h.ai["leap_cd"] = 2.5
@@ -579,7 +674,7 @@ func ground_errand(ch: GameChar) -> Dictionary:
 			var bd := 1.0e20
 			for i in cages.size():
 				var c: Dictionary = cages[i]
-				if String(c["el"]) == "":
+				if String(c["el"]) == "" or not can_free(c["el"], t) or not cage_unlocked(i, t):
 					continue
 				var cp: Vector3 = c["pos"]
 				if m.radius(cp) > m.smog_goal() - 3.0:
@@ -672,7 +767,7 @@ func channel(p: GameChar) -> Array:
 func task_text(el: String) -> String:
 	match int(active[el]):
 		1:
-			return "Tier 1 task: free a caged friend — cages are the squares on the radar"
+			return "Tier 1 task: free a caged friend — the filled squares on the radar are cages you can open"
 		2:
 			return "Tier 2 task: light the lighthouse on Beacon Isle — stand in its ring for %d s" % int(BEACON_TIME)
 		3:
@@ -715,11 +810,17 @@ func hint(p: GameChar) -> Array:
 			return ["", "Touch the task stone with the Sun Key"]
 		return ["", task_text(el)]
 	if p.tier == 0:
-		for c in cages:
+		for ci in cages.size():
+			var c: Dictionary = cages[ci]
 			if m.flat_dist(p.pos, c["pos"]) < m.HINT_REACH:
 				if String(c["el"]) == "":
 					return ["", "This cage is empty — a new friend arrives in %ds" % int(ceil(float(c["refill"])))]
-				return ["E" if keys else "", "Free the little %s — it will %s%s" % [g.ELEMENTS[c["el"]]["label"], helper_job(c["el"], el), "" if keys else " (stand beside the cage)"]]
+				if not can_free(c["el"], el):
+					return ["", "A little %s. %s eats %s, so it will not come with you — look for another cage" % [
+						g.ELEMENTS[c["el"]]["label"], g.ELEMENTS[c["el"]]["label"], g.ELEMENTS[el]["label"]]]
+				if not cage_unlocked(ci, el):
+					return ["", "Locked. This cage opens once %s — the cages on the wild isles are open from the start" % CAGE_NEED_TEXT[cage_need(ci)]]
+				return ["E" if keys else "", "Free the %slittle %s — it will %s%s" % ["sturdy " if cage_need(ci) >= STURDY_NEED else "", g.ELEMENTS[c["el"]]["label"], helper_job(c["el"], el), "" if keys else " (stand beside the cage)"]]
 		if int(key_state[el]) == 1 and m.flat_dist(p.pos, key_pos[el]) < m.HINT_REACH + 2.0:
 			return ["", "The Sun Key — touch it, then carry it back up to the tier 3 task stone"]
 		if me.distance_to(beacon_pos()) < m.HINT_REACH + 1.0:
@@ -742,10 +843,12 @@ func locked_text(el: String, k: int) -> String:
 	return "Locked. Tier %d has a task first — read the task stone on this terrace" % k
 
 func radar_blips(blips: Array, el: String, tier: int) -> void:
-	for c in cages:
+	for i in cages.size():
+		var c: Dictionary = cages[i]
 		if String(c["el"]) != "":
 			var cp: Vector3 = c["pos"]
-			blips.append({ "pos": Vector2(cp.x, cp.z), "color": MeshLib.rgb(g.ELEMENTS[c["el"]]["color"]), "o2": false, "shape": "cage" })
+			blips.append({ "pos": Vector2(cp.x, cp.z), "color": MeshLib.rgb(g.ELEMENTS[c["el"]]["color"]), "o2": false,
+				"shape": "cage" if (can_free(c["el"], el) and cage_unlocked(i, el)) else "cage_shut" })
 	var gold := Color(0.98, 0.76, 0.18)
 	if int(key_state[el]) == 1:
 		var kp: Vector3 = key_pos[el]

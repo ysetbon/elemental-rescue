@@ -161,20 +161,30 @@ is served next to the web build (a Godot re-export leaves those files alone).
   open after you are knocked down. Rivals do the same tasks. If the smog sea has
   already swallowed a task's isle, the Sun Key drifts to safe ground and the beacon
   task is waived. A wind chime on each terrace mends one heart for a hurt climber.
-- **Caged friends.** Seven cages (two on Roost Rock, one on each wild isle, two
+- **Caged friends.** Eight cages (two on Roost Rock, one on each wild isle, three
   against the spire wall on Heart Isle) each hold a small elemental; an opened cage
-  refills after 30 s. Open one (**E**, or stand beside it) and the little one works
-  for you — it can be your own element or another:
-  - if it **can eat one of your rivals** it hunts that rival: it circles them and
-    darts in every few seconds to slow them (a Leaf who frees a Water gets a
-    Fire-chaser);
-  - otherwise it **guards you**: it stays at your side and throws itself at smog
-    clouds, spending their oxygen.
+  refills after 30 s. They do not all open at once:
+  - the three on the **wild isles** are a side quest — open from the start, even
+    before your Spark is lit;
+  - the three on **Heart Isle** (one of each element) open once your Spark is lit;
+  - **Roost Rock**'s two open after the tier 1 and the tier 2 task, and hold a
+    sturdier friend (it soaks one more cloud and stays longer).
+
+  A sign floats over a cage that is still locked for you. Open one (**E**, or stand beside it) and the little one works
+  for you. It can be your own element or the one you catch — but **not the element
+  that eats you**: a little Fire will not come with a Leaf (those cages show as a
+  thin outline on the radar instead of a filled square, as do locked ones). A helper:
+  - **protects you** — a smog cloud that comes near you is intercepted and its
+    oxygen spent;
+  - **harasses the rival it can eat** whenever that rival is in your area: it
+    circles them and darts in every few seconds to slow them (a Leaf who frees a
+    Water gets a Fire-chaser);
+  - otherwise **keeps its distance** — it waits where it is and only trots closer
+    once you are well away, so it is not under your feet.
 
   You can have two at a time. A helper lasts 90 s, or until it has soaked two smog
-  clouds, or until a rival that eats its element touches it. Hunters, like the
-  smog, cannot follow above tier 2. Cages show as squares on the radar; task
-  targets as gold diamonds.
+  clouds, or until a rival that eats its element touches it. Helpers, like the
+  smog, do not climb above tier 2. Task targets show as gold diamonds on the radar.
 - **Ring.** Stand in the glowing ring on the top platform for 2 s to ring the bell.
   It swings for 4 s after any ring. First to three rings wins; at 8:00 the highest
   Spark wins.

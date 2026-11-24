@@ -5416,7 +5416,8 @@ func _sky_debug_setup() -> void:
 			var bd := 1.0e20
 			for i in sky.quests.cages.size():
 				var cg: Dictionary = sky.quests.cages[i]
-				if String(cg["el"]) != "" and player.pos.distance_to(cg["pos"]) < bd:
+				if String(cg["el"]) != "" and sky.quests.can_free(cg["el"], player.el) and sky.quests.cage_unlocked(i, player.el) \
+						and player.pos.distance_to(cg["pos"]) < bd:
 					bd = player.pos.distance_to(cg["pos"]); bi = i
 			if bi >= 0:
 				sky.quests._free_cage(bi, player)
