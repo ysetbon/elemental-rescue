@@ -516,6 +516,7 @@ func _build_hud() -> void:
 	status_label.text = ""
 	cave_label = _pill(v)
 	cave_label.visible = false
+	(cave_label.get_parent() as Control).visible = false   # no empty pill until there is text
 
 	# channel bar (self-training / clan teaching progress)
 	channel_box = _pill_panel(v)

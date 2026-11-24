@@ -296,9 +296,7 @@ func constrain(ch: GameChar) -> void:
 				ch.in_ramp = false
 				_enter_tier(ch, k)
 			else:
-				nr = R
-				if insec:
-					ch.in_ramp = true
+				nr = R                           # a wall (only a stair you stepped onto at its foot leads up)
 		elif nr <= R + run and insec:
 			if not ch.in_ramp:
 				if nr >= R + run - SkyLayout.SPIRE_RAMP_MOUTH:
@@ -398,7 +396,7 @@ func on_hit(victim: GameChar, attacker: GameChar) -> void:
 		victim.tier = nt
 		victim.tier_at = elapsed
 		victim.pos = Vector3(p.x, 0.0, p.y)
-		victim.in_ramp = SkyLayout.in_wedge(nt, p.x, p.y)
+		victim.in_ramp = SkyLayout.in_wedge(nt, p.x, p.y) and (nt > 0 or lit(victim.el))
 		victim.pos.y = SkyLayout.height_at(nt, p.x, p.y)
 		victim.vel = Vector3.ZERO
 		if victim.is_player and g.ui:
@@ -503,8 +501,7 @@ func _tick_actor(ch: GameChar, dt: float) -> void:
 		ch.smog_t = 0.0
 	if ch.tier == 0:
 		_tick_pickup(ch)
-		if ch.el == "fire":
-			_tick_vent(ch, dt)
+		_tick_vent(ch, dt)
 	_tick_pad(ch, dt)
 	_tick_bell(ch, dt)
 
@@ -562,9 +559,13 @@ func _tick_vent(ch: GameChar, dt: float) -> void:
 	if dh < SkyLayout.VENT_R or dc < SkyLayout.VENT_R:
 		ch.vent_t += dt
 		if ch.vent_t >= SkyLayout.VENT_DWELL:
-			_stat("vent_flights")
 			ch.vent_t = 0.0
 			ch.vent_lock = true
+			if ch.el != "fire":
+				# only Fire rides the thermal — everyone else just gets a puff and a small hop
+				_launch(ch, ch.pos, 0, 0.5, 1.5)
+				return
+			_stat("vent_flights")
 			var to: Vector2 = SkyLayout.VENT_HEART if dh < dc else SkyLayout.VENT_HOME
 			_launch(ch, Vector3(to.x, 0.0, to.y), 0, SkyLayout.VENT_FLIGHT, 16.0)
 			if ch.is_player and g.ui:
