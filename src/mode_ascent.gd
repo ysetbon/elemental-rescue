@@ -617,7 +617,7 @@ func _on_ring_event(el: String, n: int) -> void:
 		view.ring_bell()
 	if g.ui:
 		var mine: bool = g.player != null and g.player.el == el
-		g.ui.toast("🔔 %s rang the Sky Bell!  %d / %d" % [("You" if mine and g.mode == g.Mode.SINGLE else g.ELEMENTS[el]["label"]), n, BELL_RINGS_TO_WIN])
+		g.ui.toast("%s rang the Sky Bell!  %d / %d" % [("You" if mine and g.mode == g.Mode.SINGLE else g.ELEMENTS[el]["label"]), n, BELL_RINGS_TO_WIN])
 
 func _tick_seeds(dt: float) -> void:
 	for i in SkyLayout.SEEDS.size():
@@ -709,12 +709,12 @@ func _announce() -> void:
 	var ec := eclipse_active()
 	if ec != _last_eclipse:
 		_last_eclipse = ec
-		g.ui.toast("🌑 ECLIPSE! The food chain is REVERSED for %ds" % int(ECLIPSE_TIME) if ec else "The eclipse has passed — the chain is back to normal")
+		g.ui.toast("ECLIPSE! The food chain is REVERSED for %ds" % int(ECLIPSE_TIME) if ec else "The eclipse has passed — the chain is back to normal")
 	var idx := smog_idx()
 	if idx != _last_rise:
 		_last_rise = idx
 		if idx > 0:
-			g.ui.toast("☁ The smog sea rises!  Safe ground shrinks to %dm" % int(smog_goal()))
+			g.ui.toast("The smog sea rises!  Safe ground shrinks to %dm" % int(smog_goal()))
 
 var _dbg_t := 0.0
 var _trace := OS.has_environment("ASCENT_LOG")
@@ -773,7 +773,7 @@ func _finish(winner_el: String, reason: String) -> void:
 		standings.append({
 			"el": el, "score": (10000 if el == winner_el else 0) + int(s["rings"]) * 100 + int(s["tier"]) * 10 + int(motes_el[el]),
 			"winner": el == winner_el,
-			"detail": "🔔 %d   ·   tier %d   ·   motes %d" % [int(s["rings"]), int(s["tier"]), int(motes_el[el])],
+			"detail": "bell %d/%d   ·   tier %d   ·   motes %d" % [int(s["rings"]), BELL_RINGS_TO_WIN, int(s["tier"]), int(motes_el[el])],
 		})
 	print("[ascent] round over at %s — %s wins (%s)  rings=%s motes=%s  stats=%s" % [
 		g._fmt_time(elapsed), winner_el, reason, str(rings_el), str(motes_el), str(stats)])
@@ -1212,28 +1212,31 @@ func _update_hud() -> void:
 	if p.busy == BUSY_FALL:
 		obj = "Falling through the clouds…"
 	ui.set_objective(obj)
-	var pips := ""
-	for i in ASCENT_MOTES_NEEDED:
-		pips += "●" if i < n else "○"
-	var s := "Motes %s   ·   Tier %d/%d   ·   Bell %d/%d" % [pips, k, SPIRE_TIERS, int(rings_el[el]), BELL_RINGS_TO_WIN]
+	# (no emoji / symbol glyphs in HUD text: the web build's font has none — the mote
+	# pips are real drawn dots, see GameUI.set_mote_pips)
+	ui.set_mote_pips(n, ASCENT_MOTES_NEEDED, MeshLib.rgb(GameUI.UI_COLORS[el]))
+	var s := "Tier %d/%d   ·   Bell %d/%d" % [k, SPIRE_TIERS, int(rings_el[el]), BELL_RINGS_TO_WIN]
 	if g.o2_charges > 0:
 		s += "   ·   Breeze %d/%d" % [g.o2_charges, g.O2_CHARGE_CAP]
 	if g._is_disguised():
-		s += "   ·   🖤 Shard %ds" % int(ceil(g.disguise_timer))
+		s += "   ·   Shard %ds" % int(ceil(g.disguise_timer))
 	ui.set_status(s)
 	ui.set_hearts(p.hp, maxi(p.max_hp, p.hp))
+	# the role line follows the chain: it flips for the 15 s of an eclipse
+	ui.set_role("%s: %s — catch %s, flee %s" % ["ECLIPSE" if eclipse_active() else "You", g.ELEMENTS[el]["label"],
+		g.ELEMENTS[g._prey_of(el)]["label"], g.ELEMENTS[g._pred_of(el)]["label"]])
 	# clocks
 	var ec := eclipse_active()
 	var etxt := ("ECLIPSE!  CHAIN REVERSED  %s" % g._fmt_time(ceil(eclipse_left()))) if ec else ("ECLIPSE IN  %s" % g._fmt_time(ceil(eclipse_in())))
 	var nr := next_rise_in()
 	var stxt := ("SMOG RISES IN  %s   ·   safe %dm" % [g._fmt_time(ceil(nr)), int(smog_goal())]) if nr >= 0.0 else "SMOG SEA AT ITS PEAK"
 	if radius(p.pos) > smog_r() and p.tier == 0 and p.busy == BUSY_NONE:
-		stxt = "⚠ IN THE SMOG — a heart every %ds!" % int(SMOG_HIT_EVERY)
+		stxt = "IN THE SMOG — a heart every %ds!" % int(SMOG_HIT_EVERY)
 	ui.set_sky_info(g._fmt_time(ceil(time_left())), etxt, ec, stxt)
 	var entries: Array = []
 	for e in ELS:
 		entries.append({ "el": e, "label": g.ELEMENTS[e]["label"], "score": 0, "alive": true, "me": e == el,
-			"text": "%s  T%d  🔔%d" % [g.ELEMENTS[e]["label"], int(tier_el[e]), int(rings_el[e])] })
+			"text": "%s  T%d · %d/%d" % [g.ELEMENTS[e]["label"], int(tier_el[e]), int(rings_el[e]), BELL_RINGS_TO_WIN] })
 	ui.set_board(entries)
 	ui.radar.sky_smog_r = smog_r()
 	ui.radar.sky_el = el

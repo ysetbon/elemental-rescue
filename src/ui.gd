@@ -30,6 +30,8 @@ var sky_clock: Label = null
 var sky_eclipse: Label = null
 var sky_smog: Label = null
 var whiteout: ColorRect = null           # Skyfall Isles: falling through the clouds
+var mote_row: HBoxContainer = null       # Skyfall Isles: "Sun Motes" + one drawn pip per mote
+var _mote_state := Vector3i(-1, -1, -1)
 var end_root: Control
 var hud_root: Control
 var radar: RadarControl
@@ -489,6 +491,11 @@ func _build_hud() -> void:
 	skv.add_child(sky_eclipse)
 	sky_smog = _make_label_left("", 12, _c(0x6c6578))
 	skv.add_child(sky_smog)
+	# Sun Mote pips: drawn dots, not glyphs (the web build's font has no symbol glyphs)
+	mote_row = HBoxContainer.new()
+	mote_row.add_theme_constant_override("separation", 6)
+	skv.add_child(mote_row)
+	mote_row.add_child(_make_label_left("Sun Motes", 12))
 
 	# hearts = a row of little element-figure icons (filled = colour, empty = faded)
 	var hearts_pill := _pill_panel(v)
@@ -941,11 +948,36 @@ func set_sky_info(clock: String, eclipse: String, eclipse_on: bool, smog: String
 	if sky_box == null:
 		return
 	sky_box.visible = true
-	sky_clock.text = "⏱ " + clock
-	sky_eclipse.text = ("🌑 " if eclipse_on else "☀ ") + eclipse
+	sky_clock.text = "TIME  " + clock
+	sky_eclipse.text = eclipse
 	sky_eclipse.add_theme_color_override("font_color", _c(0xd0392b) if eclipse_on else _c(0x6b4fb3))
-	sky_smog.text = "☁ " + smog
+	sky_smog.text = smog
 
 func set_whiteout(a: float) -> void:
 	if whiteout:
 		whiteout.color.a = clampf(a, 0.0, 1.0)
+
+# Skyfall Isles: n of `total` Sun Motes absorbed — filled pips in the element's colour.
+func set_mote_pips(n: int, total: int, col: Color) -> void:
+	if mote_row == null:
+		return
+	var key := Vector3i(n, total, int(col.to_rgba32() & 0x7fffffff))
+	if key == _mote_state:
+		return
+	_mote_state = key
+	while mote_row.get_child_count() > 1:
+		var c := mote_row.get_child(mote_row.get_child_count() - 1)
+		mote_row.remove_child(c)
+		c.queue_free()
+	for i in total:
+		var pip := Panel.new()
+		pip.custom_minimum_size = Vector2(13, 13)
+		pip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sb := StyleBoxFlat.new()
+		sb.set_corner_radius_all(7)
+		sb.set_border_width_all(2)
+		sb.border_color = col.darkened(0.15)
+		sb.bg_color = col if i < n else Color(col.r, col.g, col.b, 0.12)
+		pip.add_theme_stylebox_override("panel", sb)
+		mote_row.add_child(pip)

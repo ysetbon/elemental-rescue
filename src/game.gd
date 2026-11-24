@@ -4934,7 +4934,7 @@ func _show_end_screen(reason: String, winner_el: String, standings: Array) -> vo
 	if reason == "ascent" or reason == "ascent_time":
 		var how := "rang the Sky Bell three times" if reason == "ascent" else "held the highest Spark when the clock ran out"
 		if winner_el == local_el:
-			title = "You win!  🔔"
+			title = "You win!"
 			sub = "You %s." % how
 		else:
 			title = "%s wins!" % ELEMENTS[winner_el]["label"]
