@@ -473,6 +473,10 @@ func _build_banner_leaves() -> void:
 		ti += 1
 
 # ------------------------------------------------------------------- setup
+func _exit_tree() -> void:
+	if sky != null:
+		sky.dispose()
+
 func _ready() -> void:
 	if OS.get_cmdline_user_args().has("testclient"):
 		_ready_testclient()   # dev hook: headless lobby smoke-test (see _ready_testclient)
@@ -847,6 +851,8 @@ func _rebuild_world(world_seed: int) -> void:
 	deco_anims.clear()
 	wind_leaves.clear()
 	seed(world_seed)
+	if sky != null:
+		sky.dispose()
 	sky = null
 	sky_view = null
 	if world_kind == "sky":

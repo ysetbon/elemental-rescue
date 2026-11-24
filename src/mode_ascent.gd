@@ -93,6 +93,13 @@ func _init(game) -> void:
 	SkyLayout.ensure()
 	quests = SkyQuests.new(self)
 
+# ModeAscent and SkyQuests point at each other; cut the loop when the world is torn down
+func dispose() -> void:
+	if quests != null:
+		quests.m = null
+		quests.g = null
+	view = null
+
 # ------------------------------------------------------------------ clocks
 func eclipse_active() -> bool:
 	return elapsed >= ECLIPSE_EVERY and fmod(elapsed, ECLIPSE_EVERY) < ECLIPSE_TIME
